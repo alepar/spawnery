@@ -216,4 +216,22 @@ describe("Sidebar", () => {
     await userEvent.type(input, "Renamed{Enter}");
     expect(actions.onRename).toHaveBeenCalledWith("a", "Renamed");
   });
+
+  it("renders a GitHub credential badge only for a degraded condition", () => {
+    const s: SpawnView[] = [
+      { spawnId: "g1", name: "Relink", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, githubCredentialStatus: "relink_required" },
+      { spawnId: "g2", name: "Stale", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, githubCredentialStatus: "stale" },
+      { spawnId: "g3", name: "Fine", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, githubCredentialStatus: "ok" },
+      { spawnId: "g4", name: "NoGit", appId: "spawnery/wiki", status: "active", mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0 },
+    ];
+    render(<Sidebar nav={spawnNav("g1")} navigate={vi.fn()} spawns={s} actions={noopActions} />);
+
+    expect(screen.getByTestId("spawn-github-cred-g1").textContent).toBe("relink GitHub");
+    expect(screen.getByTestId("spawn-github-cred-g2").textContent).toBe("token stale");
+    // ok and unreported render nothing — a badge for a healthy spawn is just noise.
+    expect(screen.queryByTestId("spawn-github-cred-g3")).toBeNull();
+    expect(screen.queryByTestId("spawn-github-cred-g4")).toBeNull();
+    // The condition must not disturb the lifecycle dot: the spawn is still active.
+    expect(screen.getByTestId("spawn-dot-g1").getAttribute("data-status")).toBe("active");
+  });
 });

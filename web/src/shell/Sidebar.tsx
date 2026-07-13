@@ -93,6 +93,13 @@ export function Sidebar({ nav, navigate, spawns = [], actions }: {
   );
 }
 
+// GITHUB_CRED_BADGE: the label for a degraded GitHub credential condition (sp-2tx8.9 §4.1). "ok" and
+// an unreported condition render NOTHING — the badge exists to surface a problem, not a healthy state.
+const GITHUB_CRED_BADGE: Record<string, string> = {
+  stale: "token stale",
+  relink_required: "relink GitHub",
+};
+
 function SpawnRow({ spawn, active, actions, parentName }: { spawn: SpawnView; active: boolean; actions?: SpawnActions; parentName: string }) {
   const [menu, setMenu] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
@@ -157,6 +164,15 @@ function SpawnRow({ spawn, active, actions, parentName }: { spawn: SpawnView; ac
               onDoubleClick={(e) => { e.stopPropagation(); startEdit(); }}
             >
               {spawn.name || spawn.appId}
+            </span>
+          )}
+          {GITHUB_CRED_BADGE[spawn.githubCredentialStatus ?? "none"] && (
+            <span
+              data-testid={`spawn-github-cred-${spawn.spawnId}`}
+              title="The spawn's GitHub credential is not usable; git operations will fail. Everything else still works."
+              className="shrink-0 rounded bg-amber-500/20 px-1 text-xs text-amber-600"
+            >
+              {GITHUB_CRED_BADGE[spawn.githubCredentialStatus ?? "none"]}
             </span>
           )}
         </span>
