@@ -26,6 +26,13 @@ type skillMarker struct {
 	ProfileID      string `json:"profileId,omitempty"`
 	ProfileVersion string `json:"profileVersion,omitempty"`
 	InstalledBy    string `json:"installedBy"`
+	// Source* record the skill's untrusted-external provenance (sp-mwco.2.8 §4.6), mirroring
+	// spec.SkillSource; omitted (no source keys) when the skill has no Source (operator-authored
+	// custom/inline content).
+	SourceURL    string `json:"sourceUrl,omitempty"`
+	SourceRef    string `json:"sourceRef,omitempty"`
+	SourceCommit string `json:"sourceCommit,omitempty"`
+	SourceSubdir string `json:"sourceSubdir,omitempty"`
 }
 
 // writeMarker writes the ownership marker into dir.

@@ -402,6 +402,22 @@ func (s *Server) RemoveProfileEntry(ctx context.Context, req *connect.Request[cp
 	return connect.NewResponse(&cpv1.RemoveProfileEntryResponse{Version: newVer}), nil
 }
 
+// --- UpdateProfileEntry -----------------------------------------------------
+
+// UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): it changes an
+// entry's targets and disabled off-switch in place, preserving entry_id and every other column.
+// kind/name/source/catalog_id/bundle pin are not in the request and are never touched.
+func (s *Server) UpdateProfileEntry(ctx context.Context, req *connect.Request[cpv1.UpdateProfileEntryRequest]) (*connect.Response[cpv1.UpdateProfileEntryResponse], error) {
+	if _, err := s.ownProfile(ctx, req.Msg.ProfileId); err != nil {
+		return nil, err
+	}
+	newVer, err := s.st.Profiles().UpdateEntry(ctx, req.Msg.ProfileId, req.Msg.ExpectedVersion, req.Msg.EntryId, req.Msg.Targets, req.Msg.Disabled, time.Now().Unix())
+	if err != nil {
+		return nil, mapProfileErr(err)
+	}
+	return connect.NewResponse(&cpv1.UpdateProfileEntryResponse{Version: newVer}), nil
+}
+
 // --- AddProfileSecretRef ---------------------------------------------------
 
 func (s *Server) AddProfileSecretRef(ctx context.Context, req *connect.Request[cpv1.AddProfileSecretRefRequest]) (*connect.Response[cpv1.AddProfileSecretRefResponse], error) {
@@ -446,6 +462,26 @@ func (s *Server) profileToProto(ctx context.Context, p store.Profile, entries []
 			CustomInline:  e.CustomInline,
 			Targets:       e.Targets,
 			McpSecretRefs: e.MCPSecretRefs,
+			Disabled:      e.Disabled,
+		}
+		// Provenance (sp-mwco.2.8 §4.6): a server-side join from the entry's catalog row, so the
+		// SPA never has to N+1 GetCatalogEntry. A bundle_ref entry's provenance is left empty here
+		// (its members' provenance is the bundle card's job — sp-mwco.1.9); a missing catalog row
+		// is NOT fatal (empty provenance, not an error) — the entry may reference a since-deleted row.
+		if e.SourceKind == store.ProfileSourceCatalog {
+			ce, err := s.st.CustomizationCatalog().Get(ctx, e.CatalogID)
+			if err == nil {
+				if ce.SourceURL != "" {
+					pe.Provenance = &cpv1.SkillProvenance{
+						SourceUrl:    ce.SourceURL,
+						SourceRef:    ce.SourceRef,
+						SourceCommit: ce.SourceCommit,
+						SourceSubdir: ce.SourceSubdir,
+					}
+				}
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeInternal, err)
+			}
 		}
 		if e.SourceKind == store.ProfileSourceBundle {
 			pe.BundleId = e.BundleID

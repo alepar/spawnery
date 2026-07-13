@@ -61,6 +61,10 @@ service SpawnService {
   rpc DeleteProfile(DeleteProfileRequest)               returns (DeleteProfileResponse);
   rpc AddProfileEntry(AddProfileEntryRequest)           returns (AddProfileEntryResponse);
   rpc RemoveProfileEntry(RemoveProfileEntryRequest)     returns (RemoveProfileEntryResponse);
+  // UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): targets and the
+  // disabled off-switch, in place, preserving entry_id. kind/name/source/catalog_id/bundle pin
+  // are immutable through it — not even present in the request.
+  rpc UpdateProfileEntry(UpdateProfileEntryRequest)     returns (UpdateProfileEntryResponse);
   rpc AddProfileSecretRef(AddProfileSecretRefRequest)   returns (AddProfileSecretRefResponse);
   rpc RemoveProfileSecretRef(RemoveProfileSecretRefRequest) returns (RemoveProfileSecretRefResponse);
   // User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
@@ -690,6 +694,24 @@ message ProfileEntry {
   int64             pinned_seq       = 13;
   int64             latest_seq       = 14;
   int32             member_count     = 15;
+  // disabled is the per-entry off switch (sp-mwco.2.8 §4.6): a disabled entry is skipped
+  // entirely at profile assembly — no manifest artifact, no payload, installed nowhere, for any
+  // agent. Orthogonal to targets: disabling does not clear/rewrite targets, so re-enabling
+  // restores the entry's prior per-agent scope.
+  bool              disabled         = 16;
+  // provenance is OUTPUT-ONLY: server-filled by GetProfile from the entry's catalog row (a
+  // catalog_ref skill entry only; empty for custom/bundle_ref entries), ignored on write. Empty
+  // when the referenced catalog row has no source (inline entry) or is missing.
+  SkillProvenance   provenance       = 17;
+}
+
+// SkillProvenance is the untrusted-external provenance of a skill, surfaced to the profile owner
+// (sp-mwco.2.8 §4.6). Empty/zero for operator-authored (custom/inline) content.
+message SkillProvenance {
+  string source_url    = 1;
+  string source_ref    = 2;
+  string source_commit = 3;
+  string source_subdir = 4;
 }
 
 // Profile is the full profile view including its entries and attached secret ids.
@@ -735,6 +757,12 @@ message AddProfileEntryResponse { string entry_id = 1; uint64 version = 2; repea
 // RemoveProfileEntry removes an entry by entry_id, CAS-fenced.
 message RemoveProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; string entry_id = 3; }
 message RemoveProfileEntryResponse { uint64 version = 1; }
+
+// UpdateProfileEntry CAS-updates an entry's targets + disabled off-switch in place, preserving
+// entry_id (sp-mwco.2.8 §4.6). Scoping-only: kind/name/source/catalog_id/bundle pin are not in
+// the request and are never touched.
+message UpdateProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; string entry_id = 3; repeated string targets = 4; bool disabled = 5; }
+message UpdateProfileEntryResponse { uint64 version = 1; }
 
 // AddProfileSecretRef attaches a secret reference to the profile, CAS-fenced.
 message AddProfileSecretRefRequest  { string profile_id = 1; uint64 expected_version = 2; string secret_id = 3; }

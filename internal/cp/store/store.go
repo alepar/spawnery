@@ -223,6 +223,11 @@ type ProfileRepo interface {
 	// (sp-mwco.1.8 — RepinProfileBundle's store call). Returns ErrNotFound when the entry row is
 	// absent, or ErrConflict when expectedVersion is stale.
 	UpdateEntryPin(ctx context.Context, profileID string, expectedVersion uint64, entryID, versionID, overridesJSON string, now int64) (newVersion uint64, err error)
+	// UpdateEntry CAS-updates an entry's targets + disabled in place, preserving entry_id and
+	// every other column (kind/name/source/catalog_id/bundle pin) — a scoping-only mutation
+	// (sp-mwco.2.8 §4.6, UpdateProfileEntry's store call). Returns ErrNotFound when the entry row
+	// is absent, or ErrConflict when expectedVersion is stale.
+	UpdateEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, targets []string, disabled bool, now int64) (newVersion uint64, err error)
 	// RemoveEntry CAS-removes an entry. Returns ErrNotFound or ErrConflict.
 	RemoveEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, now int64) (newVersion uint64, err error)
 	// AddSecretRef CAS-adds a secret reference. Returns ErrNotFound or ErrConflict.

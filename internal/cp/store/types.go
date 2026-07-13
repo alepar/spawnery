@@ -335,6 +335,11 @@ type ProfileEntry struct {
 	BundleOverridesJSON string            `bun:"bundle_overrides,notnull"`
 	ExcludeSubdirs      []string          `bun:"-"` // decoded in repo
 	RenameSubdirs       map[string]string `bun:"-"` // decoded in repo
+	// Disabled is the per-entry off switch (sp-mwco.2.8 §4.6): a disabled entry is skipped
+	// entirely at profile assembly — no manifest artifact, no payload, installed nowhere, for
+	// any agent. Orthogonal to Targets: disabling does not clear/rewrite targets, so re-enabling
+	// restores the entry's prior per-agent scope.
+	Disabled bool `bun:"disabled,notnull"`
 }
 
 // ProfileSecret holds a reference from a Profile to a secret (schema-only;

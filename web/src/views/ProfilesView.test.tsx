@@ -29,6 +29,7 @@ vi.mock("@/api/profiles", () => ({
   deleteProfile: vi.fn().mockResolvedValue(undefined),
   addProfileEntry: vi.fn().mockResolvedValue({ entryId: "e2", version: 3, warnings: [] }),
   removeProfileEntry: vi.fn().mockResolvedValue({ version: 3 }),
+  updateProfileEntry: vi.fn().mockResolvedValue({ version: 3 }),
   listCatalogEntries: vi.fn().mockResolvedValue([
     { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL", name: "My Skill", description: "A test skill" },
   ]),
@@ -76,6 +77,8 @@ import {
   createProfile,
   getProfile,
   addProfileEntry,
+  removeProfileEntry,
+  updateProfileEntry,
   deleteProfile,
   listCatalogEntries,
   ingestSkillFromURL,
@@ -119,6 +122,7 @@ describe("ProfilesView", () => {
       versions: [{ versionId: "v1", seq: 1, sourceCommit: "1111111111111111111111111111111111aaaa" }],
       members: [{ catalogId: "cat-new", sourceSubdir: "skills/deep-research", name: "Deep Research", sha256: "aaaa", position: 0 }],
     });
+    vi.mocked(updateProfileEntry).mockResolvedValue({ version: 3 });
   });
 
   it("renders the profiles view root with data-testid=profiles", async () => {
@@ -551,5 +555,101 @@ describe("ProfilesView", () => {
     await userEvent.click(screen.getByTestId("bundle-card-attach-b1"));
     await waitFor(() => screen.getByTestId("bundle-attach-panel-b1"));
     expect(screen.getByText("skills/a")).toBeTruthy();
+  });
+
+  // --- Per-agent target toggle / disable (sp-mwco.2.8 §4.6) ------------------
+
+  it("toggling one agent calls updateProfileEntry once and never removeProfileEntry/addProfileEntry", async () => {
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("target-e1-claude"));
+
+    await userEvent.click(screen.getByTestId("target-e1-claude"));
+
+    await waitFor(() => expect(updateProfileEntry).toHaveBeenCalledTimes(1));
+    expect(updateProfileEntry).toHaveBeenCalledWith(
+      "p1", 2, "e1", expect.arrayContaining(["codex", "opencode", "hermes", "goose", "pi"]), false,
+    );
+    expect(removeProfileEntry).not.toHaveBeenCalled();
+    expect(addProfileEntry).not.toHaveBeenCalled();
+  });
+
+  it("unchecking the last remaining agent disables the entry; Enable restores it without touching targets", async () => {
+    vi.mocked(getProfile).mockResolvedValue({
+      profileId: "p1",
+      name: "My Profile",
+      version: 2,
+      entries: [
+        {
+          entryId: "e1",
+          kind: "PROFILE_ENTRY_KIND_SKILL" as const,
+          name: "My Skill",
+          source: "PROFILE_ENTRY_SOURCE_CATALOG_REF" as const,
+          catalogId: "cat1",
+          targets: ["claude"],
+        },
+      ],
+      secretIds: [],
+    });
+
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("target-e1-claude"));
+
+    // Unchecking the only active agent disables the entry, leaving targets untouched.
+    await userEvent.click(screen.getByTestId("target-e1-claude"));
+    await waitFor(() => expect(updateProfileEntry).toHaveBeenCalledWith("p1", 2, "e1", ["claude"], true));
+
+    // The row now renders muted with an "off" badge and an Enable control.
+    await waitFor(() => screen.getByTestId("entry-disabled-e1"));
+    const enableBtn = screen.getByTestId("entry-enable-e1");
+
+    await userEvent.click(enableBtn);
+    await waitFor(() => expect(updateProfileEntry).toHaveBeenLastCalledWith("p1", 3, "e1", ["claude"], false));
+  });
+
+  // --- Provenance line (sp-mwco.2.8 §4.6) -------------------------------------
+
+  it("renders source URL + short commit for a skill entry with provenance, and 'custom' without", async () => {
+    vi.mocked(getProfile).mockResolvedValue({
+      profileId: "p1",
+      name: "My Profile",
+      version: 2,
+      entries: [
+        {
+          entryId: "e1",
+          kind: "PROFILE_ENTRY_KIND_SKILL" as const,
+          name: "Provenance Skill",
+          source: "PROFILE_ENTRY_SOURCE_CATALOG_REF" as const,
+          catalogId: "cat1",
+          targets: [],
+          provenance: {
+            sourceUrl: "https://github.com/obra/superpowers",
+            sourceCommit: "1111111111111111111111111111111111aaaa",
+          },
+        },
+        {
+          entryId: "e2",
+          kind: "PROFILE_ENTRY_KIND_SKILL" as const,
+          name: "Custom Skill",
+          source: "PROFILE_ENTRY_SOURCE_CUSTOM" as const,
+          targets: [],
+        },
+      ],
+      secretIds: [],
+    });
+
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("entry-provenance-e1"));
+
+    expect(screen.getByTestId("entry-provenance-e1").textContent).toContain("https://github.com/obra/superpowers");
+    expect(screen.getByTestId("entry-provenance-e1").textContent).toContain("1111111");
+    expect(screen.getByTestId("entry-provenance-e1").textContent).not.toContain("1111111111111111111111111111111111aaaa");
+
+    expect(screen.getByTestId("entry-provenance-e2").textContent).toBe("custom");
   });
 });

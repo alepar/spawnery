@@ -17,6 +17,11 @@ type ManagedEntry struct {
 	File           string `json:"file,omitempty"`
 	ProfileID      string `json:"profile_id,omitempty"`
 	ProfileVersion string `json:"profile_version,omitempty"`
+	// SourceURL/SourceCommit record a skill's untrusted-external provenance (sp-mwco.2.8 §4.6),
+	// so ~/.spawnery/managed.json shows where each installed skill came from. Empty for
+	// non-skill kinds and for operator-authored (no-Source) skills.
+	SourceURL    string `json:"source_url,omitempty"`
+	SourceCommit string `json:"source_commit,omitempty"`
 }
 
 // ManagedIndex is the structured content of ~/.spawnery/managed.json.
@@ -47,6 +52,10 @@ func provenanceEntries(layout AgentLayout, a Artifact, opts Options) []ManagedEn
 		canonical.NativeKey = "skills.canonical"
 		canonical.File = filepath.Join(CanonicalSkillsDir(opts.HomeDir), a.Name)
 		canonical.NativePath = canonical.File
+		if a.Skill != nil && a.Skill.Source != nil {
+			canonical.SourceURL = a.Skill.Source.URL
+			canonical.SourceCommit = a.Skill.Source.Commit
+		}
 		out = append(out, canonical)
 
 		if layout.SkillPath != "" {
@@ -54,6 +63,10 @@ func provenanceEntries(layout AgentLayout, a Artifact, opts Options) []ManagedEn
 			native.NativeKey = "skills." + layout.Name
 			native.File = filepath.Join(layout.SkillPath, a.Name)
 			native.NativePath = native.File
+			if a.Skill != nil && a.Skill.Source != nil {
+				native.SourceURL = a.Skill.Source.URL
+				native.SourceCommit = a.Skill.Source.Commit
+			}
 			out = append(out, native)
 		}
 

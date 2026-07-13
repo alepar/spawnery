@@ -130,6 +130,43 @@ func TestConfigPayloadInstructionsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSkillPayloadSourceRoundTrip(t *testing.T) {
+	p := spec.SkillPayload{
+		Dir: "payloads/my-skill",
+		Source: &spec.SkillSource{
+			URL:    "https://github.com/obra/superpowers",
+			Ref:    "main",
+			Commit: "1111111111111111111111111111111111aaaa",
+			Subdir: "skills/x",
+		},
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"source":{`) {
+		t.Errorf("expected source object in JSON, got %s", data)
+	}
+	var p2 spec.SkillPayload
+	if err := json.Unmarshal(data, &p2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p2.Source == nil || *p2.Source != *p.Source {
+		t.Fatalf("Source not round-tripped: got %+v want %+v", p2.Source, p.Source)
+	}
+}
+
+func TestSkillPayloadNoSourceKeyDecodesNil(t *testing.T) {
+	// A manifest written before this change has no "source" key at all — back-compat.
+	var p spec.SkillPayload
+	if err := json.Unmarshal([]byte(`{"dir":"payloads/x"}`), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.Source != nil {
+		t.Errorf("expected nil Source for a manifest with no source key, got %+v", p.Source)
+	}
+}
+
 func writeManifest(t *testing.T, dir, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(content), 0o600); err != nil {

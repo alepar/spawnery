@@ -399,3 +399,27 @@ used.*
   native copy (claude, codex) — a single install-time rewrite point covers all of them; no
   per-harness sanitization work was needed. Content-trust items still open, unchanged by this task:
   per-agent skill enable/disable and provenance-surfaced-to-the-agent (`sp-mwco.2.8`).
+
+- **2026-07-13 — §4.6 closed (`sp-mwco.2.8`): per-agent enable/disable + provenance to the agent
+  and the user.** Off switch = an explicit `ProfileEntry.disabled` bool, never an overloaded empty
+  `targets` list — the pre-existing web UI conflated the two: unchecking the *last* target agent
+  sent `targets: []`, and `[]` means **all** server-side (`translateTargets`), so unchecking every
+  agent silently **re-enabled** the skill everywhere. `disabled` is orthogonal to `targets` and
+  mutated in place by a new CAS-fenced `UpdateProfileEntry(entry_id, targets, disabled)` RPC —
+  scoping-only (kind/name/source/catalog_id/bundle pin aren't in the request), mirroring
+  `UpdateEntryPin`'s store shape. A disabled entry is skipped entirely at profile assembly, before
+  resolution — no manifest artifact, no payload, installed nowhere, for any agent — and a disabled
+  entry never trips the duplicate-skill-dir-name check against an enabled twin. Provenance to the
+  agent is a fixed, deterministic banner (`> **Untrusted external content.** Installed by spawnery
+  from ...`) prepended to the installed `SKILL.md` body immediately after the YAML frontmatter (or
+  at the top when there is none) — `agentinstall.writeProvenance`, called in `installTreeAt`
+  between `sanitizeSkillMD` and `writeMarker`, so the staging source tree is never mutated and both
+  the canonical and any native copy get an identical banner. A `writeProvenance` error fails the
+  install closed (an unlabelled untrusted skill is a failed install, not a silent one). No source
+  (operator-authored custom/inline content) ⇒ no banner. The source rides CP-side from the catalog
+  row already in hand at assembly (`resolvedItem.source`) into `spec.SkillPayload.Source`, with no
+  second catalog fetch; a bundle member carries *that member's own* catalog row provenance, not the
+  owning bundle entry's. Provenance to the user is a server-side join in `profileToProto` —
+  `ProfileEntry.provenance` (`SkillProvenance{source_url, source_ref, source_commit,
+  source_subdir}`, output-only) filled from the entry's catalog row for a `catalog_ref` skill entry
+  only; empty for custom/bundle_ref entries and a missing catalog row is not fatal.

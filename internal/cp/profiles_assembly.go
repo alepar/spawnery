@@ -30,6 +30,11 @@ type resolvedItem struct {
 	name       string             // manifest Artifact.Name — the on-disk skill directory name
 	content    []byte
 	sha256     string // non-empty => by-ref skill (catalog entry with SHA256 provenance)
+	// source is the untrusted-external provenance of a skill item (sp-mwco.2.8 §4.6), from the
+	// catalog row already in hand at resolution time — nil for an inline/custom skill, or a
+	// non-skill kind. Rides into the manifest as spec.SkillPayload.Source without a second
+	// catalog fetch; for a bundle member this is THAT member's own catalog row.
+	source *spec.SkillSource
 }
 
 // assembleProfileArtifacts resolves a profile's non-secret entries into wire ArtifactSpecs:
@@ -50,14 +55,24 @@ func (s *Server) assembleProfileArtifacts(ctx context.Context, _ store.Profile, 
 	}
 
 	// Expand each entry into one or more resolvedItems — a bundle_ref entry yields one item per
-	// pinned bundle member; catalog_ref/custom entries yield exactly one.
+	// pinned bundle member; catalog_ref/custom entries yield exactly one. A disabled entry
+	// (sp-mwco.2.8 §4.6) is skipped entirely, BEFORE resolution, so a disabled entry with a
+	// dangling catalog/bundle ref cannot fail assembly.
 	var items []resolvedItem
 	for _, entry := range entries {
+		if entry.Disabled {
+			continue
+		}
 		expanded, err := s.resolveProfileEntry(ctx, entry)
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, expanded...)
+	}
+	// A profile whose every entry is disabled assembles to (nil, nil) — the same contract as an
+	// empty profile.
+	if len(items) == 0 {
+		return nil, nil
 	}
 
 	// Duplicate skill directory name check (sp-nrzf.3.14.5 §4.10; sp-mwco.1.5 §4.5). Runs over
@@ -113,7 +128,7 @@ func (s *Server) resolveProfileEntry(ctx context.Context, entry store.ProfileEnt
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
 		content, sha256 := catalogContent(ce)
-		return []resolvedItem{{entry: entry, artifactID: entry.EntryID, name: entry.Name, content: content, sha256: sha256}}, nil
+		return []resolvedItem{{entry: entry, artifactID: entry.EntryID, name: entry.Name, content: content, sha256: sha256, source: catalogSkillSource(ce)}}, nil
 
 	case store.ProfileSourceCustom:
 		return []resolvedItem{{entry: entry, artifactID: entry.EntryID, name: entry.Name, content: entry.CustomInline}}, nil
@@ -186,6 +201,7 @@ func (s *Server) resolveBundleEntry(ctx context.Context, entry store.ProfileEntr
 			name:       memberDirName(entry, m, ce),
 			content:    content,
 			sha256:     sha256,
+			source:     catalogSkillSource(ce),
 		})
 	}
 	if len(items) == 0 {
@@ -213,6 +229,22 @@ func catalogContent(ce store.CustomizationCatalogEntry) (content []byte, sha256 
 		return nil, *ce.SHA256
 	}
 	return ce.Content, ""
+}
+
+// catalogSkillSource derives the untrusted-external provenance (sp-mwco.2.8 §4.6) an installed
+// skill's manifest artifact carries, from the catalog row already resolved. nil for an inline
+// (non-URL-ingested) catalog entry — its SourceURL is "" — so an operator-authored/curated inline
+// skill gets no provenance banner at install time.
+func catalogSkillSource(ce store.CustomizationCatalogEntry) *spec.SkillSource {
+	if ce.SourceURL == "" {
+		return nil
+	}
+	return &spec.SkillSource{
+		URL:    ce.SourceURL,
+		Ref:    ce.SourceRef,
+		Commit: ce.SourceCommit,
+		Subdir: ce.SourceSubdir,
+	}
 }
 
 // buildManifestAndPayloads turns resolvedItems into the canonical Manifest + TAR payload specs;
@@ -270,7 +302,7 @@ func buildManifestAndPayloads(items []resolvedItem, targetNames map[string]bool)
 			seenIDs[item.artifactID] = true
 			seenDest[payloadPath] = true
 
-			a.Skill = &spec.SkillPayload{Dir: payloadPath}
+			a.Skill = &spec.SkillPayload{Dir: payloadPath, Source: item.source}
 			a.Payload = payloadPath
 			if item.sha256 != "" {
 				// By-ref delivery path: URL-ingested skill stored in Garage (sp-nrzf.3.14.5).
