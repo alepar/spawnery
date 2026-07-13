@@ -337,3 +337,26 @@ used.*
   mapping) fails the install closed (`StatusFailed`, nothing written) rather than let unbounded
   content reach a system prompt. See `internal/agentinstall/frontmatter.go` and
   `internal/agentinstall/spec/skillmeta.go`.
+
+- **2026-07-13 — sp-mwco.1.13: §4.9's diff-token gate could dead-end a stale-pinned bundle entry
+  with no way to re-pin.** As shipped, `ReingestBundle` minted a diff token only when it detected a
+  real change in-process; `GetBundleDiff` could only mark an already-minted token as viewed, never
+  mint one itself. An entry pinned to v1 while the bundle was already at v2 — CP restart (the gate
+  is in-memory, no persistence), the 30-minute token TTL having lapsed, or another session having
+  already cut v2 — hit a dead end: "check for updates" reported `changed=false` (nothing new to
+  mint), `GetBundleDiff(v1, v2)` returned `diff_token=""`, and `RepinProfileBundle` failed
+  `FailedPrecondition` forever. The "update available" badge became a permanent, un-actionable nag.
+
+  Resolution: **the view IS the gate.** `GetBundleDiff` now mints-and-marks-viewed a token for the
+  exact `(owner, bundle, fromVersion, toVersion)` pair it actually serves (`diffGate.mintViewed`),
+  independent of whether `ReingestBundle` ever ran in this CP process. `ReingestBundle`'s mint is
+  now an optimization only (dedupe: a subsequent `GetBundleDiff` of the same pair reuses that
+  token rather than minting a second one), not the sole path to a satisfiable token. The security
+  property is unchanged and, incidentally, tightened: `assertDiffViewed` now also pins the token's
+  `fromVersionID` to the entry's **currently pinned** version — a token for a narrower pair (e.g.
+  v2→v3) no longer satisfies a re-pin from an earlier pin (v1) onto v3, closing a latent loophole
+  where the caller could skip an intermediate delta. An un-diffed re-pin still fails closed
+  (unknown/unviewed/expired/wrong-pair token). `diffGate` sweeps expired records on every mint and
+  dedupes live records per tuple, keeping the map bounded despite `GetBundleDiff` being an
+  unrate-limited read. See `internal/cp/bundles.go` (`diffGate`, `assertDiffViewed`,
+  `GetBundleDiff`) and `internal/cp/bundles_test.go`.
