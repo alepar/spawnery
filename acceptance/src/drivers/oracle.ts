@@ -20,7 +20,6 @@ import {
   type KeyStore,
 } from "@spawnery/client";
 import type { SpawnStatus } from "./types";
-import { NodeMemoryKeyStore } from "../auth/keystore";
 
 export interface SpawnSummary {
   spawnId: string;
@@ -138,9 +137,8 @@ export type TokenSource = string | (() => Promise<string>);
 export interface AcceptanceClientOptions {
   baseUrl: string;
   bearer: TokenSource;
-  /** Omit to sign with a fresh, process-lifetime keypair (dev-token mode: the dev CP mints the
-   * node token from the intent's own SPKI, so no separate key registration is needed). OAuth-PoP
-   * mode MUST pass the session's own cnf-bound key (see auth/oauthpop.ts's sessionKeyStore). */
+  /** Omit for read/delete-only oracle use. Lifecycle callers must provide the SDK's complete
+   * node-authorization configuration; a key store alone is deliberately not sufficient. */
   keyStore?: KeyStore;
 }
 
@@ -291,7 +289,7 @@ export class AcceptanceClient {
         getBearer: () => (typeof opts.bearer === "string" ? Promise.resolve(opts.bearer) : opts.bearer()),
       },
     });
-    this.sdk = new SpawnClient({ transport, keyStore: opts.keyStore ?? new NodeMemoryKeyStore() });
+    this.sdk = new SpawnClient({ transport, keyStore: opts.keyStore });
   }
 
   // --- Spawns ---

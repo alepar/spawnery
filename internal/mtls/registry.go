@@ -173,9 +173,13 @@ func dialTLSContext(config *tls.Config, registry *ConnectionRegistry, afterVerif
 }
 
 func DialTLSContextHTTP2(config *tls.Config, registry *ConnectionRegistry) func(context.Context, string, string, *tls.Config) (net.Conn, error) {
-	dial := DialTLSContext(config, registry)
-	return func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
-		return dial(ctx, network, address)
+	return func(ctx context.Context, network, address string, transportConfig *tls.Config) (net.Conn, error) {
+		if config == nil || transportConfig == nil {
+			return nil, errors.New("mtls: HTTP/2 TLS configuration is required")
+		}
+		effectiveConfig := config.Clone()
+		effectiveConfig.NextProtos = append([]string(nil), transportConfig.NextProtos...)
+		return DialTLSContext(effectiveConfig, registry)(ctx, network, address)
 	}
 }
 

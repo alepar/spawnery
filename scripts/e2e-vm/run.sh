@@ -38,7 +38,10 @@ trap cleanup EXIT INT TERM
 
 DBOX_BIN="${E2E_DISTROBOX_BIN:-distrobox}"
 DOCKER_BIN="${E2E_DOCKER_BIN:-docker}"
-dbox() { "$DBOX_BIN" enter --root dev-spawnery -- bash -lc "cd '$REPO_ROOT' && $*"; }
+# Go's build cache action IDs are shared across worktrees of the same module. Keep it run-local so
+# a concurrent branch cannot hand this lane a cached binary built from different source/VCS state.
+DBOX_GOCACHE="$RD/go-cache"
+dbox() { "$DBOX_BIN" enter --root dev-spawnery -- bash -lc "export GOCACHE='$DBOX_GOCACHE'; cd '$REPO_ROOT' && $*"; }
 
 # ---- 0. build fresh code (per-run staging so concurrent branches never clobber each other) ----
 if [ "$BUILD" = 1 ]; then
@@ -95,6 +98,15 @@ export ACC_E2E_VM_IP="$E2E_VM_IP" ACC_E2E_SSH_KEY="$E2E_SSH_KEY" ACC_E2E_SSH_USE
 # Some hosts lack libvirt's NSS module. Resolve only this disposable VM hostname inside Node test
 # processes; the URL hostname and golden CA remain unchanged, so TLS hostname validation still runs.
 export NODE_OPTIONS="--require=$E2E_DIR/node-dns-hook.cjs${NODE_OPTIONS:+ $NODE_OPTIONS}"
+# Exercise the exact DNS/TLS/runtime path globalSetup uses. A listening :443 can still be Caddy's
+# old process during restart; do not hand that transient state to a one-shot acceptance preflight.
+for i in $(seq 1 30); do
+  if node -e 'fetch(process.env.ACC_WEB_ORIGIN).then((r) => { if (r.status >= 400) throw new Error(`HTTP ${r.status}`); }).catch(() => process.exit(1))'; then
+    break
+  fi
+  [ "$i" = 30 ] && die "Node acceptance path did not reach $ACC_WEB_ORIGIN"
+  sleep 1
+done
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report"   # per-run output — concurrency-safe
 export PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
 GREP_ARGS=(); [ -n "$GREP" ] && GREP_ARGS=(-g "$GREP")

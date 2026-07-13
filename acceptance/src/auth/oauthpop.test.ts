@@ -16,6 +16,7 @@ function fakeState(accessToken: string, expiresAt: number): OAuthSessionState {
     privateKey: {} as CryptoKey,
     publicKey: {} as CryptoKey,
     accessToken,
+    nodeAccessToken: `node-${accessToken}`,
     refreshTokenRaw: "raw-refresh",
     refreshTokenHash: new Uint8Array(32),
     expiresAt,
@@ -118,8 +119,8 @@ describe("OAuthPoPAuth.seedWeb", () => {
     expect(waitForURLMatchers).toHaveLength(1);
 
     // Sanity-check the waitForURL matcher's shape: it stops waiting once the callback query/path
-    // has cleared, and keeps waiting while access_token or /callback is still present.
-    expect(waitForURLMatchers[0](new URL("https://web.example/callback?access_token=t"))).toBe(false);
+    // has cleared, and keeps waiting while cp_access_token or /callback is still present.
+    expect(waitForURLMatchers[0](new URL("https://web.example/callback?cp_access_token=t"))).toBe(false);
     expect(waitForURLMatchers[0](new URL("https://web.example/templates"))).toBe(true);
 
     // Drive the captured route handler the way Playwright would, and assert it injects login_hint

@@ -15,10 +15,12 @@
  *   3. GET  <rewritten fake IdP authorize URL>  (redirect: manual)
  *        -> 302 Location = {asOrigin}/oauth/callback?code&state (AS's own GitHubRedirectURI).
  *   4. GET  <callback URL> with Cookie: as_flow=<flow>  (redirect: manual)
- *        -> 302 Location = {redirectUri}?access_token&state&refresh_token_hash (non-loopback path,
+ *        -> 302 Location = {redirectUri}?cp_access_token&node_access_token&state&refresh_token_hash
+ *           (non-loopback path,
  *           AM5/R1); Set-Cookie: refresh_token=<raw>, HttpOnly, Path=/refresh.
  *   5. (refreshOAuthSession) POST {asOrigin}/refresh with Cookie: refresh_token=<raw> + PoP headers
- *        -> {access_token, refresh_token_hash} JSON; Set-Cookie: refresh_token=<rotated>.
+ *        -> {cp_access_token, node_access_token, refresh_token_hash} JSON;
+ *           Set-Cookie: refresh_token=<rotated>.
  *
  * The oracle never navigates a browser to redirectUri — it parses the token straight out of the
  * Location header, exactly as a same-process oracle can when it (unlike a browser) is also able to
@@ -34,7 +36,10 @@ export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
 export interface OAuthSessionState {
   privateKey: CryptoKey;
   publicKey: CryptoKey;
+  /** CP-audience access credential (legacy field name retained for existing browser callers). */
   accessToken: string;
+  /** Node-audience half of the AS-issued credential pair. */
+  nodeAccessToken: string;
   refreshTokenRaw: string;
   refreshTokenHash: Uint8Array;
   /** Unix ms this session's access token is expected to expire (mint time + ACCESS_TOKEN_TTL_MS). */
@@ -144,9 +149,11 @@ export async function establishOAuthSession(cfg: EstablishOAuthSessionConfig): P
   if (returnedState !== clientState) {
     throw new OAuthSessionError(`/oauth/callback state mismatch: sent ${clientState}, got ${returnedState}`);
   }
-  const accessToken = finalParams.get("access_token");
+  const accessToken = finalParams.get("cp_access_token");
+  const nodeAccessToken = finalParams.get("node_access_token");
   const refreshTokenHashB64 = finalParams.get("refresh_token_hash");
-  if (!accessToken) throw new OAuthSessionError("/oauth/callback redirect had no access_token");
+  if (!accessToken) throw new OAuthSessionError("/oauth/callback redirect had no cp_access_token");
+  if (!nodeAccessToken) throw new OAuthSessionError("/oauth/callback redirect had no node_access_token");
   if (!refreshTokenHashB64) {
     // A bare-IP loopback redirectUri (http://127.0.0.1:.../callback or [::1]) makes the AS treat
     // this as a NATIVE-APP client (RFC 8252 §7.3 — see internal/authsvc/oauth.go's isLoopbackURI)
@@ -164,6 +171,7 @@ export async function establishOAuthSession(cfg: EstablishOAuthSessionConfig): P
     privateKey,
     publicKey,
     accessToken,
+    nodeAccessToken,
     refreshTokenRaw,
     refreshTokenHash: fromBase64Url(refreshTokenHashB64),
     expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
@@ -188,14 +196,20 @@ export async function refreshOAuthSession(
     const body = await res.text().catch(() => "");
     throw new OAuthSessionError(`/refresh failed: ${res.status} ${body}`);
   }
-  const body = (await res.json()) as { access_token?: string; refresh_token_hash?: string };
-  if (!body.access_token) throw new OAuthSessionError("/refresh response had no access_token");
+  const body = (await res.json()) as {
+    cp_access_token?: string;
+    node_access_token?: string;
+    refresh_token_hash?: string;
+  };
+  if (!body.cp_access_token) throw new OAuthSessionError("/refresh response had no cp_access_token");
+  if (!body.node_access_token) throw new OAuthSessionError("/refresh response had no node_access_token");
   if (!body.refresh_token_hash) throw new OAuthSessionError("/refresh response had no refresh_token_hash");
   const refreshTokenRaw = requireCookie(res, "refresh_token", "/refresh");
 
   return {
     ...prev,
-    accessToken: body.access_token,
+    accessToken: body.cp_access_token,
+    nodeAccessToken: body.node_access_token,
     refreshTokenRaw,
     refreshTokenHash: fromBase64Url(body.refresh_token_hash),
     expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,

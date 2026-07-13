@@ -170,6 +170,46 @@ func TestDialTLSContextRevocationBetweenVerifyAndRegisterClosesConnection(t *tes
 	}
 }
 
+func TestDialTLSContextHTTP2UsesTransportTLSConfig(t *testing.T) {
+	f := newTLSFixture(t)
+	serverConfig := standardServerConfig(t, f.root.Cert, f.cp)
+	serverConfig.NextProtos = []string{"h2"}
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	negotiated := make(chan string, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			negotiated <- ""
+			return
+		}
+		defer connection.Close()
+		tlsConnection := connection.(*tls.Conn)
+		if handshakeErr := tlsConnection.HandshakeContext(t.Context()); handshakeErr != nil {
+			negotiated <- ""
+			return
+		}
+		negotiated <- tlsConnection.ConnectionState().NegotiatedProtocol
+	}()
+
+	baseConfig := internalClientConfig(t, f, f.selfHosted)
+	transportConfig := baseConfig.Clone()
+	transportConfig.NextProtos = []string{"h2"}
+	dial := DialTLSContextHTTP2(baseConfig, NewConnectionRegistry())
+	connection, err := dial(t.Context(), "tcp", listener.Addr().String(), transportConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if protocol := <-negotiated; protocol != "h2" {
+		t.Fatalf("negotiated protocol = %q, want h2", protocol)
+	}
+}
+
 func TestConnectionRegistryConcurrentRegisterReleaseAndRevoke(t *testing.T) {
 	registry := NewConnectionRegistry()
 	issuer := big.NewInt(100)

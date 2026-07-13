@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, createPrivateKey, sign as nodeSign, X509Certificate } from "node:crypto";
+import { createHash, createPrivateKey, randomBytes, sign as nodeSign, X509Certificate } from "node:crypto";
 import { promisify } from "node:util";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient } from "@connectrpc/connect";
@@ -106,6 +106,46 @@ export async function mintVMToken(
   ));
 }
 
+export async function mintShortLivedNodeToken(
+  cfg: VMAuthConfig,
+  accountId: string,
+  spki: Uint8Array,
+  lifetimeSeconds: number,
+): Promise<string> {
+  if (lifetimeSeconds < 2 || lifetimeSeconds > 60) {
+    throw new Error(`short-lived node token lifetime must be between 2 and 60 seconds, got ${lifetimeSeconds}`);
+  }
+  const read = async (name: string) => Buffer.from(
+    await ssh(cfg, remoteArgv("sudo", "base64", "-w0", `/etc/spawnery/authsvc/${name}`)),
+    "base64",
+  );
+  const keyPEM = await read("auth-signer-current-key.pem");
+  const chainPEM = (await read("auth-signer-current-chain.pem")).toString("utf8");
+  const certPEMs = chainPEM.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+  if (!certPEMs?.length) throw new Error("deployed auth signer chain contained no certificates");
+  const chain = certPEMs.map((pem) => new X509Certificate(pem));
+  const keyId = createHash("sha256").update(chain[0].publicKey.export({ format: "der", type: "spki" })).digest();
+  const now = Math.floor(Date.now() / 1000);
+  const payload = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
+    accountId,
+    tokenId: randomBytes(16).toString("hex"),
+    audience: "node",
+    issuedAt: BigInt(now),
+    expiresAt: BigInt(now + lifetimeSeconds),
+    sessionKeyHash: createHash("sha256").update(spki).digest(),
+    keyId: keyId.toString("hex"),
+  }));
+  const message = Buffer.concat([Buffer.from("spawnery/session-token/v1"), payload]);
+  const signature = nodeSign(null, message, createPrivateKey(keyPEM));
+  return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
+    artifactType: "session-token",
+    payload,
+    signature,
+    signerChain: chain.map((cert) => cert.raw),
+    keyId,
+  })));
+}
+
 export function cpClient(cfg: VMAuthConfig, bearer: string) {
   return createClient(cpv1.SpawnService, createTransport({
     baseUrl: cfg.cpEndpoint,
@@ -128,8 +168,9 @@ export async function submitSpawn(
   nodeToken: string,
   keyPair: CryptoKeyPair,
   suffix: string,
+  cpToken = cfg.devToken,
 ): Promise<{ spawnId: string; status: string; errorDetail: string }> {
-  const client = cpClient(cfg, cfg.devToken);
+  const client = cpClient(cfg, cpToken);
   const created = await client.createSpawn({ appId: cfg.appId, model: cfg.model, name: `acc-root-${suffix}` });
   const spawnId = created.spawnId;
   let pending: cpv1.PendingIntent | undefined;
