@@ -49,28 +49,38 @@ const (
 
 // IntentVerifier implements the A4 node-side verification chain.
 type IntentVerifier struct {
-	artifacts  *token.Verifier
-	nodeOwner  string // for self-hosted owner enforcement
-	nodeID     string // the node's own id; target_node_id must match this
-	selfHosted bool
-	now        func() time.Time
-	jtiCache   *intent.JTICache
+	artifacts   *token.Verifier
+	nodeOwner   string // for self-hosted owner enforcement
+	nodeID      string // the node's own id; target_node_id must match this
+	selfHosted  bool
+	now         func() time.Time
+	jtiCache    *intent.JTICache
+	revocations UserRevocationLookup
+}
+
+type UserRevocationLookup interface {
+	IsRevoked(tokenID, accountID string) bool
 }
 
 // NewIntentVerifier constructs a verifier. artifacts is rooted in the environment CA and validates
 // certified session-token artifacts. nodeOwner is the declared node owner; selfHosted
 // enables the extra owner==NodeOwner enforcement. nodeID is this node's own id.
-func NewIntentVerifier(artifacts *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
+func NewIntentVerifier(artifacts *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time, revocations ...UserRevocationLookup) *IntentVerifier {
 	if now == nil {
 		now = time.Now
 	}
+	var lookup UserRevocationLookup
+	if len(revocations) > 0 {
+		lookup = revocations[0]
+	}
 	return &IntentVerifier{
-		artifacts:  artifacts,
-		nodeOwner:  nodeOwner,
-		nodeID:     nodeID,
-		selfHosted: selfHosted,
-		now:        now,
-		jtiCache:   intent.NewJTICache(now),
+		artifacts:   artifacts,
+		nodeOwner:   nodeOwner,
+		nodeID:      nodeID,
+		selfHosted:  selfHosted,
+		now:         now,
+		jtiCache:    intent.NewJTICache(now),
+		revocations: lookup,
 	}
 }
 
@@ -168,6 +178,9 @@ func (v *IntentVerifier) verify(
 	// Step 2: aud == "node" [MC2].
 	if body.Audience != "node" {
 		return zero, NACKWrongAudience, fmt.Sprintf("aud=%q want node", body.Audience)
+	}
+	if v.revocations != nil && v.revocations.IsRevoked(body.TokenId, body.AccountId) {
+		return zero, NACKTokenInvalid, "node authorization is revoked"
 	}
 
 	// Step 3: owner match. CP-asserted owner must match the token's account_id.

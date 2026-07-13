@@ -32,20 +32,25 @@ type liveSessionAuth struct {
 type sessionAuthTimer interface{ Stop() bool }
 
 type sessionAuthRegistry struct {
-	mu      sync.Mutex
-	records map[sessionAuthKey]*liveSessionAuth
-	now     func() time.Time
-	after   func(time.Duration, func()) sessionAuthTimer
+	mu          sync.Mutex
+	records     map[sessionAuthKey]*liveSessionAuth
+	now         func() time.Time
+	after       func(time.Duration, func()) sessionAuthTimer
+	revocations UserRevocationLookup
 }
 
-func newSessionAuthRegistry() *sessionAuthRegistry {
+func newSessionAuthRegistry(revocations ...UserRevocationLookup) *sessionAuthRegistry {
 	return newSessionAuthRegistryWithClock(time.Now, func(delay time.Duration, callback func()) sessionAuthTimer {
 		return time.AfterFunc(delay, callback)
-	})
+	}, revocations...)
 }
 
-func newSessionAuthRegistryWithClock(now func() time.Time, after func(time.Duration, func()) sessionAuthTimer) *sessionAuthRegistry {
-	return &sessionAuthRegistry{records: make(map[sessionAuthKey]*liveSessionAuth), now: now, after: after}
+func newSessionAuthRegistryWithClock(now func() time.Time, after func(time.Duration, func()) sessionAuthTimer, revocations ...UserRevocationLookup) *sessionAuthRegistry {
+	var lookup UserRevocationLookup
+	if len(revocations) > 0 {
+		lookup = revocations[0]
+	}
+	return &sessionAuthRegistry{records: make(map[sessionAuthKey]*liveSessionAuth), now: now, after: after, revocations: lookup}
 }
 
 func (r *sessionAuthRegistry) register(key sessionAuthKey, record sessionAuthRecord, closeFn func(string)) {
@@ -65,6 +70,10 @@ func (r *sessionAuthRegistry) acceptsOpen(key sessionAuthKey, attachmentSequence
 
 func (r *sessionAuthRegistry) registerRecord(key sessionAuthKey, record sessionAuthRecord, closeFn func(string), requireNewer bool) bool {
 	r.mu.Lock()
+	if r.revocations != nil && r.revocations.IsRevoked(record.tokenID, record.accountID) {
+		r.mu.Unlock()
+		return false
+	}
 	if old := r.records[key]; old != nil {
 		if requireNewer && old.record.attachmentSequence >= record.attachmentSequence {
 			r.mu.Unlock()
@@ -85,6 +94,7 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 	found = current != nil
 	now := r.now()
 	valid := current != nil && now.Before(current.record.expiresAt) && now.Before(next.expiresAt) &&
+		(r.revocations == nil || !r.revocations.IsRevoked(next.tokenID, next.accountID)) &&
 		current.record.accountID == next.accountID && next.accountID == liveOwner &&
 		bytes.Equal(current.record.sessionKeyHash, next.sessionKeyHash) &&
 		current.record.generation == next.generation && current.record.nodeID == next.nodeID &&
@@ -104,6 +114,36 @@ func (r *sessionAuthRegistry) replace(key sessionAuthKey, next sessionAuthRecord
 	replacement.timer = r.after(next.expiresAt.Sub(now), func() { r.expire(key, replacement) })
 	r.mu.Unlock()
 	return true, true
+}
+
+func (r *sessionAuthRegistry) revoke(batch []VerifiedUserRevocation) {
+	tokens := make(map[string]struct{})
+	accounts := make(map[string]struct{})
+	for _, entry := range batch {
+		for _, tokenID := range entry.TokenIDs {
+			tokens[tokenID] = struct{}{}
+		}
+		if entry.FamilyID == "" {
+			accounts[entry.AccountID] = struct{}{}
+		}
+	}
+	type closure struct{ fn func(string) }
+	closures := make([]closure, 0)
+	r.mu.Lock()
+	for key, current := range r.records {
+		_, tokenMatch := tokens[current.record.tokenID]
+		_, accountMatch := accounts[current.record.accountID]
+		if !tokenMatch && !accountMatch {
+			continue
+		}
+		delete(r.records, key)
+		current.timer.Stop()
+		closures = append(closures, closure{fn: current.close})
+	}
+	r.mu.Unlock()
+	for _, item := range closures {
+		item.fn("node authorization revoked")
+	}
 }
 
 func (r *sessionAuthRegistry) close(key sessionAuthKey, reason string) {

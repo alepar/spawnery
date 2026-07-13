@@ -77,7 +77,9 @@ type Config struct {
 	NodeTrustDomain string
 
 	// Verifier is the mandatory A4 intent verifier for StartSpawn and SessionOpen.
-	Verifier *IntentVerifier
+	Verifier           *IntentVerifier
+	UserRevocations    UserRevocationLookup
+	RevocationConsumer *RevocationConsumer
 
 	// GitHubMint is the AS AuthService client used for proactive GitHub access-token refresh
 	// (design §16.4). Built in cmd/spawnlet from the node's mTLS identity in enforced mode with AS_URL
@@ -161,6 +163,10 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	secretReplay := newSecretDeliveryReplay()
 	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
 	safego.Go("node.github-refresh", func() { githubRefresh.run(ctx) })
+	auths := newSessionAuthRegistry(cfg.UserRevocations)
+	if cfg.RevocationConsumer != nil {
+		safego.Go("node.user-revocations", func() { cfg.RevocationConsumer.Run(ctx, auths.revoke) })
+	}
 	// Create the GitHub credential control server only when a mint client is configured.
 	// It is process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
 	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
@@ -171,7 +177,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	}
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl)
+		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl, auths)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -206,14 +212,14 @@ func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher, ghControl *githubControlServer) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher, ghControl *githubControlServer, auths *sessionAuthRegistry) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
 		verifier:         cfg.Verifier,
-		auths:            newSessionAuthRegistry(),
+		auths:            auths,
 		ctrlHTTP:         &http.Client{Timeout: controlPostTimeout},
 		sx:               &realSessionExec{mgr: mgr},
 		pumps:            map[sessionKey]*Pump{},
@@ -469,6 +475,7 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			}, func(reason string) {
 				a.closeClientAuthorization(openKey, m.Open.GetGeneration(), reason, m.Open.GetAttachmentId())
 			}) {
+				a.rejectSessionOpen(m.Open, "session authorization was superseded or revoked")
 				return
 			}
 		}

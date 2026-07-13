@@ -263,6 +263,26 @@ func TestIntentVerifierRejectsExpiredCertifiedSessionBeforeIntent(t *testing.T) 
 	}
 }
 
+type mutableUserRevocationLookup struct{ revoked atomic.Bool }
+
+func (r *mutableUserRevocationLookup) IsRevoked(string, string) bool { return r.revoked.Load() }
+
+func TestIntentVerifierChecksUserRevocationBeforeJTIAdmission(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	env, fields := certifiedIntent(t, fixture, now, "jti-user-revoked")
+	lookup := &mutableUserRevocationLookup{}
+	lookup.revoked.Store(true)
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("revoked token: got %q, want %q", nack, NACKTokenInvalid)
+	}
+	lookup.revoked.Store(false)
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
+		t.Fatalf("revocation rejection admitted JTI: %s %s", nack, detail)
+	}
+}
+
 func TestIntentVerifierCertifiedArtifactFailuresPrecedeIntentState(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")

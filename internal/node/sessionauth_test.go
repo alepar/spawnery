@@ -2,6 +2,7 @@ package node
 
 import (
 	"io"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -206,5 +207,32 @@ func TestSessionAuthExpiryClosesExactlyOnce(t *testing.T) {
 	r.close(key, "again")
 	if got := closed.Load(); got != 1 {
 		t.Fatalf("close count = %d", got)
+	}
+}
+
+func TestSessionAuthRevocationClosesMatchesAndRejectsLaterRegistration(t *testing.T) {
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	r := newSessionAuthRegistry(store)
+	var tokenClosed, accountClosed, siblingClosed atomic.Int32
+	record := func(account, token string) sessionAuthRecord {
+		return sessionAuthRecord{accountID: account, tokenID: token, expiresAt: time.Now().Add(time.Hour), attachmentID: token, attachmentSequence: 1}
+	}
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "token"}, record("alice", "old"), func(string) { tokenClosed.Add(1) })
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "account"}, record("bob", "fresh"), func(string) { accountClosed.Add(1) })
+	r.register(sessionAuthKey{spawnID: "sp", clientID: "sibling"}, record("carol", "other"), func(string) { siblingClosed.Add(1) })
+	batch := []VerifiedUserRevocation{{Seq: 1, AccountID: "alice", FamilyID: "family", TokenIDs: []string{"old"}}, {Seq: 2, AccountID: "bob", TokenIDs: []string{"unused"}}}
+	if err := store.ApplyBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	r.revoke(batch)
+	if tokenClosed.Load() != 1 || accountClosed.Load() != 1 || siblingClosed.Load() != 0 {
+		t.Fatalf("closes token=%d account=%d sibling=%d", tokenClosed.Load(), accountClosed.Load(), siblingClosed.Load())
+	}
+	if r.registerIfNewer(sessionAuthKey{spawnID: "sp2", clientID: "late"}, record("alice", "old"), func(string) {}) {
+		t.Fatal("revoked open registered")
 	}
 }
