@@ -353,7 +353,13 @@ export async function deliverOwnerSealedJournalKeys(
   try {
     const anchors = rootPEM.trim() === "" ? null : getTrustAnchors();
     if (anchors) {
-      await verifyNodeCertificateRevocation(nk.nodeCertChain, rootPEM, anchors.nodeCRLs, now);
+      await verifyNodeCertificateRevocation(
+        nk.nodeCertChain,
+        rootPEM,
+        anchors.nodeCRLs,
+        now,
+        anchors.trustDomain,
+      );
     }
     const verified = await verifyNodeForSealing(
       nk.nodeCertChain,

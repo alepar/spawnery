@@ -11,29 +11,31 @@ const vector = JSON.parse(fs.readFileSync(path.resolve(
   now: string;
   rootPEM: string;
   chainPEM: string;
-  currentBundles: Array<{
+  validBundles: Array<{
     class: "cloud" | "self-hosted";
     issuerPEM: string;
     crlPEM: string;
   }>;
-  revokingBundles: Array<{
-    class: "cloud" | "self-hosted";
-    issuerPEM: string;
-    crlPEM: string;
+  scenarios: Record<string, {
+    bundles: Array<{
+      class: "cloud" | "self-hosted";
+      issuerPEM: string;
+      crlPEM: string;
+    }>;
   }>;
 };
 
 const target = {
   nodeCertChain: new TextEncoder().encode(vector.chainPEM),
-  targetNodeId: "node-a",
+  targetNodeId: "node-1",
   targetNodeClass: "self-hosted",
-  targetNodeAccountId: "alice",
+  targetNodeAccountId: "acct-1",
 };
 const pins = {
   rootCAPEM: vector.rootPEM,
   trustDomain: "prod.spawnery.internal",
   cloudAccountId: "cloud-system",
-  nodeCRLs: vector.currentBundles,
+  nodeCRLs: vector.validBundles,
 };
 const now = new Date(vector.now);
 
@@ -41,20 +43,20 @@ describe("verifyResolvedTarget", () => {
   it("rejects a revoked resolved target", async () => {
     const revokedTarget = {
       nodeCertChain: new TextEncoder().encode(vector.chainPEM),
-      targetNodeId: "node-a",
+      targetNodeId: "node-1",
       targetNodeClass: "self-hosted",
-      targetNodeAccountId: "alice",
+      targetNodeAccountId: "acct-1",
     };
-    await expect(verifyResolvedTarget(revokedTarget, "alice", {
+    await expect(verifyResolvedTarget(revokedTarget, "acct-1", {
       rootCAPEM: vector.rootPEM,
       trustDomain: "prod.spawnery.internal",
       cloudAccountId: "cloud-system",
-      nodeCRLs: vector.revokingBundles,
+      nodeCRLs: vector.scenarios.revoked.bundles,
     }, now)).rejects.toThrow("revoked");
   });
 
   it("accepts a root-verified self-hosted node matching every typed field and logged-in account", async () => {
-    await expect(verifyResolvedTarget(target, "alice", pins, now)).resolves.toBeUndefined();
+    await expect(verifyResolvedTarget(target, "acct-1", pins, now)).resolves.toBeUndefined();
   });
 
   it.each([
@@ -62,7 +64,7 @@ describe("verifyResolvedTarget", () => {
     ["class", { targetNodeClass: "cloud" }],
     ["typed account", { targetNodeAccountId: "mallory" }],
   ])("rejects a %s substitution", async (_name, mutation) => {
-    await expect(verifyResolvedTarget({ ...target, ...mutation }, "alice", pins, now)).rejects.toThrow();
+    await expect(verifyResolvedTarget({ ...target, ...mutation }, "acct-1", pins, now)).rejects.toThrow();
   });
 
   it("rejects a self-hosted target belonging to another account", async () => {
