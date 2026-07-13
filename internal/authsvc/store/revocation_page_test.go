@@ -131,6 +131,43 @@ func TestRevocationAppendConcurrentAccountCutoffPreservesExplicitTokens(t *testi
 	}
 }
 
+func TestRevocationAppendBoundsEventAndLeavesFeedProgressable(t *testing.T) {
+	st := NewTestStore(t)
+	tokens := make([]RevokedToken, maxRevokedTokensPerEvent)
+	for i := range tokens {
+		tokens[i] = RevokedToken{TokenID: fmt.Sprintf("token-%04d", i), RetainUntil: 100}
+	}
+	firstSeq, err := st.Revocations().Append(ctxT(), RevocationEvent{
+		AccountID: "acct", FamilyID: "largest", RevokedAt: 10, RevokedTokens: tokens,
+	})
+	if err != nil {
+		t.Fatalf("append maximum event: %v", err)
+	}
+	over := append(append([]RevokedToken(nil), tokens...), RevokedToken{TokenID: "one-too-many", RetainUntil: 100})
+	if _, err := st.Revocations().Append(ctxT(), RevocationEvent{
+		AccountID: "acct", FamilyID: "oversized", RevokedAt: 10, RevokedTokens: over,
+	}); err == nil {
+		t.Fatal("appended event above token cardinality limit")
+	}
+	if _, err := st.Revocations().Append(ctxT(), RevocationEvent{
+		AccountID: "acct", FamilyID: "oversized", RevokedAt: 10,
+		RevokedTokens: []RevokedToken{{TokenID: string(make([]byte, maxRevocationPayloadBytes)), RetainUntil: 100}},
+	}); err == nil {
+		t.Fatal("appended event above serialized payload limit")
+	}
+	lastSeq, err := st.Revocations().Append(ctxT(), RevocationEvent{
+		AccountID: "acct", FamilyID: "after", RevokedAt: 10,
+		RevokedTokens: []RevokedToken{{TokenID: "after", RetainUntil: 100}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, hasMore, err := st.Revocations().PageAfter(ctxT(), firstSeq, 256, 10)
+	if err != nil || hasMore || len(page) != 1 || page[0].Seq != lastSeq {
+		t.Fatalf("feed after rejected event: entries=%+v has_more=%v err=%v", page, hasMore, err)
+	}
+}
+
 func TestRevocationPageAfterUsesLookahead(t *testing.T) {
 	st := NewTestStore(t)
 	var seqs []int64

@@ -17,7 +17,10 @@ import (
 	"spawnery/internal/authsvc/token"
 )
 
-const maxRevocationPageEntries = 256
+const (
+	maxRevocationPageEntries = 256
+	maxRevocationPageBytes   = 3 << 20
+)
 
 type SignedRevocationEntry struct {
 	Seq int64  `json:"seq"`
@@ -48,18 +51,42 @@ func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entries := make([]SignedRevocationEntry, 0, len(events))
+	pageBytes := len(`{"entries":[],"has_more":false}`)
 	for _, event := range events {
 		entry, err := i.signRevocationEntry(event)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "server_error", "signing failed")
 			return
 		}
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "server_error", "encoding failed")
+			return
+		}
+		separatorBytes := 0
+		if len(entries) > 0 {
+			separatorBytes = 1
+		}
+		if pageBytes+separatorBytes+len(encoded) > maxRevocationPageBytes {
+			if len(entries) == 0 {
+				writeError(w, http.StatusInternalServerError, "server_error", "revocation entry exceeds page limit")
+				return
+			}
+			hasMore = true
+			break
+		}
 		entries = append(entries, entry)
+		pageBytes += separatorBytes + len(encoded)
 	}
 
+	raw, err := json.Marshal(RevocationPage{Entries: entries, HasMore: hasMore})
+	if err != nil || len(raw) > maxRevocationPageBytes {
+		writeError(w, http.StatusInternalServerError, "server_error", "encoding failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(RevocationPage{Entries: entries, HasMore: hasMore})
+	_, _ = w.Write(raw)
 }
 
 func parseRevocationPageInt(values []string, defaultValue, minimum, maximum int64) (int64, bool) {

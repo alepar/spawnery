@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +86,102 @@ func TestRevocationsFeedUsesBoundedSignedProtobufPages(t *testing.T) {
 	}
 	if len(page.Entries) != 1 || page.HasMore {
 		t.Fatalf("terminal explicit page: %+v", page)
+	}
+}
+
+func TestRevocationsFeedBoundsSerializedPagesAndDrainsBacklog(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	pki := newTestArtifactPKI(t, now, "prod")
+	signer := pki.signer(t, now, "revocation-page-bytes")
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
+
+	const eventCount = 80
+	largeFamilyPrefix := strings.Repeat("f", 48<<10)
+	for n := range eventCount {
+		if _, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
+			AccountID: "acct", FamilyID: largeFamilyPrefix + fmt.Sprintf("-%03d", n), RevokedAt: now.Unix(),
+			RevokedTokens: []store.RevokedToken{{TokenID: fmt.Sprintf("token-%03d", n), RetainUntil: now.Add(time.Hour).Unix()}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkpoint := int64(0)
+	seen := 0
+	for {
+		resp, err := http.Get(fmt.Sprintf("%s/revocations?since=%d", srv.URL, checkpoint))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK || len(raw) > maxRevocationPageBytes {
+			t.Fatalf("bounded response: status=%d bytes=%d", resp.StatusCode, len(raw))
+		}
+		var page RevocationPage
+		if err := json.Unmarshal(raw, &page); err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Entries) == 0 {
+			t.Fatalf("empty page while draining: %+v", page)
+		}
+		seen += len(page.Entries)
+		checkpoint = page.Entries[len(page.Entries)-1].Seq
+		if !page.HasMore {
+			break
+		}
+	}
+	if seen != eventCount {
+		t.Fatalf("drained events: want %d, got %d", eventCount, seen)
+	}
+}
+
+func TestRevocationsFeedServesMaximumCardinalityAndContinues(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	pki := newTestArtifactPKI(t, now, "prod")
+	signer := pki.signer(t, now, "revocation-cardinality")
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) { cfg.Signer = signer })
+
+	tokens := make([]store.RevokedToken, 1024)
+	for n := range tokens {
+		tokens[n] = store.RevokedToken{TokenID: fmt.Sprintf("token-%04d", n), RetainUntil: now.Add(time.Hour).Unix()}
+	}
+	if _, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
+		AccountID: "acct", FamilyID: "maximum", RevokedAt: now.Unix(), RevokedTokens: tokens,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
+		AccountID: "acct", FamilyID: "over", RevokedAt: now.Unix(),
+		RevokedTokens: append(tokens, store.RevokedToken{TokenID: "over", RetainUntil: now.Add(time.Hour).Unix()}),
+	}); err == nil {
+		t.Fatal("appended revocation above maximum cardinality")
+	}
+	if _, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
+		AccountID: "acct", FamilyID: "after", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "after", RetainUntil: now.Add(time.Hour).Unix()}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/revocations?since=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var page RevocationPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || page.HasMore || len(page.Entries) != 2 {
+		t.Fatalf("progressable feed: status=%d page=%+v", resp.StatusCode, page)
 	}
 }
 

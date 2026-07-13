@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -37,7 +39,8 @@ func TestRevocationRetentionMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO revocation_events(seq, account_id, family_id, token_ids, revoked_at) VALUES
-		(9, 'acct', 'family', '["cp-live","missing"]', 200)`); err != nil {
+		(9, 'acct', 'family', '["cp-live","missing"]', 200),
+		(10, 'acct', '', '["same-second"]', 200)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -66,9 +69,20 @@ func TestRevocationRetentionMigration(t *testing.T) {
 		Column("token_id", "retain_until").OrderExpr("token_id ASC").Scan(ctxT(), &rows); err != nil {
 		t.Fatal(err)
 	}
-	wantRows := []tokenRow{{TokenID: "cp-live", RetainUntil: 1000}, {TokenID: "missing", RetainUntil: 1100}}
+	wantRows := []tokenRow{
+		{TokenID: "cp-live", RetainUntil: 1000},
+		{TokenID: "missing", RetainUntil: 1100},
+		{TokenID: "same-second", RetainUntil: 1100},
+	}
 	if !reflect.DeepEqual(rows, wantRows) {
 		t.Fatalf("normalized tokens: want %+v, got %+v", wantRows, rows)
+	}
+	page, hasMore, err := st.Revocations().PageAfter(ctxT(), 0, 256, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasMore || len(page) != 2 || page[1].FamilyID != "" || page[1].RevokeTokensIssuedBefore != 200 {
+		t.Fatalf("migrated account revocation page: entries=%+v has_more=%v", page, hasMore)
 	}
 	seq, err := st.Revocations().Append(ctxT(), RevocationEvent{
 		AccountID: "acct", FamilyID: "family", RevokedAt: 300,
@@ -77,8 +91,8 @@ func TestRevocationRetentionMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seq != 10 {
-		t.Fatalf("next sequence: want 10, got %d", seq)
+	if seq != 11 {
+		t.Fatalf("next sequence: want 11, got %d", seq)
 	}
 }
 
@@ -107,6 +121,42 @@ func TestRevocationRetentionMigrationRejectsMalformedLegacyTokens(t *testing.T) 
 
 	if _, err := Open(ctxT(), Config{Driver: "sqlite", DSN: dsn}); err == nil {
 		t.Fatal("malformed legacy revocation tokens migrated")
+	}
+}
+
+func TestRevocationRetentionMigrationRejectsOversizedLegacyEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authsvc.db")
+	dsn := "file:" + path
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(db, "migrations/sqlite", 7); err != nil {
+		t.Fatal(err)
+	}
+	tokens := make([]string, maxRevokedTokensPerEvent+1)
+	for i := range tokens {
+		tokens[i] = fmt.Sprintf("token-%04d", i)
+	}
+	raw, err := json.Marshal(tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO revocation_events(seq, account_id, family_id, token_ids, revoked_at)
+		VALUES (3, 'acct', 'family', ?, 200)`, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(ctxT(), Config{Driver: "sqlite", DSN: dsn}); err == nil {
+		t.Fatal("oversized legacy revocation event migrated")
 	}
 }
 
@@ -231,6 +281,62 @@ func TestSupersedeAndFamilyRevoke(t *testing.T) {
 	}
 }
 
+func TestRefreshFamilyLiveGenerationLimitBoundsRevocation(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "acct", 1)
+	for i := range maxLiveAccessGenerationsPerFamily {
+		if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+			TokenHash: fmt.Sprintf("hash-%04d", i), AccountID: "acct", FamilyID: "family", ClientKind: ClientCLI,
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("cp-%04d", i), NodeAccessTokenID: fmt.Sprintf("node-%04d", i),
+			AccessExpiresAt: 100, CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 1000, FamilyCreatedAt: 10,
+		}); err != nil {
+			t.Fatalf("insert generation %d: %v", i, err)
+		}
+	}
+	if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+		TokenHash: "over", AccountID: "acct", FamilyID: "family", ClientKind: ClientCLI,
+		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp-over", NodeAccessTokenID: "node-over",
+		AccessExpiresAt: 100, CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 1000, FamilyCreatedAt: 10,
+	}); err == nil {
+		t.Fatal("inserted generation above live family limit")
+	}
+	tokens, err := st.RefreshSessions().RevokeFamily(ctxT(), "family", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := maxLiveAccessGenerationsPerFamily * 2; len(tokens) != want {
+		t.Fatalf("bounded family revocation: want %d tokens, got %d", want, len(tokens))
+	}
+}
+
+func TestRefreshAccountPerSecondLimitBoundsCutoffExceptions(t *testing.T) {
+	st := NewTestStore(t)
+	mkUser(t, st, "acct", 1)
+	for i := range maxLiveAccessGenerationsPerAccountSecond {
+		if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+			TokenHash: fmt.Sprintf("hash-%04d", i), AccountID: "acct", FamilyID: fmt.Sprintf("family-%04d", i), ClientKind: ClientCLI,
+			SessionPubkeySPKI: []byte{1}, CPAccessTokenID: fmt.Sprintf("cp-%04d", i), NodeAccessTokenID: fmt.Sprintf("node-%04d", i),
+			AccessExpiresAt: 100, CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 1000, FamilyCreatedAt: 10,
+		}); err != nil {
+			t.Fatalf("insert account generation %d: %v", i, err)
+		}
+	}
+	if err := st.RefreshSessions().Insert(ctxT(), RefreshSession{
+		TokenHash: "over", AccountID: "acct", FamilyID: "family-over", ClientKind: ClientCLI,
+		SessionPubkeySPKI: []byte{1}, CPAccessTokenID: "cp-over", NodeAccessTokenID: "node-over",
+		AccessExpiresAt: 100, CreatedAt: 10, LastUsedAt: 10, ExpiresAt: 1000, FamilyCreatedAt: 10,
+	}); err == nil {
+		t.Fatal("inserted account generation above per-second limit")
+	}
+	tokens, err := st.RefreshSessions().RevokeAccount(ctxT(), "acct", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := maxLiveAccessGenerationsPerAccountSecond * 2; len(tokens) != want {
+		t.Fatalf("bounded account cutoff exceptions: want %d tokens, got %d", want, len(tokens))
+	}
+}
+
 func TestFamilyRevocationOmitsAccessExpiredAtTransactionTime(t *testing.T) {
 	st := NewTestStore(t)
 	mkUser(t, st, "acct", 1)
@@ -270,15 +376,18 @@ func TestAccountRevocationIsAtomicAndScoped(t *testing.T) {
 	rows := []RefreshSession{
 		{TokenHash: "one", AccountID: "target", FamilyID: "fam-1", CPAccessTokenID: "one-cp", NodeAccessTokenID: "one-node", AccessExpiresAt: 70},
 		{TokenHash: "two", AccountID: "target", FamilyID: "fam-2", CPAccessTokenID: "two-cp", NodeAccessTokenID: "two-node", AccessExpiresAt: 80},
+		{TokenHash: "same", AccountID: "target", FamilyID: "fam-3", CPAccessTokenID: "same-cp", NodeAccessTokenID: "same-node", AccessExpiresAt: 90, CreatedAt: 60},
 		{TokenHash: "other", AccountID: "other", FamilyID: "fam-other", CPAccessTokenID: "other-cp", NodeAccessTokenID: "other-node", AccessExpiresAt: 90},
 	}
 	for i := range rows {
 		rows[i].ClientKind = ClientCLI
 		rows[i].SessionPubkeySPKI = []byte{1}
-		rows[i].CreatedAt = int64(i + 1)
-		rows[i].LastUsedAt = int64(i + 1)
+		if rows[i].CreatedAt == 0 {
+			rows[i].CreatedAt = int64(i + 1)
+		}
+		rows[i].LastUsedAt = rows[i].CreatedAt
 		rows[i].ExpiresAt = 100
-		rows[i].FamilyCreatedAt = int64(i + 1)
+		rows[i].FamilyCreatedAt = rows[i].CreatedAt
 		if err := st.RefreshSessions().Insert(ctxT(), rows[i]); err != nil {
 			t.Fatal(err)
 		}
@@ -289,13 +398,12 @@ func TestAccountRevocationIsAtomicAndScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []RevokedToken{
-		{TokenID: "one-cp", RetainUntil: 70}, {TokenID: "one-node", RetainUntil: 70},
-		{TokenID: "two-cp", RetainUntil: 80}, {TokenID: "two-node", RetainUntil: 80},
+		{TokenID: "same-cp", RetainUntil: 90}, {TokenID: "same-node", RetainUntil: 90},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("account tokens: want %+v, got %+v", want, got)
 	}
-	for _, hash := range []string{"one", "two"} {
+	for _, hash := range []string{"one", "two", "same"} {
 		row, _ := st.RefreshSessions().Get(ctxT(), hash)
 		if !row.Revoked {
 			t.Fatalf("target row %q remained live", hash)

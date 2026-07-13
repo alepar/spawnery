@@ -41,8 +41,17 @@ INSERT INTO revocation_migration_validation(valid)
 SELECT json_valid(token_ids) AND json_type(token_ids) = 'array'
 FROM revocation_events;
 INSERT INTO revocation_migration_validation(valid)
-SELECT CASE WHEN type = 'text' AND value <> '' THEN 1 ELSE 0 END
+SELECT CASE WHEN type = 'text' AND value <> '' AND length(value) <= 64 THEN 1 ELSE 0 END
 FROM revocation_events, json_each(revocation_events.token_ids);
+INSERT INTO revocation_migration_validation(valid)
+SELECT CASE
+  WHEN json_array_length(token_ids) <= 1024
+   AND length(account_id) + length(family_id) + 80 + COALESCE((
+     SELECT SUM(length(CAST(j.value AS TEXT)) + 16)
+     FROM json_each(revocation_events.token_ids) j
+   ), 0) <= 61440
+  THEN 1 ELSE 0 END
+FROM revocation_events;
 
 ALTER TABLE revocation_events RENAME TO revocation_events_v7;
 CREATE TABLE revocation_events (
@@ -53,7 +62,8 @@ CREATE TABLE revocation_events (
   revoke_tokens_issued_before INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO revocation_events(seq, account_id, family_id, revoked_at, revoke_tokens_issued_before)
-SELECT seq, account_id, family_id, revoked_at, 0
+SELECT seq, account_id, family_id, revoked_at,
+       CASE WHEN family_id = '' THEN revoked_at ELSE 0 END
 FROM revocation_events_v7;
 
 CREATE TABLE revocation_event_tokens (
