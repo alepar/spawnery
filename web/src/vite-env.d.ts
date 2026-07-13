@@ -19,7 +19,7 @@ interface ImportMetaEnv {
   /** Root-authorized system account used by cloud node identities. */
   readonly VITE_CLOUD_ACCOUNT_ID?: string;
   /** JSON trust stamp containing the cloud and self-hosted node issuer certificates and CRLs. */
-  readonly VITE_NODE_CRLS_JSON?: string;
+  readonly VITE_NODE_CRL_BUNDLE_JSON?: string;
 }
 
 interface ImportMeta {

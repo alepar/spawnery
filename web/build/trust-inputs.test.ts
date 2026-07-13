@@ -24,10 +24,14 @@ const validEnv = {
   VITE_ROOT_CA_PEM: "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----",
   VITE_TRUST_DOMAIN: "prod.spawnery.internal",
   VITE_CLOUD_ACCOUNT_ID: "spawnery-system",
-  VITE_NODE_CRLS_JSON: validNodeCRLs,
+  VITE_NODE_CRL_BUNDLE_JSON: validNodeCRLs,
 };
 
 describe("validateTrustInputs", () => {
+  it("loads node revocation bundles from VITE_NODE_CRL_BUNDLE_JSON", () => {
+    expect(validateTrustInputs(validEnv, true).nodeCRLs).toEqual(JSON.parse(validNodeCRLs));
+  });
+
   it("accepts the complete release trust stamp", () => {
     expect(validateTrustInputs(validEnv, true)).toEqual({
       rootCAPEM: validEnv.VITE_ROOT_CA_PEM,
@@ -41,7 +45,7 @@ describe("validateTrustInputs", () => {
     "VITE_ROOT_CA_PEM",
     "VITE_TRUST_DOMAIN",
     "VITE_CLOUD_ACCOUNT_ID",
-    "VITE_NODE_CRLS_JSON",
+    "VITE_NODE_CRL_BUNDLE_JSON",
   ] as const)("rejects missing or empty %s when trust inputs are required", (name) => {
     expect(() => validateTrustInputs({ ...validEnv, [name]: "" }, true)).toThrow(name);
     const { [name]: _omitted, ...withoutInput } = validEnv;
@@ -52,7 +56,7 @@ describe("validateTrustInputs", () => {
     "VITE_ROOT_CA_PEM",
     "VITE_TRUST_DOMAIN",
     "VITE_CLOUD_ACCOUNT_ID",
-    "VITE_NODE_CRLS_JSON",
+    "VITE_NODE_CRL_BUNDLE_JSON",
   ] as const)("rejects placeholder %s", (name) => {
     expect(() =>
       validateTrustInputs({ ...validEnv, [name]: "not-configured-placeholder" }, true),
@@ -61,20 +65,20 @@ describe("validateTrustInputs", () => {
 
   it("rejects malformed node CRL JSON", () => {
     expect(() =>
-      validateTrustInputs({ ...validEnv, VITE_NODE_CRLS_JSON: "not-json" }, true),
-    ).toThrow("VITE_NODE_CRLS_JSON");
+      validateTrustInputs({ ...validEnv, VITE_NODE_CRL_BUNDLE_JSON: "not-json" }, true),
+    ).toThrow("VITE_NODE_CRL_BUNDLE_JSON");
   });
 
   it("requires exactly one cloud and one self-hosted CRL", () => {
     const cloud = JSON.parse(validNodeCRLs)[0];
     expect(() =>
       validateTrustInputs(
-        { ...validEnv, VITE_NODE_CRLS_JSON: JSON.stringify([cloud, cloud]) },
+        { ...validEnv, VITE_NODE_CRL_BUNDLE_JSON: JSON.stringify([cloud, cloud]) },
         true,
       ),
     ).toThrow("duplicate class");
     expect(() =>
-      validateTrustInputs({ ...validEnv, VITE_NODE_CRLS_JSON: JSON.stringify([cloud]) }, true),
+      validateTrustInputs({ ...validEnv, VITE_NODE_CRL_BUNDLE_JSON: JSON.stringify([cloud]) }, true),
     ).toThrow("exactly");
   });
 
@@ -82,7 +86,7 @@ describe("validateTrustInputs", () => {
     const entries = JSON.parse(validNodeCRLs);
     delete entries[0][field];
     expect(() =>
-      validateTrustInputs({ ...validEnv, VITE_NODE_CRLS_JSON: JSON.stringify(entries) }, true),
+      validateTrustInputs({ ...validEnv, VITE_NODE_CRL_BUNDLE_JSON: JSON.stringify(entries) }, true),
     ).toThrow(field);
   });
 
@@ -90,7 +94,7 @@ describe("validateTrustInputs", () => {
     const entries = JSON.parse(validNodeCRLs);
     entries[0].unexpected = "value";
     expect(() =>
-      validateTrustInputs({ ...validEnv, VITE_NODE_CRLS_JSON: JSON.stringify(entries) }, true),
+      validateTrustInputs({ ...validEnv, VITE_NODE_CRL_BUNDLE_JSON: JSON.stringify(entries) }, true),
     ).toThrow("exactly");
   });
 
@@ -143,7 +147,7 @@ describe("trust stamp documentation", () => {
       "VITE_ROOT_CA_PEM",
       "VITE_TRUST_DOMAIN",
       "VITE_CLOUD_ACCOUNT_ID",
-      "VITE_NODE_CRLS_JSON",
+      "VITE_NODE_CRL_BUNDLE_JSON",
     ]) {
       expect(example).toContain(name);
       expect(viteTypes).toContain(name);

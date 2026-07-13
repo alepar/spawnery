@@ -6,30 +6,53 @@ import { verifyResolvedTarget } from "./target";
 
 const vector = JSON.parse(fs.readFileSync(path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../internal/secrets/subkey/testdata/subkey/verify_node.json",
+  "testdata/node-crl-vectors.json",
 ), "utf8")) as {
-  chain_pem: string;
-  root_pem: string;
-  expected_node_id: string;
-  expected_account_id: string;
-  expected_class: string;
-  not_before: string;
+  now: string;
+  rootPEM: string;
+  chainPEM: string;
+  currentBundles: Array<{
+    class: "cloud" | "self-hosted";
+    issuerPEM: string;
+    crlPEM: string;
+  }>;
+  revokingBundles: Array<{
+    class: "cloud" | "self-hosted";
+    issuerPEM: string;
+    crlPEM: string;
+  }>;
 };
 
 const target = {
-  nodeCertChain: new TextEncoder().encode(vector.chain_pem),
-  targetNodeId: vector.expected_node_id,
-  targetNodeClass: vector.expected_class,
-  targetNodeAccountId: vector.expected_account_id,
+  nodeCertChain: new TextEncoder().encode(vector.chainPEM),
+  targetNodeId: "node-a",
+  targetNodeClass: "self-hosted",
+  targetNodeAccountId: "alice",
 };
 const pins = {
-  rootCAPEM: vector.root_pem,
+  rootCAPEM: vector.rootPEM,
   trustDomain: "prod.spawnery.internal",
   cloudAccountId: "cloud-system",
+  nodeCRLs: vector.currentBundles,
 };
-const now = new Date(new Date(vector.not_before).getTime() + 60 * 60 * 1000);
+const now = new Date(vector.now);
 
 describe("verifyResolvedTarget", () => {
+  it("rejects a revoked resolved target", async () => {
+    const revokedTarget = {
+      nodeCertChain: new TextEncoder().encode(vector.chainPEM),
+      targetNodeId: "node-a",
+      targetNodeClass: "self-hosted",
+      targetNodeAccountId: "alice",
+    };
+    await expect(verifyResolvedTarget(revokedTarget, "alice", {
+      rootCAPEM: vector.rootPEM,
+      trustDomain: "prod.spawnery.internal",
+      cloudAccountId: "cloud-system",
+      nodeCRLs: vector.revokingBundles,
+    }, now)).rejects.toThrow("revoked");
+  });
+
   it("accepts a root-verified self-hosted node matching every typed field and logged-in account", async () => {
     await expect(verifyResolvedTarget(target, "alice", pins, now)).resolves.toBeUndefined();
   });
@@ -71,6 +94,7 @@ describe("verifyResolvedTarget", () => {
         trustDomain: "prod.spawnery.internal", kind: "node" as const, role: "cloud" as const,
         accountId: "cloud-system", nodeId: "node-c",
       }),
+      verifyNodeCertificateRevocation: async () => undefined,
     };
     const cloud = {
       nodeCertChain: new TextEncoder().encode("pem"), targetNodeId: "node-c",

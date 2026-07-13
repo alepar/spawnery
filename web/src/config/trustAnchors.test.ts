@@ -18,7 +18,7 @@ const valid = {
   VITE_ROOT_CA_PEM: "-----BEGIN CERTIFICATE-----\nreal-root\n-----END CERTIFICATE-----",
   VITE_TRUST_DOMAIN: "prod.spawnery.internal",
   VITE_CLOUD_ACCOUNT_ID: "spawnery-system",
-  VITE_NODE_CRLS_JSON: JSON.stringify(nodeCRLs),
+  VITE_NODE_CRL_BUNDLE_JSON: JSON.stringify(nodeCRLs),
 };
 
 async function load(overrides: Record<string, string> = {}) {
@@ -47,7 +47,7 @@ describe("release trust anchors", () => {
       VITE_ROOT_CA_PEM: "",
       VITE_TRUST_DOMAIN: "",
       VITE_CLOUD_ACCOUNT_ID: "",
-      VITE_NODE_CRLS_JSON: "",
+      VITE_NODE_CRL_BUNDLE_JSON: "",
     });
     expect(module.getTrustAnchors()).toEqual({
       rootCAPEM: "",
@@ -66,7 +66,7 @@ describe("release trust anchors", () => {
       VITE_ROOT_CA_PEM: "",
       VITE_TRUST_DOMAIN: "",
       VITE_CLOUD_ACCOUNT_ID: "",
-      VITE_NODE_CRLS_JSON: "",
+      VITE_NODE_CRL_BUNDLE_JSON: "",
     });
     expect(() => module.getTrustAnchors()).toThrow("VITE_ROOT_CA_PEM");
   });
@@ -80,7 +80,7 @@ describe("release trust anchors", () => {
     "VITE_ROOT_CA_PEM",
     "VITE_TRUST_DOMAIN",
     "VITE_CLOUD_ACCOUNT_ID",
-    "VITE_NODE_CRLS_JSON",
+    "VITE_NODE_CRL_BUNDLE_JSON",
   ] as const)("fails closed when auth-enabled %s is empty", async (name) => {
     const module = await load({ [name]: "" });
     expect(() => module.getTrustAnchors()).toThrow(name);
