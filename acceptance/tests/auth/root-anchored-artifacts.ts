@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
+import { lstat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient } from "@connectrpc/connect";
@@ -35,9 +37,10 @@ export interface DestructiveVMAuthConfig extends VMAuthConfig {
 }
 
 type DestructiveSSH = (cfg: DestructiveVMAuthConfig, command: string) => Promise<string>;
-export type SPABundlePublisher = (
-  cfg: DestructiveVMAuthConfig,
-  bundleDir: string,
+type SPABundleExec = (
+  file: string,
+  args: string[],
+  options: { maxBuffer: number },
 ) => Promise<void>;
 
 function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
@@ -245,33 +248,67 @@ export async function assertDisposableVM(
   if (verified !== "verified") throw new Error("disposable VM run marker did not verify");
 }
 
-async function publishSPABundle(
+export async function spaBundlePublicationPlan(
   cfg: DestructiveVMAuthConfig,
   bundleDir: string,
+): Promise<{ file: string; args: string[]; options: { maxBuffer: number } }> {
+  if (bundleDir.trim() === "" || bundleDir.startsWith("-")) {
+    throw new Error("alternate SPA bundle directory is invalid");
+  }
+  const source = resolve(bundleDir);
+  let sourceStat;
+  try {
+    sourceStat = await lstat(source);
+  } catch {
+    throw new Error("alternate SPA bundle directory does not exist");
+  }
+  if (!sourceStat.isDirectory()) throw new Error("alternate SPA bundle path is not a directory");
+
+  let indexStat;
+  try {
+    indexStat = await lstat(join(source, "index.html"));
+  } catch {
+    throw new Error("alternate SPA bundle must contain a regular index.html");
+  }
+  if (!indexStat.isFile()) {
+    throw new Error("alternate SPA bundle must contain a regular index.html");
+  }
+
+  return {
+    file: "rsync",
+    args: [
+      "-a",
+      "--delete",
+      "-e",
+      `ssh -i ${posixShellQuote(cfg.sshKey)} -o BatchMode=yes -o StrictHostKeyChecking=no`,
+      "--rsync-path",
+      "sudo rsync",
+      "--",
+      `${source}/`,
+      `${cfg.sshUser}@${cfg.ip}:/var/www/spawnery/`,
+    ],
+    options: { maxBuffer: 4 * 1024 * 1024 },
+  };
+}
+
+async function executeSPABundlePublication(
+  file: string,
+  args: string[],
+  options: { maxBuffer: number },
 ): Promise<void> {
-  const source = bundleDir.replace(/\/+$/, "");
-  if (!source) throw new Error("alternate SPA bundle directory is required");
-  await execFileP("rsync", [
-    "-a",
-    "--delete",
-    "-e",
-    `ssh -i ${posixShellQuote(cfg.sshKey)} -o BatchMode=yes -o StrictHostKeyChecking=no`,
-    "--rsync-path",
-    "sudo rsync",
-    `${source}/`,
-    `${cfg.sshUser}@${cfg.ip}:/var/www/spawnery/`,
-  ], { maxBuffer: 4 * 1024 * 1024 });
+  await execFileP(file, args, options);
 }
 
 /** Replace the VM's deployed SPA with a local alternate bundle. */
 export async function deployAlternateSPABundle(
   cfg: DestructiveVMAuthConfig,
   bundleDir: string,
-  publish: SPABundlePublisher = publishSPABundle,
   executeSSH: DestructiveSSH = ssh,
+  executeFile: SPABundleExec = executeSPABundlePublication,
 ): Promise<void> {
+  const plan = await spaBundlePublicationPlan(cfg, bundleDir);
   await assertDisposableVM(cfg, executeSSH);
-  await publish(cfg, bundleDir);
+  await executeFile(plan.file, plan.args, plan.options);
 }
 
 export async function setCPAuthMode(

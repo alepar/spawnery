@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   assertDisposableVM,
   cpAuthModePlan,
@@ -11,8 +14,26 @@ import {
   loadVMAuthConfig,
   posixShellQuote,
   setCPAuthMode,
+  spaBundlePublicationPlan,
   vmRunMarkerVerificationCommand,
 } from "./root-anchored-artifacts";
+
+const temporaryDirectories: string[] = [];
+
+async function spaBundle(index: "file" | "directory" | "missing" = "file"): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "spawnery-spa-bundle-"));
+  temporaryDirectories.push(directory);
+  if (index === "file") await writeFile(join(directory, "index.html"), "<!doctype html>");
+  if (index === "directory") await mkdir(join(directory, "index.html"));
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, {
+    recursive: true,
+    force: true,
+  })));
+});
 
 describe("AS signer custody", () => {
   it("has no acceptance-side short-lived token mint or AS private-key read/sign path", () => {
@@ -147,20 +168,75 @@ describe("destructive VM identity", () => {
 
   it("does not publish an alternate SPA bundle when the disposable marker fails", async () => {
     const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const bundleDir = await spaBundle();
     const publications: string[] = [];
-    const publish = async (_cfg: typeof cfg, bundleDir: string) => {
-      publications.push(bundleDir);
-    };
+    const executeFile = async (file: string) => { publications.push(file); };
     const executeSSH = async () => "wrong-run";
 
     await expect(deployAlternateSPABundle(
       cfg,
-      "/tmp/stale-crl-web-dist",
-      publish,
+      bundleDir,
       executeSSH,
+      executeFile,
     )).rejects.toThrow("did not verify");
     expect(publications).toEqual([]);
   });
+
+  it("plans an absolute rsync-over-SSH publication with an operand boundary", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const bundleDir = await spaBundle();
+    const plan = await spaBundlePublicationPlan(cfg, relative(process.cwd(), bundleDir));
+
+    expect(plan).toEqual({
+      file: "rsync",
+      args: [
+        "-a",
+        "--delete",
+        "-e",
+        "ssh -i '/tmp/key' -o BatchMode=yes -o StrictHostKeyChecking=no",
+        "--rsync-path",
+        "sudo rsync",
+        "--",
+        `${bundleDir}/`,
+        "spawnery@192.0.2.10:/var/www/spawnery/",
+      ],
+      options: { maxBuffer: 4 * 1024 * 1024 },
+    });
+  });
+
+  it.each([
+    ["empty", ""],
+    ["dash-prefixed", "--delete"],
+    ["missing", join(tmpdir(), `missing-spa-bundle-${process.pid}`)],
+  ])("rejects a %s SPA bundle input before exec", async (_name, bundleDir) => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const executions: string[] = [];
+
+    await expect(deployAlternateSPABundle(
+      cfg,
+      bundleDir,
+      async () => "verified",
+      async (file) => { executions.push(file); },
+    )).rejects.toThrow("alternate SPA bundle");
+    expect(executions).toEqual([]);
+  });
+
+  it.each(["missing", "directory"] as const)(
+    "rejects a bundle whose index.html is %s before exec",
+    async (index) => {
+      const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+      const bundleDir = await spaBundle(index);
+      const executions: string[] = [];
+
+      await expect(deployAlternateSPABundle(
+        cfg,
+        bundleDir,
+        async () => "verified",
+        async (file) => { executions.push(file); },
+      )).rejects.toThrow("regular index.html");
+      expect(executions).toEqual([]);
+    },
+  );
 
   it("stops revocation deployment when the disposable marker changes after artifact generation", async () => {
     const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
