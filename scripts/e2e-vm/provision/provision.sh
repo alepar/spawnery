@@ -409,7 +409,11 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
   @cp   path /cp.v1.* /ws*
   @as   path /oauth* /refresh* /logout* /github* /device* /ca/*
   reverse_proxy @cp 127.0.0.1:8080
-  reverse_proxy @as 127.0.0.1:8090
+  # AS now serves TLS (sp-wwtc mint wiring, AS_TLS_CERT/KEY — as-server.crt, root-signed). Caddy
+  # verifies it against the system trust store, which already has the golden root CA installed below
+  # ("golden CA into the VM's OWN trust") — no tls_trust_pool override needed. Browser/SPA traffic
+  # presents no client cert; AS's ClientAuth is VerifyClientCertIfGiven, so that's fine.
+  reverse_proxy @as https://127.0.0.1:8090
   root * /var/www/spawnery
   file_server
 }
