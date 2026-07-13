@@ -46,7 +46,7 @@ dbox() { "$DBOX_BIN" enter --root dev-spawnery -- bash -lc "export GOCACHE='$DBO
 build_web() {
   local public_dir="$1" root_b64
   root_b64="$(base64 -w0 "$public_dir/root.pem")"
-  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' VITE_ROOT_CA_PEM=\"\$(printf '%s' '$root_b64' | base64 -d)\" VITE_TRUST_DOMAIN='prod.spawnery.internal' VITE_CLOUD_ACCOUNT_ID='spawnery-system' npm run build && ../deploy/web/forbidden-scan.sh dist && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
+  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' VITE_ROOT_CA_PEM=\"\$(printf '%s' '$root_b64' | base64 -d)\" VITE_TRUST_DOMAIN='prod.spawnery.internal' VITE_CLOUD_ACCOUNT_ID='spawnery-system' npm run build && PATH='$REPO_ROOT/sdk/ts/node_modules/.bin':\"\$PATH\" ../deploy/web/forbidden-scan.sh dist && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
   test -d "$STAGE/web-dist"
   test -f "$STAGE/web-dist/index.html"
 }

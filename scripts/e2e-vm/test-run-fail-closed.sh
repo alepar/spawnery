@@ -81,5 +81,9 @@ rg -q 'forbidden-scan' "$TMP/pins.out" || {
   echo "run.sh did not execute the web release forbidden scan" >&2
   exit 1
 }
+rg -q 'sdk/ts/node_modules/.bin' "$TMP/pins.out" || {
+  echo "run.sh did not make the workspace tsx available to the release scanner" >&2
+  exit 1
+}
 
 echo "e2e-vm fresh build failures are fail-closed"
