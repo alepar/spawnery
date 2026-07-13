@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -52,6 +54,80 @@ func TestRevocationPageAfterBoundsPrunesAndPreservesGaps(t *testing.T) {
 	}
 	if want := []int64{liveSeq, newAccountSeq}; !reflect.DeepEqual(seqs, want) {
 		t.Fatalf("retained sequences: want %v, got %v (expired=%d old-account=%d)", want, seqs, expiredSeq, oldAccountSeq)
+	}
+}
+
+func TestRevocationAppendSameAccountCutoffPreservesExplicitTokens(t *testing.T) {
+	st := NewTestStore(t)
+	for _, event := range []RevocationEvent{
+		{
+			AccountID: "acct", RevokedAt: 10, RevokeTokensIssuedBefore: 10,
+			RevokedTokens: []RevokedToken{{TokenID: "token-a", RetainUntil: 100}},
+		},
+		{
+			AccountID: "acct", RevokedAt: 10, RevokeTokensIssuedBefore: 10,
+			RevokedTokens: []RevokedToken{{TokenID: "token-b", RetainUntil: 200}},
+		},
+	} {
+		if _, err := st.Revocations().Append(ctxT(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	latestSeq, err := st.Revocations().Append(ctxT(), RevocationEvent{
+		AccountID: "acct", RevokedAt: 10, RevokeTokensIssuedBefore: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, hasMore, err := st.Revocations().PageAfter(ctxT(), 0, 256, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasMore || len(page) != 1 || page[0].Seq != latestSeq {
+		t.Fatalf("lagging page: entries=%+v has_more=%v", page, hasMore)
+	}
+	want := []RevokedToken{
+		{EventSeq: latestSeq, TokenID: "token-a", RetainUntil: 100},
+		{EventSeq: latestSeq, TokenID: "token-b", RetainUntil: 200},
+	}
+	if !reflect.DeepEqual(page[0].RevokedTokens, want) {
+		t.Fatalf("explicit tokens: want %+v, got %+v", want, page[0].RevokedTokens)
+	}
+}
+
+func TestRevocationAppendConcurrentAccountCutoffPreservesExplicitTokens(t *testing.T) {
+	st := NewTestStore(t)
+	const eventCount = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, eventCount)
+	for i := range eventCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := st.Revocations().Append(ctxT(), RevocationEvent{
+				AccountID: "acct", RevokedAt: 10, RevokeTokensIssuedBefore: 10,
+				RevokedTokens: []RevokedToken{{
+					TokenID: fmt.Sprintf("token-%d", i), RetainUntil: 100,
+				}},
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, hasMore, err := st.Revocations().PageAfter(ctxT(), 0, 256, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasMore || len(page) != 1 || len(page[0].RevokedTokens) != eventCount {
+		t.Fatalf("concurrent page: entries=%+v has_more=%v", page, hasMore)
 	}
 }
 

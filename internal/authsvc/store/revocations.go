@@ -57,17 +57,44 @@ func (r *revocationRepo) append(ctx context.Context, ev RevocationEvent) (int64,
 		}
 	}
 	if ev.FamilyID == "" {
-		if _, err := r.db.ExecContext(ctx, `
-			DELETE FROM revocation_events
-			WHERE account_id = ? AND family_id = '' AND seq NOT IN (
-				SELECT seq FROM revocation_events
-				WHERE account_id = ? AND family_id = ''
-				ORDER BY revoke_tokens_issued_before DESC, seq DESC LIMIT 1
-			)`, ev.AccountID, ev.AccountID); err != nil {
+		if err := r.compactAccountRevocations(ctx, ev.AccountID); err != nil {
 			return 0, err
 		}
 	}
 	return ev.Seq, nil
+}
+
+func (r *revocationRepo) compactAccountRevocations(ctx context.Context, accountID string) error {
+	var keep struct {
+		Seq    int64
+		Cutoff int64 `bun:"revoke_tokens_issued_before"`
+	}
+	if err := r.db.NewSelect().Table("revocation_events").
+		Column("seq", "revoke_tokens_issued_before").
+		Where("account_id = ? AND family_id = ''", accountID).
+		OrderExpr("revoke_tokens_issued_before DESC, seq DESC").Limit(1).
+		Scan(ctx, &keep); err != nil {
+		return fmt.Errorf("select account revocation keeper: %w", err)
+	}
+	if _, err := r.db.ExecContext(ctx, `
+		INSERT INTO revocation_event_tokens (event_seq, token_id, retain_until)
+		SELECT ?, token.token_id, MAX(token.retain_until)
+		FROM revocation_event_tokens AS token
+		JOIN revocation_events AS source ON source.seq = token.event_seq
+		WHERE source.account_id = ? AND source.family_id = ''
+		  AND source.revoke_tokens_issued_before = ?
+		GROUP BY token.token_id
+		ON CONFLICT(event_seq, token_id) DO UPDATE SET
+		  retain_until = MAX(revocation_event_tokens.retain_until, excluded.retain_until)`,
+		keep.Seq, accountID, keep.Cutoff); err != nil {
+		return fmt.Errorf("merge account revocation tokens: %w", err)
+	}
+	if _, err := r.db.ExecContext(ctx, `
+		DELETE FROM revocation_events
+		WHERE account_id = ? AND family_id = '' AND seq <> ?`, accountID, keep.Seq); err != nil {
+		return fmt.Errorf("delete superseded account revocations: %w", err)
+	}
+	return nil
 }
 
 func (r *revocationRepo) PageAfter(ctx context.Context, seq int64, limit int, now int64) ([]RevocationEvent, bool, error) {
@@ -100,16 +127,15 @@ func (r *revocationRepo) pageAfter(ctx context.Context, seq int64, limit int, no
 		  )`); err != nil {
 		return nil, false, fmt.Errorf("prune empty family revocations: %w", err)
 	}
-	if _, err := r.db.ExecContext(ctx, `
-		DELETE FROM revocation_events AS stale
-		WHERE stale.family_id = ''
-		  AND EXISTS (
-			SELECT 1 FROM revocation_events AS keep
-			WHERE keep.account_id = stale.account_id AND keep.family_id = ''
-			  AND (keep.revoke_tokens_issued_before > stale.revoke_tokens_issued_before
-			    OR (keep.revoke_tokens_issued_before = stale.revoke_tokens_issued_before AND keep.seq > stale.seq))
-		  )`); err != nil {
-		return nil, false, fmt.Errorf("compact account revocations: %w", err)
+	var accountIDs []string
+	if err := r.db.NewSelect().Table("revocation_events").Distinct().Column("account_id").
+		Where("family_id = ''").Scan(ctx, &accountIDs); err != nil {
+		return nil, false, fmt.Errorf("select account revocations: %w", err)
+	}
+	for _, accountID := range accountIDs {
+		if err := r.compactAccountRevocations(ctx, accountID); err != nil {
+			return nil, false, fmt.Errorf("compact account revocations: %w", err)
+		}
 	}
 
 	var events []RevocationEvent
