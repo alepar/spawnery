@@ -7,6 +7,14 @@ import { rewriteReadyPendingIntentResponse } from "./pending-substitution";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+function grpcEnvelope(payload: Uint8Array, compressed = false): Uint8Array {
+  const envelope = Buffer.alloc(5 + payload.length);
+  envelope[0] = compressed ? 1 : 0;
+  envelope.writeUInt32BE(payload.length, 1);
+  envelope.set(payload, 5);
+  return envelope;
+}
+
 function envelope(ready = true) {
   return {
     status: 207,
@@ -92,5 +100,26 @@ describe("rewriteReadyPendingIntentResponse", () => {
       targetNodeAccountId: "spawnery-system",
       nodeCertChain: encoder.encode("cert-chain"),
     });
+  });
+
+  it("rejects a compressed gRPC response rather than guessing at its payload", () => {
+    const body = toBinary(cpv1.GetPendingIntentResponseSchema,
+      create(cpv1.GetPendingIntentResponseSchema, { ready: true, targetNodeId: "node-1" }));
+    expect(() => rewriteReadyPendingIntentResponse({
+      status: 200,
+      headers: { "content-type": "application/grpc" },
+      body: grpcEnvelope(body, true),
+    }, { field: "targetNodeId", value: "node-substituted" })).toThrow("compressed gRPC");
+  });
+
+  it("rejects a multi-message gRPC response rather than mutating one frame", () => {
+    const body = toBinary(cpv1.GetPendingIntentResponseSchema,
+      create(cpv1.GetPendingIntentResponseSchema, { ready: true, targetNodeId: "node-1" }));
+    const frame = grpcEnvelope(body);
+    expect(() => rewriteReadyPendingIntentResponse({
+      status: 200,
+      headers: { "content-type": "application/grpc" },
+      body: Buffer.concat([frame, frame]),
+    }, { field: "targetNodeId", value: "node-substituted" })).toThrow("one gRPC message");
   });
 });

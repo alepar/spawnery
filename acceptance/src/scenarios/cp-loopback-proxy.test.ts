@@ -5,6 +5,8 @@ import { connect as connectHTTP2 } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { cpv1 } from "@spawnery/client";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -12,6 +14,20 @@ import { startCPLoopbackProxy } from "./cp-loopback-proxy";
 
 const execFileP = promisify(execFile);
 const encoder = new TextEncoder();
+
+function grpcEnvelope(payload: Uint8Array, compressed = false): Buffer {
+  const envelope = Buffer.alloc(5 + payload.length);
+  envelope[0] = compressed ? 1 : 0;
+  envelope.writeUInt32BE(payload.length, 1);
+  envelope.set(payload, 5);
+  return envelope;
+}
+
+function grpcPayload(envelope: Uint8Array): Uint8Array {
+  expect(envelope[0]).toBe(0);
+  expect(envelope.length).toBe(5 + Buffer.from(envelope).readUInt32BE(1));
+  return envelope.subarray(5);
+}
 
 let tlsDir = "";
 let keyPEM = "";
@@ -59,7 +75,12 @@ async function proxyRequest(
   origin: string,
   path: string,
   options: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array } = {},
-): Promise<{ status: number; headers: Record<string, string | string[]>; body: Buffer }> {
+): Promise<{
+  status: number;
+  headers: Record<string, string | string[]>;
+  trailers: Record<string, string | string[]>;
+  body: Buffer;
+}> {
   const session = connectHTTP2(origin);
   try {
     return await new Promise((resolve, reject) => {
@@ -70,6 +91,7 @@ async function proxyRequest(
       });
       let status = 0;
       let headers: Record<string, string | string[]> = {};
+      let trailers: Record<string, string | string[]> = {};
       const chunks: Buffer[] = [];
       request.on("response", (received) => {
         status = Number(received[":status"] ?? 0);
@@ -77,8 +99,13 @@ async function proxyRequest(
           .filter(([name]) => !name.startsWith(":"))
           .map(([name, value]) => [name, Array.isArray(value) ? value.map(String) : String(value)]));
       });
+      request.on("trailers", (received) => {
+        trailers = Object.fromEntries(Object.entries(received)
+          .filter(([name]) => !name.startsWith(":"))
+          .map(([name, value]) => [name, Array.isArray(value) ? value.map(String) : String(value)]));
+      });
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
-      request.on("end", () => resolve({ status, headers, body: Buffer.concat(chunks) }));
+      request.on("end", () => resolve({ status, headers, trailers, body: Buffer.concat(chunks) }));
       request.on("error", reject);
       request.end(options.body);
     });
@@ -88,6 +115,116 @@ async function proxyRequest(
 }
 
 describe("startCPLoopbackProxy", () => {
+  it.each(["0", "7"])("preserves upstream gRPC status %s and custom trailers exactly", async (grpcStatus) => {
+    const trailers = {
+      "grpc-status": grpcStatus,
+      "grpc-message": grpcStatus === "0" ? "" : "permission denied",
+      "x-custom-trailer": "kept",
+    };
+    const upstream = await listenUpstream((_request, response) => {
+      response.writeHead(200, {
+        "content-type": "application/grpc",
+        trailer: Object.keys(trailers).join(", "),
+      });
+      response.write(grpcEnvelope(encoder.encode("payload")));
+      response.addTrailers(trailers);
+      response.end();
+    });
+    const proxy = await startCPLoopbackProxy({
+      upstreamOrigin: upstream.origin,
+      transportCAPEM: rootPEM,
+    });
+    try {
+      const result = await proxyRequest(proxy.origin, "/cp.v1.SpawnService/ListSpawns");
+      expect(result.trailers).toEqual(trailers);
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+
+  it("unframes, mutates, and reframes one unary gRPC GetPendingIntent message", async () => {
+    const spawnId = "spawn-grpc-1";
+    let acceptEncoding: string | undefined;
+    const upstream = await listenUpstream((request, response) => {
+      const chunks: Buffer[] = [];
+      const receivedAcceptEncoding = request.headers["grpc-accept-encoding"];
+      acceptEncoding = Array.isArray(receivedAcceptEncoding)
+        ? receivedAcceptEncoding.join(",")
+        : receivedAcceptEncoding;
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const received = fromBinary(cpv1.GetPendingIntentRequestSchema, grpcPayload(Buffer.concat(chunks)));
+        expect(received.spawnId).toBe(spawnId);
+        const message = create(cpv1.GetPendingIntentResponseSchema, {
+          ready: true,
+          targetNodeId: "node-1",
+          targetNodeClass: "cloud",
+          targetNodeAccountId: "spawnery-system",
+          nodeCertChain: encoder.encode("cert-chain"),
+        });
+        response.writeHead(200, { "content-type": "application/grpc", trailer: "grpc-status" });
+        response.write(grpcEnvelope(toBinary(cpv1.GetPendingIntentResponseSchema, message)));
+        response.addTrailers({ "grpc-status": "0" });
+        response.end();
+      });
+    });
+    const proxy = await startCPLoopbackProxy({
+      upstreamOrigin: upstream.origin,
+      transportCAPEM: rootPEM,
+      substitution: { field: "targetNodeId", value: "node-substituted" },
+    });
+    try {
+      const request = grpcEnvelope(toBinary(cpv1.GetPendingIntentRequestSchema,
+        create(cpv1.GetPendingIntentRequestSchema, { spawnId })));
+      const result = await proxyRequest(proxy.origin, "/cp.v1.SpawnService/GetPendingIntent", {
+        headers: {
+          "content-type": "application/grpc",
+          "grpc-accept-encoding": "gzip",
+        },
+        body: request,
+      });
+      const rewritten = fromBinary(cpv1.GetPendingIntentResponseSchema, grpcPayload(result.body));
+      expect(rewritten.targetNodeId).toBe("node-substituted");
+      expect(result.trailers).toEqual({ "grpc-status": "0" });
+      expect(acceptEncoding).toBeUndefined();
+      expect(proxy.pendingSpawnIds()).toEqual([spawnId]);
+      expect(proxy.requestCounts().submitIntent).toBe(0);
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+
+  it.each([
+    ["compressed", (payload: Uint8Array) => grpcEnvelope(payload, true)],
+    ["multi-message", (payload: Uint8Array) => Buffer.concat([grpcEnvelope(payload), grpcEnvelope(payload)])],
+  ])("rejects a %s gRPC GetPendingIntent request before upstream", async (_name, body) => {
+    let upstreamRequests = 0;
+    const upstream = await listenUpstream((_request, response) => {
+      upstreamRequests++;
+      response.end("{}");
+    });
+    const proxy = await startCPLoopbackProxy({
+      upstreamOrigin: upstream.origin,
+      transportCAPEM: rootPEM,
+      substitution: { field: "targetNodeId", value: "node-substituted" },
+    });
+    try {
+      const payload = toBinary(cpv1.GetPendingIntentRequestSchema,
+        create(cpv1.GetPendingIntentRequestSchema, { spawnId: "spawn-1" }));
+      const result = await proxyRequest(proxy.origin, "/cp.v1.SpawnService/GetPendingIntent", {
+        headers: { "content-type": "application/grpc" },
+        body: body(payload),
+      });
+      expect(result.status).toBe(400);
+      expect(upstreamRequests).toBe(0);
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+
   it("uses process transport trust when no transport CA is provided", async () => {
     const upstream = await listenUpstream((_request, response) => response.end("{}"));
     const proxy = await startCPLoopbackProxy({ upstreamOrigin: upstream.origin });

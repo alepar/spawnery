@@ -11,6 +11,7 @@ import { fromBinary } from "@bufbuild/protobuf";
 import { cpv1 } from "@spawnery/client";
 
 import {
+  decodeUnaryGRPCMessage,
   rewriteReadyPendingIntentResponse,
   type PendingTargetSubstitution,
 } from "./pending-substitution";
@@ -42,6 +43,9 @@ export interface CPLoopbackProxy {
 }
 
 function pendingSpawnId(body: Uint8Array, contentType: string | undefined): string | undefined {
+  if (contentType?.toLowerCase().includes("grpc")) {
+    return fromBinary(cpv1.GetPendingIntentRequestSchema, decodeUnaryGRPCMessage(body)).spawnId || undefined;
+  }
   try {
     if (contentType?.toLowerCase().includes("proto")) {
       return fromBinary(cpv1.GetPendingIntentRequestSchema, body).spawnId || undefined;
@@ -88,7 +92,7 @@ function sendError(response: Http2ServerResponse, status: number, message: strin
   response.end(message);
 }
 
-/** Start an HTTP loopback proxy that verifies the real CP's TLS certificate with a public root. */
+/** Start an h2c loopback proxy using process HTTPS trust or an explicit hermetic transport CA. */
 export async function startCPLoopbackProxy(
   options: CPLoopbackProxyOptions,
 ): Promise<CPLoopbackProxy> {
@@ -122,8 +126,13 @@ export async function startCPLoopbackProxy(
       return;
     }
     if (pathname === GET_PENDING_INTENT) {
-      const spawnId = pendingSpawnId(requestBody, request.headers["content-type"]);
-      if (spawnId) observedPendingSpawnIds.add(spawnId);
+      try {
+        const spawnId = pendingSpawnId(requestBody, request.headers["content-type"]);
+        if (spawnId) observedPendingSpawnIds.add(spawnId);
+      } catch {
+        sendError(response, 400, "invalid GetPendingIntent request");
+        return;
+      }
     }
 
     const target = new URL(request.url ?? "/", upstream);
@@ -132,6 +141,7 @@ export async function startCPLoopbackProxy(
     for (const name of Object.keys(headers)) {
       if (name.startsWith(":")) delete headers[name];
     }
+    if (pathname === GET_PENDING_INTENT) delete headers["grpc-accept-encoding"];
     const requestOptions: RequestOptions = {
       protocol: "https:",
       hostname: upstream.hostname,
@@ -159,7 +169,11 @@ export async function startCPLoopbackProxy(
             }, options.substitution!)
             : { status, headers: upstreamResponse.headers, body };
           response.writeHead(wire.status, responseHeaders(wire.headers, shouldMutate));
-          response.end(wire.body);
+          response.write(wire.body);
+          const trailers = Object.fromEntries(Object.entries(upstreamResponse.trailers)
+            .filter((entry): entry is [string, string] => entry[1] !== undefined));
+          if (Object.keys(trailers).length > 0) response.addTrailers(trailers);
+          response.end();
         } catch (error) {
           if (error instanceof BodyTooLargeError) sendError(response, 502, "upstream response body too large");
           else sendError(response, 502, "invalid upstream response");

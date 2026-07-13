@@ -18,6 +18,24 @@ export interface PendingIntentWireResponse<Headers> {
   body: Uint8Array;
 }
 
+export function decodeUnaryGRPCMessage(body: Uint8Array): Uint8Array {
+  if (body.length < 5) throw new Error("gRPC body must contain one gRPC message");
+  if ((body[0]! & 1) !== 0) throw new Error("compressed gRPC messages are unsupported");
+  if (body[0] !== 0) throw new Error("unsupported gRPC message flags");
+  const messageLength = Buffer.from(body).readUInt32BE(1);
+  if (body.length !== 5 + messageLength) {
+    throw new Error("gRPC body must contain exactly one gRPC message");
+  }
+  return body.subarray(5);
+}
+
+export function encodeUnaryGRPCMessage(message: Uint8Array): Uint8Array {
+  const body = Buffer.alloc(5 + message.length);
+  body.writeUInt32BE(message.length, 1);
+  body.set(message, 5);
+  return body;
+}
+
 function contentType(headers: unknown): string {
   if (typeof headers !== "object" || headers === null) return "";
   const get = (headers as { get?: unknown }).get;
@@ -60,6 +78,12 @@ export function rewriteReadyPendingIntentResponse<Headers>(
   response: PendingIntentWireResponse<Headers>,
   substitution: PendingTargetSubstitution,
 ): PendingIntentWireResponse<Headers> {
+  if (contentType(response.headers).includes("grpc")) {
+    const payload = decodeUnaryGRPCMessage(response.body);
+    const rewritten = rewriteProtobuf({ ...response, body: payload }, substitution);
+    if (rewritten.body === payload) return response;
+    return { ...rewritten, body: encodeUnaryGRPCMessage(rewritten.body) };
+  }
   if (contentType(response.headers).includes("proto")) {
     return rewriteProtobuf(response, substitution);
   }
