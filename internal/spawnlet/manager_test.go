@@ -41,6 +41,21 @@ func TestExecRunAndAttachHelpersResolveContainer(t *testing.T) {
 	}
 }
 
+// TestAgentRunning_UnknownSpawn is T7: AgentRunning on a spawn id the store has never heard of
+// must error, not panic — the same "unknown spawn" contract as ExecRun/TmuxAttachArgvFor above.
+// The exec-based liveness probe itself (exit 0 = running, ExitError = not running, any other
+// error = unknown) is exercised via the real docker/crictl exec at the e2e lane, not here.
+func TestAgentRunning_UnknownSpawn(t *testing.T) {
+	m := NewManager(runtime.NewFake(), ManagerConfig{AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir()})
+	ok, err := m.AgentRunning(context.Background(), "nope")
+	if err == nil {
+		t.Fatal("AgentRunning on unknown spawn must error")
+	}
+	if ok {
+		t.Fatal("AgentRunning on unknown spawn must report not-running")
+	}
+}
+
 func writeApp(t *testing.T) string {
 	t.Helper()
 	app := t.TempDir()

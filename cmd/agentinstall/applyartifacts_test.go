@@ -428,6 +428,137 @@ func TestApplyArtifacts_NoManifest(t *testing.T) {
 	}
 }
 
+// stubAgentinstall writes a fake `agentinstall` executable to dir that runs script (a shell
+// snippet) instead of the real CLI — used to simulate agentinstall exiting non-zero or dying by
+// signal WITHOUT writing a report, exercising apply-artifacts.sh's EXIT-trap invariant
+// (sp-mwco.2.12 ITEM B) independent of the real CLI's own report-writing behavior.
+func stubAgentinstall(t *testing.T, dir, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "agentinstall"), []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestApplyArtifacts_NonZeroExitNoReport_WritesErrorReport is T1a: agentinstall exits non-zero
+// WITHOUT writing a report (e.g. an unwritable --report path it never got to, or a crash before
+// its own report write) — the residual "ITEM B" hole this task closes. Before this fix, the
+// script's post-check only fired when rc==0, so a non-zero rc with no report left the node to
+// burn its entire wait budget. Now the EXIT trap catches it regardless of rc.
+func TestApplyArtifacts_NonZeroExitNoReport_WritesErrorReport(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+	binDir := t.TempDir()
+	stubAgentinstall(t, binDir, "exit 7")
+
+	artifactsDir := t.TempDir()
+	manifest := `{"artifacts":[{"kind":"mcp","name":"test-mcp","targets":["claude"],"mcp":{"http":{"url":"http://localhost:9999"}}}]}`
+	if err := os.WriteFile(filepath.Join(artifactsDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+	}
+
+	out, code := runHelper(t, helper, "claude-tui", env)
+	if code != 7 {
+		t.Fatalf("expected exit 7 (propagated from the stub), got %d\noutput:\n%s", code, out)
+	}
+
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("expected apply-report.json to be written by the EXIT trap: %v", err)
+	}
+	rep, err := spec.ParseApplyReport(data)
+	if err != nil {
+		t.Fatalf("parse apply-report.json: %v\ncontent: %s", err, data)
+	}
+	if rep.Outcome != spec.OutcomeError {
+		t.Errorf("outcome: got %q want %q", rep.Outcome, spec.OutcomeError)
+	}
+	if !strings.Contains(rep.Error, "rc=7") {
+		t.Errorf("expected error to mention rc=7, got %q", rep.Error)
+	}
+}
+
+// TestApplyArtifacts_KilledBySignalNoReport_WritesErrorReport is T1b: agentinstall is killed by a
+// signal (the subprocess self-signals, simulating an OOM kill or a crash) without writing a
+// report — the parent script sees a 128+signal exit code and the EXIT trap must still catch it.
+func TestApplyArtifacts_KilledBySignalNoReport_WritesErrorReport(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+	binDir := t.TempDir()
+	stubAgentinstall(t, binDir, "kill -TERM $$; sleep 1")
+
+	artifactsDir := t.TempDir()
+	manifest := `{"artifacts":[{"kind":"mcp","name":"test-mcp","targets":["claude"],"mcp":{"http":{"url":"http://localhost:9999"}}}]}`
+	if err := os.WriteFile(filepath.Join(artifactsDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+	}
+
+	out, code := runHelper(t, helper, "claude-tui", env)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit (agentinstall killed by TERM), got 0\noutput:\n%s", out)
+	}
+
+	report := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("expected apply-report.json to be written by the EXIT trap: %v", err)
+	}
+	rep, err := spec.ParseApplyReport(data)
+	if err != nil {
+		t.Fatalf("parse apply-report.json: %v\ncontent: %s", err, data)
+	}
+	if rep.Outcome != spec.OutcomeError {
+		t.Errorf("outcome: got %q want %q", rep.Outcome, spec.OutcomeError)
+	}
+}
+
+// TestApplyArtifacts_UnwritableReportDir_IsLoud is T2: when the report/ path cannot be created
+// (here: it collides with an existing plain FILE, so mkdir -p fails), write_error_report must not
+// swallow the failure — it prints a grep-able SPAWNERY-APPLY-FATAL: marker to stderr, and the
+// script still exits non-zero (via the old-image guard's own explicit exit 1, independent of
+// whether the report write itself succeeded).
+func TestApplyArtifacts_UnwritableReportDir_IsLoud(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+
+	artifactsDir := t.TempDir()
+	// report/ collides with a plain file, so `mkdir -p "$ARTIFACTS_DIR/report"` fails.
+	if err := os.WriteFile(filepath.Join(artifactsDir, "report"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// PATH has NO agentinstall — the old-image guard fires first (before the manifest/report
+	// dispatch), independent of the manifest state.
+	env := []string{
+		"HOME=" + home,
+		"PATH=/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+	}
+
+	out, code := runHelper(t, helper, "claude-tui", env)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit, got 0\noutput:\n%s", out)
+	}
+	if !strings.Contains(out, "SPAWNERY-APPLY-FATAL:") {
+		t.Fatalf("expected stderr to contain SPAWNERY-APPLY-FATAL: marker, got:\n%s", out)
+	}
+}
+
 // TestApplyArtifacts_PropagatesNonZeroExit verifies that a manifest whose only artifact fails to
 // apply (a bogus emitter mapping means the artifact will be reported skipped/failed, not that
 // the shell wrapper swallows it to 0) makes apply-artifacts.sh itself exit non-zero — the

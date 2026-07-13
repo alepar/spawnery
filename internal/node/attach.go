@@ -141,10 +141,19 @@ type attacher struct {
 	// mgr.TmuxHasSession so it is safe to leave unset in simple unit-test helpers.
 	tmuxHasSessionFn func(ctx context.Context, agentID, session string) (bool, error)
 
+	// agentAliveFn checks whether a spawn's agent container is still running (sp-mwco.2.12 ITEM
+	// D). Set to mgr.AgentRunning in runOnce, mirroring tmuxHasSessionFn; nil falls back to
+	// mgr.AgentRunning so it is safe to leave unset in simple unit-test helpers — those that don't
+	// exercise the liveness probe never let AwaitApplyReport's ticker reach a probe tick before
+	// the report arrives or the (short, test-shrunk) timeout fires. Tests that DO exercise the
+	// agent-gone fast-fail path inject a fake here, same pattern as tmuxHasSessionFn.
+	agentAliveFn func(ctx context.Context, spawnID string) (bool, error)
+
 	// applyReportTimeout bounds startSpawn's wait for the agent container's apply-report envelope
-	// (sp-mwco.2.7). Zero => spawnlet.ApplyReportTimeoutFor's manifest-driven policy (patient when
-	// the manifest has a bundle, short otherwise); tests that exercise the "report never arrives"
-	// path override this directly so they don't block for either production default.
+	// (sp-mwco.2.12). Zero => spawnlet.ApplyReportBudget()'s derived budget (SecretWaitTimeout +
+	// slack, the same for a bundle and a no-bundle manifest — see ApplyReportBudget's doc); tests
+	// that exercise the "report never arrives" path override this directly so they don't block for
+	// the production default.
 	applyReportTimeout time.Duration
 
 	// progressHeartbeat overrides progressHeartbeatInterval for heartbeatProgress (sp-mwco.4.7).
@@ -248,6 +257,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		githubRefresh:    githubRefresh,
 		ghControl:        ghControl,
 		tmuxHasSessionFn: mgr.TmuxHasSession,
+		agentAliveFn:     mgr.AgentRunning,
 		represigns:       newRepresignPending(),
 	}
 	// A disconnect unblocks every in-flight represignFunc waiter immediately (RECONNECT MID-FETCH,
@@ -917,6 +927,11 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	// note: the report is produced inside the agent container, so a compromised agent could
 	// forge "ok" — that is not a regression (a compromised agent already has the skills); the
 	// property this buys is that a MISSING or PARTIAL install can no longer look healthy.
+	//
+	// sp-mwco.2.12: the wait ends on the FIRST of {report arrives, agent container confirmed
+	// gone} rather than purely on the timeout — a broken install (agent crashed, or the launcher
+	// aborted on an unreportable failure) fails in ~1-2s with the real reason instead of silently
+	// sitting out the whole budget. Absence of a signal is a bug, not a state.
 	if flags.InstallSkills {
 		emitStep(spawnlet.MilestoneInstallSkills)
 		stager := a.mgr.Artifacts()
@@ -927,23 +942,34 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			// info" rather than failing the spawn over a load error unrelated to the install.
 			manifest = spec.Manifest{}
 		}
-		timeout := a.applyReportTimeout // test override; 0 => spawnlet.ApplyReportTimeoutFor's policy
+		timeout := a.applyReportTimeout // test override; 0 => spawnlet.ApplyReportBudget()
 		if timeout <= 0 {
-			// A no-bundle manifest gets a short budget: a report that can only ever warn must not
-			// stall spawn start for the full bundle-patient budget (e.g. today's goose/hermes/shell
-			// runnables, whose apply-artifacts.sh never invokes agentinstall at all pending
-			// sp-mwco.2.6's runnable->emitter reconciliation, would otherwise stall every artifact-
-			// carrying spawn by the full 2m just to end up warning).
-			timeout = spawnlet.ApplyReportTimeoutFor(manifest)
+			timeout = spawnlet.ApplyReportBudget()
 		}
+		aliveFn := a.agentAliveFn
+		if aliveFn == nil {
+			aliveFn = a.mgr.AgentRunning
+		}
+		alive := func(probeCtx context.Context) (bool, error) { return aliveFn(probeCtx, st.SpawnId) }
 		stop := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "installing_skills", "awaiting skill install report")
-		env, awaitErr := stager.AwaitApplyReport(ctx, st.SpawnId, timeout)
+		env, awaitErr := stager.AwaitApplyReport(ctx, st.SpawnId, timeout, alive)
 		stop()
 		var fatalErr error
 		var entries []spawnlet.InstallEntry
-		if awaitErr != nil {
+		switch {
+		case errors.Is(awaitErr, spawnlet.ErrAgentGone):
+			// The agent container is confirmed gone — no report is ever coming. Surface a
+			// terminal failure with the real reason instead of falling through to a generic
+			// "skill install report" wrapper (which would read like a plain missing-report
+			// timeout). Force outcome=ERROR on the wire: skillInstallOutcomeProto(nil) would
+			// otherwise yield UNSPECIFIED, and a terminal failure must never leave the CP with
+			// "unspecified" — that is exactly the ambiguity this task exists to close.
+			fatalErr = awaitErr
+			entries = spawnlet.SyntheticUnknownEntries(manifest, awaitErr.Error())
+			env = &spec.ApplyReport{Schema: 1, Outcome: spec.OutcomeError, Error: awaitErr.Error()}
+		case awaitErr != nil:
 			fatalErr = fmt.Errorf("skill install report: %w", awaitErr)
-		} else {
+		default:
 			fatalErr, entries = spawnlet.EvaluateApplyReport(manifest, env)
 		}
 		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SkillInstallReport{

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,6 +189,86 @@ func TestStartSpawn_NoArtifacts_SkipsGateEntirely(t *testing.T) {
 	}
 	if lastSkillInstallReport(fs, "sp1") != nil {
 		t.Error("SkillInstallReport sent for an artifact-less spawn")
+	}
+}
+
+// alwaysDead simulates an agent container that is gone from the very first liveness probe tick.
+func alwaysDead(context.Context, string) (bool, error) { return false, nil }
+
+// TestStartSpawn_AgentGone_FailsFastWithReason is T8a: when the agent container is confirmed gone
+// (agentAliveFn reports false) before a report ever arrives, the spawn must fail FAST — well under
+// the (generously large) applyReportTimeout — with a SkillInstallReport carrying outcome=ERROR and
+// an ERROR SpawnStatus whose Detail names the real reason, not a generic deadline.
+func TestStartSpawn_AgentGone_FailsFastWithReason(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	a.applyReportTimeout = 60 * time.Second // large budget: proves the fast-fail is NOT the timeout
+	a.agentAliveFn = alwaysDead
+
+	manifest := `{"artifacts":[{"kind":"skill","name":"s1","targets":["claude"],"bundle":"b1","skill":{"dir":"payloads/s1"}}]}`
+	st := startSpawnWithManifest(t, "sp1", []byte(manifest))
+
+	start := time.Now()
+	a.startSpawn(context.Background(), st)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Fatalf("startSpawn took %v to fail on agent-gone, want well under the 60s budget", elapsed)
+	}
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ERROR {
+		t.Fatalf("terminal phase = %v, want ERROR", got)
+	}
+
+	report := lastSkillInstallReport(fs, "sp1")
+	if report == nil {
+		t.Fatal("no SkillInstallReport sent")
+	}
+	if report.Outcome != nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR {
+		t.Errorf("outcome: got %v, want ERROR (must never leave the CP with UNSPECIFIED on a terminal failure)", report.Outcome)
+	}
+
+	var errStatus *nodev1.SpawnStatus
+	for _, s := range fs.stepStatusesFor("sp1") {
+		if s.Phase == nodev1.SpawnPhase_ERROR {
+			errStatus = s
+		}
+	}
+	if errStatus == nil {
+		t.Fatal("no ERROR status emitted")
+	}
+	if !strings.Contains(errStatus.Detail, "agent container exited") {
+		t.Errorf("ERROR status detail = %q, want it to name the agent-gone reason (spawnlet.ErrAgentGone)", errStatus.Detail)
+	}
+
+	if !be.wasStopped() {
+		t.Error("pod backend Stop was not called after the agent-gone fast-fail")
+	}
+}
+
+// TestStartSpawn_AgentGone_FatalEvenWithNoBundle is T8b: agent-gone is fatal even for a manifest
+// with no bundle_ref groups — unlike a plain missing-report timeout (which only warns for a
+// no-bundle manifest), a confirmed-dead agent can never go ACTIVE regardless of bundle policy.
+func TestStartSpawn_AgentGone_FatalEvenWithNoBundle(t *testing.T) {
+	be := &scriptedPodBackend{script: scriptGoose}
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	a.applyReportTimeout = 60 * time.Second
+	a.agentAliveFn = alwaysDead
+
+	manifest := `{"artifacts":[{"kind":"skill","name":"s1","targets":["claude"]}]}` // no "bundle" field
+	st := startSpawnWithManifest(t, "sp1", []byte(manifest))
+	a.startSpawn(context.Background(), st)
+
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ERROR {
+		t.Fatalf("terminal phase = %v, want ERROR (agent-gone is fatal regardless of bundle policy)", got)
+	}
+	report := lastSkillInstallReport(fs, "sp1")
+	if report == nil {
+		t.Fatal("no SkillInstallReport sent")
+	}
+	if len(report.Entries) != 1 || report.Entries[0].Status != nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN {
+		t.Errorf("entries: %+v", report.Entries)
 	}
 }
 

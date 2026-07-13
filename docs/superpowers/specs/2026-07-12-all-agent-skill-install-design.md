@@ -214,6 +214,59 @@ spawn.
 - **A partially-installed bundle fails the spawn** (all-or-nothing per bundle_ref entry).
 - Individual (non-bundle) skill failures surface as a spawn warning + per-skill status.
 
+**Amendment (`sp-mwco.2.12`, 2026-07-13) — the missing-signal invariant.** A 2026-07-13 root-cause
+investigation found the fail-open above was still live end to end: **absence of a signal was being
+treated as "keep waiting" and only became an error when the wait budget expired** — a hard install
+failure looked identical to a slow install, and a waiter always paid the full timeout to learn the
+difference. The invariant this amendment enforces: **every component that can WAIT on skill
+installation must receive an explicit terminal status (SUCCESS or FAILURE-with-reason) from the
+component doing the work — absence of a signal is a BUG, not a state.** Three legs, all closed by
+this task:
+
+1. **`apply-artifacts.sh` → node.** The script now writes `apply-report.json` (or shouts a
+   grep-able `SPAWNERY-APPLY-FATAL:` stderr marker if it can't even do that) on **every** exit
+   path: success, per-item failure, a non-zero `agentinstall` exit (previously the live hole — the
+   post-check only fired when `rc==0`), `agentinstall` crashing or being killed by a signal, no
+   emitter for the runnable, or an unwritable report dir. An `EXIT INT TERM HUP` trap
+   (`ensure_report_or_shout`) makes this unconditional rather than dependent on which of the
+   script's own exit statements ran.
+2. **Launcher.** The `apply-artifacts "$X" || true` fail-open documented as intentional above is
+   **retracted** — that comment described the exact bug this task closes. A new `apply_artifacts()`
+   wrapper still lets the launcher **proceed** past a non-zero exit as long as a report was
+   written (the node, not the launcher, owns the install verdict — killing the launcher's `set -e`
+   entrypoint on a partial install would lose the per-skill detail the report captured and would
+   race the node's own read of it; the sp-mwco.2.3/2.7 rationale for tolerating a non-zero exit
+   stands). The wrapper **aborts the launcher** only when the failure is *unreportable* (no report
+   file at all) — at that point the only remaining channel to the node is the container dying.
+3. **Node.** `AwaitApplyReport` gained an injectable liveness probe (`AliveFunc`,
+   `Manager.AgentRunning` — a `docker/crictl exec … true` reusing the existing exec seam rather
+   than growing `PodBackend` a new method): the wait now ends on the **first of** {report appears,
+   agent container confirmed gone (two consecutive `alive==false`, so a single exec hiccup can't
+   fail a healthy spawn)}, never purely on the timeout. On agent-gone the node sends a terminal
+   `SkillInstallReport` (outcome=`ERROR`, forced — `skillInstallOutcomeProto(nil)` would otherwise
+   read `UNSPECIFIED`, which a terminal failure must never leave the CP with) and an `ERROR`
+   `SpawnStatus` whose `Detail` names the real reason (`spawnlet.ErrAgentGone`), not a generic
+   deadline. The CP side of leg 3 needed **no new code**: `scheduler.Provision` already turns a
+   node `ERROR` status's `Detail` into `connect.CodeFailedPrecondition` with the node's own
+   message — it was always going to surface the real reason once the node stopped sitting on the
+   full budget to produce one. (Replacing the CP's own fixed 60s wall-clock start deadline with a
+   progress-driven stall window is `sp-mwco.4.8`, out of scope here.)
+
+**Budget, derived not invented.** The old `applyReportTimeout` (2 minutes, bundle) /
+`applyReportNoBundleTimeout` (20s, no-bundle) split is **retracted**, including its "sized for a
+cold-start N-member bundle install" rationale — a 2026-07-13 measurement of the real
+14-skill/48-file/436KB `obra/superpowers` bundle installing inside the agent container timed
+**18-49ms** wall clock (a synthetic 14-member run: 28ms; the no-op path: 10ms). The old timeout was
+effectively 100% margin, 0% work. `ApplyReportBudget()` replaces both constants with one derived
+value — `SecretWaitTimeout` (30s, the value `apply-artifacts.sh --secret-wait-timeout` actually
+blocks on, now injected into the agent env as `SECRET_WAIT_TIMEOUT` by `manager.go` so the Go
+constant and the shell default can't drift — see `TestSecretWaitTimeoutMatchesShellDefault`) plus a
+15s slack for the launcher preamble and the ~25ms of real install work. Bundle vs. no-bundle is now
+purely a difference in verdict **severity** (`EvaluateApplyReport`'s existing fatal-vs-warn split),
+not wait duration — a no-report no-bundle spawn now warns after ~45s instead of 20s, but only
+because steps 1-3 above make a genuinely reportless failure a bug, not a state that survives to be
+timed.
+
 ### 4.6 Content-trust control (gates flipping the harness flags)
 
 The per-agent glue consists largely of switching **off** each harness's own gating (codex feature

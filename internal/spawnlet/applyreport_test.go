@@ -3,8 +3,10 @@ package spawnlet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -27,6 +29,11 @@ func writeApplyReportForTest(t *testing.T, st ArtifactStager, spawnID string, en
 }
 
 // --- AwaitApplyReport ---
+//
+// alive=nil throughout this section is deliberate: it exercises "today's behaviour exactly" (a
+// pure report-file poll with no liveness check), the back-compat contract a nil AliveFunc
+// guarantees. The liveness-probe behaviour itself (ErrAgentGone, two-consecutive-false, probe
+// errors not counting as death) is covered separately below.
 
 func TestAwaitApplyReport_ArrivesLate(t *testing.T) {
 	st := ArtifactStager{Root: t.TempDir()}
@@ -34,7 +41,7 @@ func TestAwaitApplyReport_ArrivesLate(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		writeApplyReportForTest(t, st, "sp1", spec.ApplyReport{Schema: 1, Agent: "claude", Outcome: spec.OutcomeOK})
 	}()
-	env, err := st.AwaitApplyReport(context.Background(), "sp1", 2*time.Second)
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 2*time.Second, nil)
 	if err != nil {
 		t.Fatalf("AwaitApplyReport: %v", err)
 	}
@@ -45,7 +52,7 @@ func TestAwaitApplyReport_ArrivesLate(t *testing.T) {
 
 func TestAwaitApplyReport_TimeoutReturnsNilNil(t *testing.T) {
 	st := ArtifactStager{Root: t.TempDir()}
-	env, err := st.AwaitApplyReport(context.Background(), "sp1", 50*time.Millisecond)
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 50*time.Millisecond, nil)
 	if err != nil {
 		t.Fatalf("expected nil error on plain timeout, got %v", err)
 	}
@@ -61,7 +68,7 @@ func TestAwaitApplyReport_CtxCancelReturnsError(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		cancel()
 	}()
-	env, err := st.AwaitApplyReport(ctx, "sp1", 2*time.Second)
+	env, err := st.AwaitApplyReport(ctx, "sp1", 2*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected ctx cancellation error")
 	}
@@ -79,7 +86,7 @@ func TestAwaitApplyReport_MalformedJSONTreatedAsAbsent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "apply-report.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env, err := st.AwaitApplyReport(context.Background(), "sp1", 100*time.Millisecond)
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 100*time.Millisecond, nil)
 	if err != nil {
 		t.Fatalf("expected nil error (timeout, not ctx error), got %v", err)
 	}
@@ -88,42 +95,97 @@ func TestAwaitApplyReport_MalformedJSONTreatedAsAbsent(t *testing.T) {
 	}
 }
 
-// --- ApplyReportTimeoutFor ---
+// --- AwaitApplyReport liveness probe (ErrAgentGone) ---
 
-// TestApplyReportTimeoutFor_NoBundleIsShort verifies a manifest with no bundle_ref artifacts gets
-// the short (non-fatal-miss) budget, not the full bundle-patient one — an artifact-carrying spawn
-// whose runnable's apply-artifacts.sh never invokes agentinstall (e.g. goose today) must not
-// stall spawn start by the full 2m just to end up warning.
-func TestApplyReportTimeoutFor_NoBundleIsShort(t *testing.T) {
-	m := spec.Manifest{Artifacts: []spec.Artifact{
-		{Kind: spec.KindSkill, Name: "s1", Targets: []string{"claude"}},
-	}}
-	got := ApplyReportTimeoutFor(m)
-	if got != applyReportNoBundleTimeout {
-		t.Errorf("ApplyReportTimeoutFor(no bundle) = %v, want %v", got, applyReportNoBundleTimeout)
-	}
-	if got >= applyReportTimeout {
-		t.Errorf("no-bundle timeout (%v) should be well under the bundle timeout (%v)", got, applyReportTimeout)
-	}
-}
+// TestAwaitApplyReport_AgentGone_ReturnsErrAgentGoneFast is T6a: an alive probe that returns
+// false twice in a row must end the wait in ~agentAlivePollEvery report-poll ticks, NOT after the
+// (much larger) timeout budget — the core fix for ITEM D.
+func TestAwaitApplyReport_AgentGone_ReturnsErrAgentGoneFast(t *testing.T) {
+	st := ArtifactStager{Root: t.TempDir()}
+	alive := func(context.Context) (bool, error) { return false, nil }
 
-// TestApplyReportTimeoutFor_BundleIsPatient verifies a manifest with a bundle_ref artifact gets
-// the full patient budget, since a missing report there ends in a FATAL verdict and a genuinely
-// slow install must be given time to finish.
-func TestApplyReportTimeoutFor_BundleIsPatient(t *testing.T) {
-	m := spec.Manifest{Artifacts: []spec.Artifact{
-		{Kind: spec.KindSkill, Name: "s1", Targets: []string{"claude"}, Bundle: "b1"},
-	}}
-	if got := ApplyReportTimeoutFor(m); got != applyReportTimeout {
-		t.Errorf("ApplyReportTimeoutFor(bundle) = %v, want %v", got, applyReportTimeout)
+	start := time.Now()
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 60*time.Second, alive)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrAgentGone) {
+		t.Fatalf("expected ErrAgentGone, got err=%v env=%+v", err, env)
+	}
+	if env != nil {
+		t.Fatalf("expected nil env, got %+v", env)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("AwaitApplyReport took %v to detect agent-gone, want well under the 60s budget", elapsed)
 	}
 }
 
-// TestApplyReportTimeoutFor_EmptyManifestIsShort verifies an empty manifest (no artifacts at
-// all — shouldn't normally reach the gate, but defensive) also gets the short budget.
-func TestApplyReportTimeoutFor_EmptyManifestIsShort(t *testing.T) {
-	if got := ApplyReportTimeoutFor(spec.Manifest{}); got != applyReportNoBundleTimeout {
-		t.Errorf("ApplyReportTimeoutFor(empty) = %v, want %v", got, applyReportNoBundleTimeout)
+// TestAwaitApplyReport_ReportWinsOverAgentGone is T6b: if the report lands in the same tick the
+// probe would report the agent dead, the report wins — a launcher that wrote an error report and
+// then aborted must surface its real per-skill reason, not a generic "agent gone".
+func TestAwaitApplyReport_ReportWinsOverAgentGone(t *testing.T) {
+	st := ArtifactStager{Root: t.TempDir()}
+	writeApplyReportForTest(t, st, "sp1", spec.ApplyReport{Schema: 1, Outcome: spec.OutcomeError, Error: "no emitter"})
+	alive := func(context.Context) (bool, error) { return false, nil }
+
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 60*time.Second, alive)
+	if err != nil {
+		t.Fatalf("expected nil error (report present), got %v", err)
+	}
+	if env == nil || env.Outcome != spec.OutcomeError {
+		t.Fatalf("expected the real error report to win, got %+v", env)
+	}
+}
+
+// TestAwaitApplyReport_ProbeErrorIsNotDeath is T6c: an alive probe that errors (exec could not
+// even be launched) must not count toward the two-consecutive-false threshold — the wait
+// continues to a plain timeout instead of misreporting a live spawn as gone.
+func TestAwaitApplyReport_ProbeErrorIsNotDeath(t *testing.T) {
+	st := ArtifactStager{Root: t.TempDir()}
+	alive := func(context.Context) (bool, error) {
+		return false, errors.New("exec: docker: executable file not found in $PATH")
+	}
+
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 1200*time.Millisecond, alive)
+	if err != nil {
+		t.Fatalf("expected nil error (plain timeout, probe errors don't count as death), got %v", err)
+	}
+	if env != nil {
+		t.Fatalf("expected nil env, got %+v", env)
+	}
+}
+
+// --- SecretWaitTimeout / ApplyReportBudget (ITEM A) ---
+
+// TestApplyReportBudget_DerivedFromSecretWaitTimeoutPlusSlack is T4a: the budget is derived
+// (SecretWaitTimeout + applyReportSlack), and — the split this task collapses — the SAME for a
+// bundle and a no-bundle manifest.
+func TestApplyReportBudget_DerivedFromSecretWaitTimeoutPlusSlack(t *testing.T) {
+	want := SecretWaitTimeout + applyReportSlack
+	if got := ApplyReportBudget(); got != want {
+		t.Errorf("ApplyReportBudget() = %v, want %v", got, want)
+	}
+}
+
+// TestSecretWaitTimeoutMatchesShellDefault is T4b: a drift guard between the Go constant and
+// apply-artifacts.sh's own shell default for SECRET_WAIT_TIMEOUT, so the two can never silently
+// diverge (manager.go injects SecretWaitTimeout into the agent env; the shell default is only the
+// hand-run-container fallback, but it documents the same intended value).
+func TestSecretWaitTimeoutMatchesShellDefault(t *testing.T) {
+	data, err := os.ReadFile("../../deploy/agent/apply-artifacts.sh")
+	if err != nil {
+		t.Fatalf("read apply-artifacts.sh: %v", err)
+	}
+	re := regexp.MustCompile(`SECRET_WAIT_TIMEOUT:-([0-9a-z]+)`)
+	m := re.FindSubmatch(data)
+	if m == nil {
+		t.Fatal("apply-artifacts.sh: SECRET_WAIT_TIMEOUT default not found")
+	}
+	shellDefault, err := time.ParseDuration(string(m[1]))
+	if err != nil {
+		t.Fatalf("parse shell default %q: %v", m[1], err)
+	}
+	if shellDefault != SecretWaitTimeout {
+		t.Errorf("apply-artifacts.sh SECRET_WAIT_TIMEOUT default = %v, want %v (spawnlet.SecretWaitTimeout)", shellDefault, SecretWaitTimeout)
 	}
 }
 

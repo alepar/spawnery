@@ -62,4 +62,11 @@ func TestCreateThreadsGitEnvMountAndEnv(t *testing.T) {
 			t.Fatalf("env var %s missing from AgentSpec.Env", key)
 		}
 	}
+
+	// (c) sp-mwco.2.12 step 5: SECRET_WAIT_TIMEOUT is injected explicitly, keeping
+	// apply-artifacts.sh's --secret-wait-timeout in lockstep with spawnlet.ApplyReportBudget
+	// (no drift between the node's wait budget and the value it hands the container).
+	if got := envSet["SECRET_WAIT_TIMEOUT"]; got != SecretWaitTimeout.String() {
+		t.Fatalf("SECRET_WAIT_TIMEOUT = %q, want %q", got, SecretWaitTimeout.String())
+	}
 }
