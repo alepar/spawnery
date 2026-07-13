@@ -367,7 +367,7 @@ function _parseExtensions(extsBody: Uint8Array): _ParsedExtensions {
     } else if (bytesEqual(oidBytes, EXT_KEY_USAGE_OID)) {
       extendedKeyUsages = _parseOIDSequence(octVal);
     } else if (bytesEqual(oidBytes, CERT_POLICIES_OID)) {
-      policies = _parseCertificatePolicies(octVal);
+      policies = parseCertificatePoliciesDER(octVal);
     }
   }
 
@@ -412,7 +412,7 @@ function _parseOIDSequence(octVal: Uint8Array): string[] {
   });
 }
 
-function _parseCertificatePolicies(octVal: Uint8Array): string[] {
+export function parseCertificatePoliciesDER(octVal: Uint8Array): string[] {
   const seq = readTLV(octVal, 0);
   if (seq.tag !== TAG_SEQUENCE || seq.next !== octVal.length) throw new Error("x509: malformed certificatePolicies");
   return [...iterSeq(seq.val)].map((info) => {
@@ -583,10 +583,14 @@ export type SPIFFEPrincipal =
   | { trustDomain: string; kind: "service"; role: "cp" | "authsvc"; instanceId: string }
   | { trustDomain: string; kind: "node"; role: "cloud" | "self-hosted"; accountId: string; nodeId: string };
 
-export function parseSPIFFEPrincipal(raw: string, trustDomain: string): SPIFFEPrincipal {
+export function validateTrustDomain(trustDomain: string): void {
   if (!/^[a-z0-9._-]+$/.test(trustDomain)) {
     throw new Error("x509: configured trust domain is not canonical");
   }
+}
+
+export function parseSPIFFEPrincipal(raw: string, trustDomain: string): SPIFFEPrincipal {
+  validateTrustDomain(trustDomain);
   const prefix = `spiffe://${trustDomain}/`;
   if (!raw.startsWith(prefix) || raw.includes("%") || raw.includes("?") || raw.includes("#") || raw.includes("@")) throw new Error("x509: non-canonical SPIFFE URI SAN");
   const path = raw.slice(prefix.length);

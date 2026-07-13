@@ -60,5 +60,11 @@ export async function verifyResolvedTarget(
   if (principal.accountId !== expectedAccount) {
     throw new Error("target: node account is not authorized for this placement");
   }
-  await deps.verifyNodeCertificateRevocation(pem, anchors.rootCAPEM, anchors.nodeCRLs, now);
+  await deps.verifyNodeCertificateRevocation(
+    pem,
+    anchors.rootCAPEM,
+    anchors.nodeCRLs,
+    now,
+    anchors.trustDomain,
+  );
 }

@@ -2,8 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fromBER } from "asn1js";
-import { CertificateRevocationList } from "pkijs";
 import { describe, expect, it } from "vitest";
 
 import { verifyNodeCertificateRevocation } from "./crl";
@@ -14,19 +12,24 @@ interface Bundle {
   crlPEM: string;
 }
 
+interface Scenario {
+  chainPEM: string;
+  bundles: Bundle[];
+  trustDomain?: string;
+}
+
+interface RejectedScenario extends Scenario {
+  error: string;
+  goOutcome?: "parse-rejected" | "verify-rejected";
+}
+
 interface Vectors {
   now: string;
   rootPEM: string;
-  cloudIssuerPEM: string;
-  selfHostedIssuerPEM: string;
-  nodeLeafPEM: string;
   chainPEM: string;
-  currentBundles: Bundle[];
-  revokingBundles: Bundle[];
-  futureBundles: Bundle[];
-  expiredBundles: Bundle[];
-  wrongIssuerBundles: Bundle[];
-  badSignatureBundles: Bundle[];
+  validBundles: Bundle[];
+  acceptedScenarios: Record<string, Scenario>;
+  scenarios: Record<string, RejectedScenario>;
 }
 
 const vectors = JSON.parse(fs.readFileSync(path.resolve(
@@ -34,24 +37,27 @@ const vectors = JSON.parse(fs.readFileSync(path.resolve(
   "testdata/node-crl-vectors.json",
 ), "utf8")) as Vectors;
 const now = new Date(vectors.now);
-
-function pemDER(pem: string): Uint8Array {
-  const match = pem.match(/-----BEGIN [^-]+-----\r?\n([\s\S]+?)\r?\n-----END [^-]+-----/);
-  if (!match) throw new Error("test PEM missing");
-  return Uint8Array.from(atob(match[1].replace(/\s+/g, "")), (char) => char.charCodeAt(0));
-}
+const trustDomain = "prod.spawnery.internal";
+const GO_OUTCOME_SCENARIOS = [
+  "outer-indefinite-length",
+  "outer-noncanonical-length",
+  "noncanonical-time",
+  "invalid-calendar-time",
+  "fractional-generalized-time-1-digit",
+  "fractional-generalized-time-9-digit",
+  "fractional-generalized-time-offset",
+  "fractional-generalized-time-nanosecond-boundary",
+  "fractional-generalized-time-trailing-zero",
+  "fractional-generalized-time-overprecision",
+  "fractional-generalized-time-comma",
+  "absent-version",
+  "non-v2-version",
+  "algorithm-identifier-mismatch",
+] as const;
 
 function pem(type: string, der: Uint8Array): string {
   const base64 = btoa(String.fromCharCode(...der));
-  return `-----BEGIN ${type}-----\n${base64}\n-----END ${type}-----`;
-}
-
-function withoutNextUpdate(source: string): string {
-  const parsed = fromBER(new Uint8Array(pemDER(source)));
-  if (parsed.offset === -1) throw new Error("fixture CRL failed to parse");
-  const crl = new CertificateRevocationList({ schema: parsed.result });
-  crl.nextUpdate = undefined;
-  return pem("X509 CRL", new Uint8Array(crl.toSchema(true).toBER(false)));
+  return `-----BEGIN ${type}-----\n${base64}\n-----END ${type}-----\n`;
 }
 
 function replaceSelfHosted(
@@ -64,21 +70,36 @@ function replaceSelfHosted(
 }
 
 describe("verifyNodeCertificateRevocation", () => {
-  it("accepts a current signed CRL that does not revoke the leaf", async () => {
+  it("accepts a current canonical CRL that does not revoke the leaf", async () => {
     await expect(verifyNodeCertificateRevocation(
       vectors.chainPEM,
       vectors.rootPEM,
-      vectors.currentBundles,
+      vectors.validBundles,
       now,
+      trustDomain,
     )).resolves.toBeUndefined();
   });
+
+  it.each(Object.entries(vectors.acceptedScenarios))(
+    "accepts the Go-approved signed %s scenario",
+    async (_name, scenario) => {
+      await expect(verifyNodeCertificateRevocation(
+        scenario.chainPEM,
+        vectors.rootPEM,
+        scenario.bundles,
+        now,
+        scenario.trustDomain ?? trustDomain,
+      )).resolves.toBeUndefined();
+    },
+  );
 
   it("fails when the chain issuer has no stamped bundle", async () => {
     await expect(verifyNodeCertificateRevocation(
       vectors.chainPEM,
       vectors.rootPEM,
-      vectors.currentBundles.filter((bundle) => bundle.class === "cloud"),
+      vectors.validBundles.filter((bundle) => bundle.class === "cloud"),
       now,
+      trustDomain,
     )).rejects.toThrow("exactly one stamped issuer");
   });
 
@@ -86,16 +107,17 @@ describe("verifyNodeCertificateRevocation", () => {
     await expect(verifyNodeCertificateRevocation(
       vectors.chainPEM,
       vectors.rootPEM,
-      [...vectors.currentBundles, vectors.currentBundles[1]],
+      [...vectors.validBundles, vectors.validBundles[1]],
       now,
+      trustDomain,
     )).rejects.toThrow("exactly one stamped issuer");
   });
 
   it.each([
-    ["issuer certificate", replaceSelfHosted(vectors.currentBundles, {
+    ["issuer certificate", replaceSelfHosted(vectors.validBundles, {
       issuerPEM: pem("CERTIFICATE", new Uint8Array([1, 2, 3])),
     })],
-    ["CRL", replaceSelfHosted(vectors.currentBundles, {
+    ["CRL", replaceSelfHosted(vectors.validBundles, {
       crlPEM: pem("X509 CRL", new Uint8Array([1, 2, 3])),
     })],
   ])("fails on malformed %s PEM/DER", async (_name, bundles) => {
@@ -104,81 +126,24 @@ describe("verifyNodeCertificateRevocation", () => {
       vectors.rootPEM,
       bundles,
       now,
+      trustDomain,
     )).rejects.toThrow();
   });
 
-  it("fails when the stamped issuer is not byte-equal to the chain issuer", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      replaceSelfHosted(vectors.currentBundles, { issuerPEM: vectors.cloudIssuerPEM }),
-      now,
-    )).rejects.toThrow("exactly one stamped issuer");
-  });
+  it.each(Object.entries(vectors.scenarios))(
+    "rejects the signed %s scenario",
+    async (_name, scenario) => {
+      await expect(verifyNodeCertificateRevocation(
+        scenario.chainPEM,
+        vectors.rootPEM,
+        scenario.bundles,
+        now,
+        scenario.trustDomain ?? trustDomain,
+      )).rejects.toThrow(scenario.error);
+    },
+  );
 
-  it("fails when the chain issuer is not rooted in the stamped root", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.nodeLeafPEM,
-      vectors.currentBundles,
-      now,
-    )).rejects.toThrow("not rooted");
-  });
-
-  it("fails when the CRL signature is invalid", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      vectors.badSignatureBundles,
-      now,
-    )).rejects.toThrow("signature");
-  });
-
-  it("fails when thisUpdate is later than the verification clock", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      vectors.futureBundles,
-      now,
-    )).rejects.toThrow("not current");
-  });
-
-  it("fails when nextUpdate is absent", async () => {
-    const bundles = replaceSelfHosted(vectors.currentBundles, {
-      crlPEM: withoutNextUpdate(vectors.currentBundles[1].crlPEM),
-    });
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      bundles,
-      now,
-    )).rejects.toThrow("nextUpdate");
-  });
-
-  it("fails when nextUpdate is expired", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      vectors.expiredBundles,
-      now,
-    )).rejects.toThrow("expired");
-  });
-
-  it("fails when the CRL issuer RDN differs from the stamped issuer subject", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      vectors.wrongIssuerBundles,
-      now,
-    )).rejects.toThrow("issuer");
-  });
-
-  it("fails when the CRL revokes the leaf serial", async () => {
-    await expect(verifyNodeCertificateRevocation(
-      vectors.chainPEM,
-      vectors.rootPEM,
-      vectors.revokingBundles,
-      now,
-    )).rejects.toThrow("revoked");
+  it.each(GO_OUTCOME_SCENARIOS)("records Go rejection for %s", (name) => {
+    expect(["parse-rejected", "verify-rejected"]).toContain(vectors.scenarios[name].goOutcome);
   });
 });
