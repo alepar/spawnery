@@ -236,7 +236,8 @@ func StartGitHubProxy(getenv func(string) string, state *GitHubState) {
 
 // ListenAndServeGitHubProxy binds the github proxy listener on addr (claiming the port before
 // the agent starts — prevents port-squatting §2.6). The caller passes the listener to
-// ServeGitHubProxy after the CA is fetched and parsed.
+// ServeGitHubProxy, which serves immediately: the proxy comes up credential-less and fails
+// closed until the node's first push lands on /control/github.
 func ListenAndServeGitHubProxy(addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
