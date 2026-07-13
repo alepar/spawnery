@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"encoding/json"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,104 +11,96 @@ import (
 	"spawnery/internal/authsvc/token"
 )
 
-func signedEntry(t *testing.T, credential *token.SigningCredential, seq int64, accountID string, tokenIDs []string) SignedFeedEntry {
+func signedEntry(t *testing.T, credential *token.SigningCredential, body *authv1.RevocationEntry) SignedFeedEntry {
 	t.Helper()
-	tidJSON, _ := json.Marshal(tokenIDs)
-	body, err := json.Marshal(feedEntry{Seq: seq, AccountID: accountID, FamilyID: "fam", TokenIDs: string(tidJSON), RevokedAt: testNow.Unix()})
+	payload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := credential.Sign(token.ArtifactTypeRevocation, body)
+	wire, err := credential.Sign(token.ArtifactTypeRevocation, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return SignedFeedEntry{Seq: seq, AccountID: accountID, TokenIDs: string(tidJSON), RevokedAt: testNow.Unix(), Sig: wire}
+	return SignedFeedEntry{Seq: body.Seq, Sig: wire}
 }
 
-func TestRevocationRegistryAppliesVerifiedPayloadNotUnsignedCopies(t *testing.T) {
+func familyEntry(seq int64, account, family, tokenID string, revokedAt, retainUntil int64) *authv1.RevocationEntry {
+	return &authv1.RevocationEntry{
+		Seq: seq, AccountId: account, FamilyId: family, RevokedAt: revokedAt,
+		RevokedTokens: []*authv1.RevokedToken{{TokenId: tokenID, RetainUntil: retainUntil}},
+	}
+}
+
+func TestRevocationRegistryAppliesRetentionAndExclusiveAccountCutoff(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	r := NewRevocationRegistry(nil)
-	entry := signedEntry(t, fixture.credential, 1, "acct", []string{"tok"})
-	entry.AccountID, entry.TokenIDs = "attacker", `["attacker-token"]`
-	if err := r.Apply(entry, fixture.verifier, testNow); err != nil {
-		t.Fatal(err)
+	page := []SignedFeedEntry{
+		signedEntry(t, fixture.credential, familyEntry(2, "alice", "family", "explicit", testNow.Unix()-1, testNow.Unix()+30)),
+		signedEntry(t, fixture.credential, &authv1.RevocationEntry{Seq: 5, AccountId: "bob", RevokedAt: testNow.Unix() - 1, RevokeTokensIssuedBefore: testNow.Unix()}),
 	}
-	if !r.IsRevoked("tok", "acct") || r.IsRevoked("attacker-token", "attacker") {
-		t.Fatal("registry acted on unsigned feed copies")
-	}
-}
-
-func TestRevocationRegistryAcceptsOnlyOrdinaryRevocationArtifacts(t *testing.T) {
-	fixture := newArtifactFixture(t)
-	payload, _ := proto.Marshal(&authv1.SessionTokenBody{Audience: "cp"})
-	session, _ := fixture.credential.Sign(token.ArtifactTypeSession, payload)
-	r := NewRevocationRegistry(nil)
-	if err := r.Apply(SignedFeedEntry{Sig: session}, fixture.verifier, testNow); err == nil {
-		t.Fatal("accepted session artifact")
-	}
-	if r.IsRevoked("", "") {
-		t.Fatal("unexpected mutation")
-	}
-}
-
-func TestRevocationRegistryRejectsSignerRevocationEnvelope(t *testing.T) {
-	fixture := newArtifactFixture(t)
-	payload, err := proto.Marshal(&authv1.SignerRevocationStatement{Environment: "prod", Generation: 1, IssuedAt: testNow.Unix()})
+	last, err := r.ApplyPage(page, fixture.verifier, testNow, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := token.SignSignerRevocationStatement(fixture.intermediate, fixture.intermediateKey, payload)
+	if last != 5 || !r.IsRevoked("explicit", "nobody", testNow.Unix()+10, testNow) || !r.IsRevoked("fresh", "bob", testNow.Unix()-1, testNow) || r.IsRevoked("fresh", "bob", testNow.Unix(), testNow) || r.IsRevoked("fresh", "bob", testNow.Unix()+1, testNow) {
+		t.Fatalf("last=%d explicit=%v old=%v equal=%v future=%v", last,
+			r.IsRevoked("explicit", "nobody", testNow.Unix()+10, testNow),
+			r.IsRevoked("fresh", "bob", testNow.Unix()-1, testNow),
+			r.IsRevoked("fresh", "bob", testNow.Unix(), testNow),
+			r.IsRevoked("fresh", "bob", testNow.Unix()+1, testNow))
+	}
+	if r.IsRevoked("explicit", "nobody", 0, testNow.Add(30*time.Second)) {
+		t.Fatal("expired explicit token remained revoked")
+	}
+}
+
+func TestRevocationRegistryAppliesWholePageAtomically(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	r := NewRevocationRegistry(nil)
+	valid := signedEntry(t, fixture.credential, familyEntry(2, "alice", "family", "prefix", testNow.Unix()-1, testNow.Unix()+30))
+	invalid := signedEntry(t, fixture.credential, familyEntry(3, "alice", "family", "invalid", testNow.Unix()-1, testNow.Unix()+30))
+	invalid.Seq = 4
+	if _, err := r.ApplyPage([]SignedFeedEntry{valid, invalid}, fixture.verifier, testNow, 0); err == nil {
+		t.Fatal("invalid page accepted")
+	}
+	if r.IsRevoked("prefix", "alice", 0, testNow) || r.IsRevoked("invalid", "alice", 0, testNow) {
+		t.Fatal("invalid page partially applied")
+	}
+}
+
+func TestRevocationRegistryRejectsWrongArtifactType(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	payload, err := proto.Marshal(&authv1.SessionTokenBody{Audience: "cp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := fixture.credential.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := NewRevocationRegistry(nil)
-	if err := r.Apply(SignedFeedEntry{Seq: 1, Sig: wire}, fixture.verifier, testNow); err == nil {
-		t.Fatal("accepted signer-revocation envelope as ordinary user revocation")
+	if _, err := r.ApplyPage([]SignedFeedEntry{{Seq: 1, Sig: session}}, fixture.verifier, testNow, 0); err == nil {
+		t.Fatal("session artifact accepted as revocation")
 	}
 }
 
-func TestRevocationRegistryAccountOnlyRevocation(t *testing.T) {
-	fixture := newArtifactFixture(t)
-	r := NewRevocationRegistry(nil)
-	if err := r.Apply(signedEntry(t, fixture.credential, 1, "account-only", nil), fixture.verifier, testNow); err != nil {
-		t.Fatal(err)
-	}
-	if !r.IsRevoked("", "account-only") {
-		t.Fatal("account was not revoked")
-	}
-	if r.IsRevoked("unrelated-token", "") {
-		t.Fatal("account-only entry independently revoked a token")
-	}
-}
-
-func TestRevocationRegistryRejectsUnsignedSequenceSubstitution(t *testing.T) {
-	fixture := newArtifactFixture(t)
-	r := NewRevocationRegistry(nil)
-	entry := signedEntry(t, fixture.credential, 1, "acct", []string{"tok"})
-	entry.Seq = 1000
-	if err := r.Apply(entry, fixture.verifier, testNow); err == nil {
-		t.Fatal("accepted unsigned sequence substitution")
-	}
-	if r.IsRevoked("tok", "acct") {
-		t.Fatal("substituted entry mutated registry")
-	}
-}
-
-func TestRevocationRegistryFansOutToSessions(t *testing.T) {
+func TestRevocationRegistryFansOutExplicitTokensOnly(t *testing.T) {
 	fixture := newArtifactFixture(t)
 	sessions := NewSessionRegistry()
 	r := NewRevocationRegistry(sessions)
-	var cancelled atomic.Int32
-	release := sessions.Add("tok", "acct", func() { cancelled.Add(1) })
-	defer release()
-	if err := r.Apply(signedEntry(t, fixture.credential, 1, "acct", []string{"tok"}), fixture.verifier, testNow); err != nil {
+	var explicitCancelled, siblingCancelled atomic.Int32
+	releaseExplicit := sessions.Add("explicit", "alice", func() { explicitCancelled.Add(1) })
+	defer releaseExplicit()
+	releaseSibling := sessions.Add("sibling", "alice", func() { siblingCancelled.Add(1) })
+	defer releaseSibling()
+	body := &authv1.RevocationEntry{
+		Seq: 1, AccountId: "alice", RevokedAt: testNow.Unix() - 1, RevokeTokensIssuedBefore: testNow.Unix(),
+		RevokedTokens: []*authv1.RevokedToken{{TokenId: "explicit", RetainUntil: testNow.Unix() + 30}},
+	}
+	if _, err := r.ApplyPage([]SignedFeedEntry{signedEntry(t, fixture.credential, body)}, fixture.verifier, testNow, 0); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for cancelled.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if cancelled.Load() == 0 {
-		t.Fatal("session was not cancelled")
+	if explicitCancelled.Load() != 1 || siblingCancelled.Load() != 0 {
+		t.Fatalf("cancellations explicit=%d sibling=%d", explicitCancelled.Load(), siblingCancelled.Load())
 	}
 }

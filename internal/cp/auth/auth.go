@@ -26,6 +26,7 @@ var (
 type Identity struct {
 	Owner     string // account_id from the token body
 	TokenID   string // token_id field (empty for dev-token sessions)
+	IssuedAt  int64
 	ExpiresAt time.Time
 }
 
@@ -84,11 +85,11 @@ func (v *Verifier) Verify(wire string) (Identity, error) {
 				return Identity{}, ErrWrongAudience
 			}
 			// Revocation check.
-			if v.revoked.IsRevoked(body.TokenId, body.AccountId) {
+			if v.revoked.IsRevoked(body.TokenId, body.AccountId, body.IssuedAt, now) {
 				return Identity{}, ErrRevoked
 			}
 			return Identity{
-				Owner: body.AccountId, TokenID: body.TokenId, ExpiresAt: time.Unix(body.ExpiresAt, 0),
+				Owner: body.AccountId, TokenID: body.TokenId, IssuedAt: body.IssuedAt, ExpiresAt: time.Unix(body.ExpiresAt, 0),
 			}, nil
 		}
 	}

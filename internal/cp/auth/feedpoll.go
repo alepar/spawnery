@@ -1,36 +1,40 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	"spawnery/internal/authsvc/token"
 )
 
-// httpDoer is the interface for making HTTP requests (injectable for testing).
+const (
+	maxFeedPageEntries = 256
+	maxFeedPageBytes   = 4 << 20
+)
+
 type httpDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// FeedPoller polls the AS revocation feed, applies valid entries to a RevocationRegistry,
-// and advances a checkpoint past the highest processed seq.
 type FeedPoller struct {
 	doer       httpDoer
-	url        string // base URL of the revocation feed (without ?since=)
+	url        string
 	artifacts  *token.Verifier
 	now        func() time.Time
 	revreg     *RevocationRegistry
 	interval   time.Duration
-	checkpoint int64 // highest seq applied (0 = initial)
+	checkpoint int64
 }
 
-// NewFeedPoller builds a FeedPoller. interval=0 uses 30s default.
 func NewFeedPoller(doer httpDoer, feedURL string, artifacts *token.Verifier, revreg *RevocationRegistry, interval time.Duration) *FeedPoller {
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -38,7 +42,6 @@ func NewFeedPoller(doer httpDoer, feedURL string, artifacts *token.Verifier, rev
 	return &FeedPoller{doer: doer, url: feedURL, artifacts: artifacts, revreg: revreg, interval: interval, now: time.Now}
 }
 
-// Run polls on interval until ctx is cancelled.
 func (p *FeedPoller) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -54,39 +57,66 @@ func (p *FeedPoller) Run(ctx context.Context) {
 	}
 }
 
-// pollOnce fetches one batch from the feed and applies valid entries.
 func (p *FeedPoller) pollOnce(ctx context.Context) error {
-	url := p.url + "?since=" + strconv.FormatInt(p.checkpoint, 10)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	for {
+		page, err := p.fetchPage(ctx)
+		if err != nil {
+			return err
+		}
+		if len(page.Entries) == 0 && page.HasMore {
+			return errors.New("revocation feed: empty page claims more entries")
+		}
+		last, err := p.revreg.ApplyPage(page.Entries, p.artifacts, p.now(), p.checkpoint)
+		if err != nil {
+			return err
+		}
+		p.checkpoint = last
+		if !page.HasMore {
+			return nil
+		}
+	}
+}
+
+func (p *FeedPoller) fetchPage(ctx context.Context) (SignedFeedPage, error) {
+	parsed, err := url.Parse(p.url)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return SignedFeedPage{}, fmt.Errorf("revocation feed URL: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("limit", strconv.Itoa(maxFeedPageEntries))
+	query.Set("since", strconv.FormatInt(p.checkpoint, 10))
+	parsed.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return SignedFeedPage{}, fmt.Errorf("build request: %w", err)
 	}
 	resp, err := p.doer.Do(req)
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", url, err)
+		return SignedFeedPage{}, fmt.Errorf("GET %s: %w", parsed.String(), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("GET %s: status %d: %s", url, resp.StatusCode, body)
+		return SignedFeedPage{}, fmt.Errorf("GET %s: status %d: %s", parsed.String(), resp.StatusCode, body)
 	}
-
-	var entries []SignedFeedEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return fmt.Errorf("decode feed: %w", err)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedPageBytes+1))
+	if err != nil {
+		return SignedFeedPage{}, err
 	}
-
-	var maxSeq int64 = p.checkpoint
-	for _, e := range entries {
-		if err := p.revreg.Apply(e, p.artifacts, p.now()); err != nil {
-			// Log bad entries but don't corrupt checkpoint or stop processing.
-			log.Printf("revocation feed: bad entry seq=%d: %v", e.Seq, err)
-			continue
-		}
-		if e.Seq > maxSeq {
-			maxSeq = e.Seq
-		}
+	if len(raw) > maxFeedPageBytes {
+		return SignedFeedPage{}, errors.New("revocation feed page is too large")
 	}
-	p.checkpoint = maxSeq
-	return nil
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var page SignedFeedPage
+	if err := decoder.Decode(&page); err != nil {
+		return SignedFeedPage{}, fmt.Errorf("decode feed: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return SignedFeedPage{}, errors.New("revocation feed has trailing data")
+	}
+	if page.Entries == nil || len(page.Entries) > maxFeedPageEntries {
+		return SignedFeedPage{}, errors.New("revocation feed entries are missing or too large")
+	}
+	return page, nil
 }
