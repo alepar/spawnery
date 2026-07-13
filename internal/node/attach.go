@@ -77,7 +77,9 @@ type Config struct {
 	NodeTrustDomain string
 
 	// Verifier is the mandatory A4 intent verifier for StartSpawn and SessionOpen.
-	Verifier *IntentVerifier
+	Verifier           *IntentVerifier
+	UserRevocations    UserRevocationLookup
+	RevocationConsumer *RevocationConsumer
 
 	// GitHubMint is the AS AuthService client used for proactive GitHub access-token refresh
 	// (design §16.4). Built in cmd/spawnlet from the node's mTLS identity in enforced mode with AS_URL
@@ -103,15 +105,16 @@ type attacher struct {
 
 	ctrlHTTP httpDoer // POSTs SetModel to the per-pod sidecar control endpoint (injectable for tests)
 
-	mu           sync.Mutex
-	pumps        map[sessionKey]*Pump
-	tmuxRelays   map[sessionKey]*tmuxRelay
-	sessions     map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
-	pending      map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
-	forkBarriers map[string]forkIngressBarrier
-	forkWaits    map[string]forkBarrierWait
-	activeForks  map[string]activeSameNodeFork
-	active       uint32
+	mu               sync.Mutex
+	pumps            map[sessionKey]*Pump
+	tmuxRelays       map[sessionKey]*tmuxRelay
+	sessions         map[string]*sessionRegistry    // spawn_id -> live session set (roster source of truth)
+	pending          map[sessionKey][]pendingClient // attaches that arrived before the pump/relay existed (session STARTING)
+	forkBarriers     map[string]forkIngressBarrier
+	forkWaits        map[string]forkBarrierWait
+	activeForks      map[string]activeSameNodeFork
+	active           uint32
+	afterTakePending func(sessionKey) // test hook: called after releasing a.mu and before a pending drain
 
 	sendMu sync.Mutex
 	stream cpStream
@@ -139,8 +142,16 @@ type attacher struct {
 // session was still STARTING — an async launchSession is mid-flight). It is queued under attacher.pending
 // and bound when the resource readies (mirrors the CP pending-at-Bind precedent).
 type pendingClient struct {
-	clientID string
-	cursor   int64
+	clientID      string
+	cursor        int64
+	authKey       sessionAuthKey
+	attachmentID  string
+	authenticated bool
+}
+
+type pendingClientAuthorization struct {
+	key          sessionAuthKey
+	attachmentID string
 }
 
 // Run keeps the node connected to the CP: it (re)dials and serves one connection at a time, backing
@@ -161,6 +172,10 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	secretReplay := newSecretDeliveryReplay()
 	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
 	safego.Go("node.github-refresh", func() { githubRefresh.run(ctx) })
+	auths := newSessionAuthRegistry(cfg.UserRevocations)
+	if cfg.RevocationConsumer != nil {
+		safego.Go("node.user-revocations", func() { cfg.RevocationConsumer.Run(ctx, auths.revoke) })
+	}
 	// Create the GitHub credential control server only when a mint client is configured.
 	// It is process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
 	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
@@ -171,7 +186,7 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	}
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl)
+		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl, auths)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -206,14 +221,14 @@ func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher, ghControl *githubControlServer) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher, ghControl *githubControlServer, auths *sessionAuthRegistry) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	a := &attacher{
 		cfg: cfg, mgr: mgr, httpc: httpc,
 		verifier:         cfg.Verifier,
-		auths:            newSessionAuthRegistry(),
+		auths:            auths,
 		ctrlHTTP:         &http.Client{Timeout: controlPostTimeout},
 		sx:               &realSessionExec{mgr: mgr},
 		pumps:            map[sessionKey]*Pump{},
@@ -461,20 +476,36 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 			}
 			verifiedAuth = auth
 		}
+		registeredAuth := false
 		if a.auths != nil && verifiedAuth.AccountID != "" {
 			if !a.auths.registerIfNewer(openKey, sessionAuthRecord{
-				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, expiresAt: verifiedAuth.ExpiresAt,
+				accountID: verifiedAuth.AccountID, tokenID: verifiedAuth.TokenID, issuedAt: verifiedAuth.IssuedAt, expiresAt: verifiedAuth.ExpiresAt,
 				sessionKeyHash: verifiedAuth.SessionKeyHash, generation: m.Open.GetGeneration(), nodeID: a.cfg.NodeID,
 				attachmentID: m.Open.GetAttachmentId(), attachmentSequence: m.Open.GetAttachmentSequence(),
 			}, func(reason string) {
 				a.closeClientAuthorization(openKey, m.Open.GetGeneration(), reason, m.Open.GetAttachmentId())
 			}) {
+				a.rejectSessionOpen(m.Open, "session authorization was superseded or revoked")
 				return
 			}
+			registeredAuth = true
 		}
-		if !a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor) {
-			if a.auths != nil {
-				a.auths.remove(sessionAuthKey{spawnID: m.Open.GetSpawnId(), sessionID: sid(m.Open.GetSessionId()), clientID: m.Open.GetClientId()})
+		bind := func() bool {
+			if registeredAuth {
+				return a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor,
+					pendingClientAuthorization{key: openKey, attachmentID: m.Open.GetAttachmentId()})
+			}
+			return a.attachClient(m.Open.SpawnId, sid(m.Open.SessionId), m.Open.ClientId, m.Open.Cursor)
+		}
+		attached := false
+		if registeredAuth {
+			attached = a.auths.bindAttachment(openKey, m.Open.GetAttachmentId(), bind)
+		} else {
+			attached = bind()
+		}
+		if !attached {
+			if registeredAuth {
+				a.auths.removeIfAttachment(openKey, m.Open.GetAttachmentId())
 			}
 			a.rejectSessionOpen(m.Open, "session attachment unavailable")
 		}
@@ -1351,8 +1382,14 @@ func (a *attacher) frameSenderFor(spawnID, sessionID, clientID string) frameSend
 	}
 }
 
-func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64) bool {
+func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int64, authorization ...pendingClientAuthorization) bool {
 	k := sessionKey{spawnID, sessionID}
+	pc := pendingClient{clientID: clientID, cursor: cursor}
+	if len(authorization) == 1 {
+		pc.authKey = authorization[0].key
+		pc.attachmentID = authorization[0].attachmentID
+		pc.authenticated = true
+	}
 	a.mu.Lock()
 	relay := a.tmuxRelays[k]
 	p := a.pumps[k]
@@ -1367,7 +1404,7 @@ func (a *attacher) attachClient(spawnID, sessionID, clientID string, cursor int6
 				if a.pending == nil {
 					a.pending = map[sessionKey][]pendingClient{}
 				}
-				a.pending[k] = append(a.pending[k], pendingClient{clientID: clientID, cursor: cursor})
+				a.pending[k] = append(a.pending[k], pc)
 				a.mu.Unlock()
 				return true
 			}
@@ -1394,6 +1431,16 @@ func (a *attacher) takePending(k sessionKey) []pendingClient {
 	pend := a.pending[k]
 	delete(a.pending, k)
 	return pend
+}
+
+func (a *attacher) bindPendingClient(pc pendingClient, bind func() bool) bool {
+	if !pc.authenticated {
+		return bind()
+	}
+	if a.auths == nil {
+		return false
+	}
+	return a.auths.bindAttachment(pc.authKey, pc.attachmentID, bind)
 }
 
 // removePending drops any queued attach for clientID under key k (a client that disconnected before its
@@ -1492,7 +1539,7 @@ func (a *attacher) reauthenticateClient(msg *nodev1.SessionReauth) {
 		return
 	}
 	replaced, found := a.auths.replace(key, sessionAuthRecord{
-		accountID: auth.AccountID, tokenID: auth.TokenID, expiresAt: auth.ExpiresAt,
+		accountID: auth.AccountID, tokenID: auth.TokenID, issuedAt: auth.IssuedAt, expiresAt: auth.ExpiresAt,
 		sessionKeyHash: auth.SessionKeyHash, generation: generation, nodeID: a.cfg.NodeID,
 		attachmentID: msg.GetAttachmentId(),
 	}, owner)
@@ -1601,10 +1648,17 @@ func (a *attacher) launchSession(ctx context.Context, spawnID string, e *session
 		a.tmuxRelays[k] = relay
 		pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 		a.mu.Unlock()
+		if a.afterTakePending != nil {
+			a.afterTakePending(k)
+		}
 		for _, pc := range pend {
-			if err := relay.attach(context.Background(), pc.clientID); err != nil {
-				slog.Warn("tmux attach failed", "spawn", spawnID, "session", e.id, "client", pc.clientID, "err", err)
-			}
+			a.bindPendingClient(pc, func() bool {
+				if err := relay.attach(context.Background(), pc.clientID); err != nil {
+					slog.Warn("tmux attach failed", "spawn", spawnID, "session", e.id, "client", pc.clientID, "err", err)
+					return false
+				}
+				return true
+			})
 		}
 		reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
 		a.emitRoster(spawnID)
@@ -1665,8 +1719,14 @@ func (a *attacher) launchACPSession(ctx context.Context, spawnID string, reg *se
 	a.applyForkBarrierLocked(spawnID, p)
 	pend := a.takePending(k) // bind attaches that arrived while this session was STARTING (after unlock)
 	a.mu.Unlock()
+	if a.afterTakePending != nil {
+		a.afterTakePending(k)
+	}
 	for _, pc := range pend {
-		p.attachClient(pc.clientID, pc.cursor, a.frameSenderFor(spawnID, e.id, pc.clientID))
+		a.bindPendingClient(pc, func() bool {
+			p.attachClient(pc.clientID, pc.cursor, a.frameSenderFor(spawnID, e.id, pc.clientID))
+			return true
+		})
 	}
 	reg.setState(e.id, nodev1.SessionState_SESSION_STATE_ACTIVE)
 	a.emitRoster(spawnID)

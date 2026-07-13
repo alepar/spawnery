@@ -1,14 +1,8 @@
 package authsvc
 
-// GET /revocations?since=<seq> — signed revocation feed for the CP (A2) to poll [AM10/(7)].
-//
-// Signing: each entry is a certified artifact envelope with type revocation-entry. A2 verifies
-// its embedded leaf-first chain against the environment root before parsing the payload.
-//
-// Response: JSON array of SignedRevocationEntry. The CP verifies the sig field, then
-// must advance its checkpoint past the highest seq it has processed to avoid re-delivering.
-//
-// Access control is enforced by InternalHandler's typed CP-service policy.
+// GET /revocations?since=<seq>&limit=<n> serves bounded signed pages to authenticated CP/node
+// consumers. Only seq and the certified artifact are exposed outside the signature; all binding
+// data is deterministic protobuf inside the verified artifact payload.
 
 import (
 	"encoding/json"
@@ -16,87 +10,118 @@ import (
 	"net/http"
 	"strconv"
 
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
 )
 
-// SignedRevocationEntry is one entry in the /revocations feed that A2 consumes.
-//
-// SECURITY CONTRACT (A2 integrators must read this):
-// Sig is the full certified revocation-entry envelope. The outer fields (Seq, AccountID,
-// FamilyID, TokenIDs, RevokedAt) are convenience copies — they are NOT authenticated. A2 MUST
-// call token.Verifier.Verify on Sig and read only the verified payload bytes (WM9 discipline).
-// Never trust the outer fields before verification; they are vulnerable to tampering.
+const (
+	maxRevocationPageEntries = 256
+	maxRevocationPageBytes   = 3 << 20
+)
+
 type SignedRevocationEntry struct {
-	Seq       int64  `json:"seq"`
-	AccountID string `json:"account_id"`
-	FamilyID  string `json:"family_id"`
-	TokenIDs  string `json:"token_ids"` // JSON array of access-token token_ids
-	RevokedAt int64  `json:"revoked_at"`
-	Sig       string `json:"sig"` // certified envelope; verify before trusting outer fields
+	Seq int64  `json:"seq"`
+	Sig string `json:"sig"`
 }
 
-// serveRevocations handles GET /revocations?since=<seq>.
-// Returns all events with seq > since, each signed with the AS session key [AM10].
-func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
-	sinceStr := r.URL.Query().Get("since")
-	var since int64
-	if sinceStr != "" {
-		var err error
-		since, err = strconv.ParseInt(sinceStr, 10, 64)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", "since must be an integer")
-			return
-		}
-	}
+type RevocationPage struct {
+	Entries []SignedRevocationEntry `json:"entries"`
+	HasMore bool                    `json:"has_more"`
+}
 
-	evs, err := i.store.Revocations().Since(r.Context(), since)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+func (i *IdP) serveRevocations(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	since, ok := parseRevocationPageInt(query["since"], 0, 0, int64(^uint64(0)>>1))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request", "since must be a non-negative integer")
+		return
+	}
+	limit, ok := parseRevocationPageInt(query["limit"], maxRevocationPageEntries, 1, maxRevocationPageEntries)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request", "limit must be an integer from 1 through 256")
 		return
 	}
 
-	entries := make([]SignedRevocationEntry, 0, len(evs))
-	for _, ev := range evs {
-		e, err := i.signRevocationEntry(ev)
+	events, hasMore, err := i.store.Revocations().PageAfter(r.Context(), since, int(limit), i.now().Unix())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "revocation page unavailable")
+		return
+	}
+	entries := make([]SignedRevocationEntry, 0, len(events))
+	pageBytes := len(`{"entries":[],"has_more":false}`)
+	for _, event := range events {
+		entry, err := i.signRevocationEntry(event)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "server_error", "signing failed")
 			return
 		}
-		entries = append(entries, e)
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "server_error", "encoding failed")
+			return
+		}
+		separatorBytes := 0
+		if len(entries) > 0 {
+			separatorBytes = 1
+		}
+		if pageBytes+separatorBytes+len(encoded) > maxRevocationPageBytes {
+			if len(entries) == 0 {
+				writeError(w, http.StatusInternalServerError, "server_error", "revocation entry exceeds page limit")
+				return
+			}
+			hasMore = true
+			break
+		}
+		entries = append(entries, entry)
+		pageBytes += separatorBytes + len(encoded)
 	}
 
+	raw, err := json.Marshal(RevocationPage{Entries: entries, HasMore: hasMore})
+	if err != nil || len(raw) > maxRevocationPageBytes {
+		writeError(w, http.StatusInternalServerError, "server_error", "encoding failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(entries)
+	_, _ = w.Write(raw)
 }
 
-// signRevocationEntry signs a revocation event using the certified artifact discipline.
-// The entry bytes are the canonical JSON of {seq,account_id,family_id,token_ids,revoked_at}.
-// The sig is over (RevocationDomainPrefix || entry_bytes) — same raw-bytes discipline as tokens.
-func (i *IdP) signRevocationEntry(ev store.RevocationEvent) (SignedRevocationEntry, error) {
-	type entryBody struct {
-		Seq       int64  `json:"seq"`
-		AccountID string `json:"account_id"`
-		FamilyID  string `json:"family_id"`
-		TokenIDs  string `json:"token_ids"`
-		RevokedAt int64  `json:"revoked_at"`
+func parseRevocationPageInt(values []string, defaultValue, minimum, maximum int64) (int64, bool) {
+	if len(values) == 0 {
+		return defaultValue, true
 	}
-	body := entryBody{
-		Seq: ev.Seq, AccountID: ev.AccountID, FamilyID: ev.FamilyID,
-		TokenIDs: ev.TokenIDs, RevokedAt: ev.RevokedAt,
+	if len(values) != 1 || values[0] == "" {
+		return 0, false
 	}
-	bodyBytes, err := json.Marshal(body)
+	value, err := strconv.ParseInt(values[0], 10, 64)
+	if err != nil || value < minimum || value > maximum {
+		return 0, false
+	}
+	return value, true
+}
+
+func (i *IdP) signRevocationEntry(event store.RevocationEvent) (SignedRevocationEntry, error) {
+	revokedTokens := make([]*authv1.RevokedToken, 0, len(event.RevokedTokens))
+	for _, revoked := range event.RevokedTokens {
+		revokedTokens = append(revokedTokens, &authv1.RevokedToken{
+			TokenId: revoked.TokenID, RetainUntil: revoked.RetainUntil,
+		})
+	}
+	body := &authv1.RevocationEntry{
+		Seq: event.Seq, AccountId: event.AccountID, FamilyId: event.FamilyID,
+		RevokedAt: event.RevokedAt, RevokedTokens: revokedTokens,
+		RevokeTokensIssuedBefore: event.RevokeTokensIssuedBefore,
+	}
+	payload, err := (proto.MarshalOptions{Deterministic: true}).Marshal(body)
 	if err != nil {
 		return SignedRevocationEntry{}, fmt.Errorf("revocation: marshal: %w", err)
 	}
-	wire, err := i.signers.sign(token.ArtifactTypeRevocation, bodyBytes)
+	wire, err := i.signers.sign(token.ArtifactTypeRevocation, payload)
 	if err != nil {
 		return SignedRevocationEntry{}, fmt.Errorf("revocation: sign: %w", err)
 	}
-	return SignedRevocationEntry{
-		Seq: ev.Seq, AccountID: ev.AccountID, FamilyID: ev.FamilyID,
-		TokenIDs: ev.TokenIDs, RevokedAt: ev.RevokedAt,
-		Sig: wire, // full wire so verifier can verify directly
-	}, nil
+	return SignedRevocationEntry{Seq: event.Seq, Sig: wire}, nil
 }

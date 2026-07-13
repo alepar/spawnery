@@ -104,7 +104,7 @@ export class OAuthPoPAuth implements AuthStrategy {
     // spots): App.tsx normalizes "/" -> "/templates" once authed (client-side, no reload), so the
     // eventual URL is /templates; this only waits for the callback's transient query/path to
     // clear, which is enough for the SPA to have consumed the token and settled into "authed".
-    await p.waitForURL((url) => !url.searchParams.has("access_token") && url.pathname !== "/callback", {
+    await p.waitForURL((url) => !url.searchParams.has("cp_access_token") && url.pathname !== "/callback", {
       timeout: 30_000,
     });
   }

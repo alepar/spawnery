@@ -338,7 +338,7 @@ sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline \
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
 sudo install -d -m0700 /etc/spawnery/authsvc /etc/spawnery/cp \
   /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations \
-  /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations
+  /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations
 sudo install -d -m0700 /etc/spawnery/node
 sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/
 sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/

@@ -547,8 +547,69 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 	if nack != "" {
 		t.Fatalf("open happy path: want success, got nack=%s detail=%s", nack, detail)
 	}
-	if auth.AccountID != "alice" || auth.TokenID != "tok-open" || !auth.ExpiresAt.Equal(now.Add(15*time.Minute)) || len(auth.SessionKeyHash) != sha256.Size {
+	if auth.AccountID != "alice" || auth.TokenID != "tok-open" || auth.IssuedAt != now.Unix() || !auth.ExpiresAt.Equal(now.Add(15*time.Minute)) || len(auth.SessionKeyHash) != sha256.Size {
 		t.Fatalf("authorization = %+v", auth)
+	}
+}
+
+type cutoffUserRevocationLookup struct {
+	explicitToken string
+	accountID     string
+	cutoff        int64
+}
+
+func (r cutoffUserRevocationLookup) IsRevoked(tokenID, accountID string, issuedAt int64) bool {
+	return tokenID == r.explicitToken || (accountID == r.accountID && issuedAt < r.cutoff)
+}
+
+func TestIntentVerifierEnforcesExplicitTokensAndExclusiveAccountCutoffForEveryOperation(t *testing.T) {
+	now := time.Unix(1_770_000_000, 0)
+	operations := []struct {
+		name string
+		op   intent.Op
+	}{{"start", intent.OpCreateSpawn}, {"open", intent.OpSessionOpen}, {"reauth", intent.OpSessionReauth}}
+	cases := []struct {
+		name          string
+		issuedAt      time.Time
+		explicitToken string
+		wantRejected  bool
+	}{
+		{name: "explicit", issuedAt: now.Add(time.Second), explicitToken: "tok-test", wantRejected: true},
+		{name: "before cutoff", issuedAt: now.Add(-time.Second), wantRejected: true},
+		{name: "at cutoff", issuedAt: now},
+		{name: "after cutoff", issuedAt: now.Add(time.Second)},
+	}
+	for _, operation := range operations {
+		for _, test := range cases {
+			t.Run(operation.name+"/"+test.name, func(t *testing.T) {
+				signer, artifacts := genASKey(t)
+				sessionKey := genECDSA(t)
+				var body *authv1.IntentBody
+				switch operation.op {
+				case intent.OpCreateSpawn:
+					body = goodStartBody("sp-1", "node-1", 1, now)
+				case intent.OpSessionOpen:
+					body = &authv1.IntentBody{Jti: "jti-open", IssuedAt: now.Unix(), Op: string(operation.op), SpawnId: "sp-1", Generation: 1, SessionId: "sess-a", TargetNodeId: "node-1"}
+				case intent.OpSessionReauth:
+					body = &authv1.IntentBody{Jti: "jti-reauth", IssuedAt: now.Unix(), Op: string(operation.op), SpawnId: "sp-1", Generation: 1, SessionId: "sess-a", TargetNodeId: "node-1", NewTokenId: "tok-test"}
+				}
+				env := buildIntentEnvelope(t, signer, artifacts, sessionKey, "alice", test.issuedAt, body, operation.op)
+				lookup := cutoffUserRevocationLookup{explicitToken: test.explicitToken, accountID: "alice", cutoff: now.Unix()}
+				verifier := NewIntentVerifier(artifacts, "alice", "node-1", false, func() time.Time { return now }, lookup)
+				var nack NACKCode
+				switch operation.op {
+				case intent.OpCreateSpawn:
+					_, nack, _ = verifier.VerifyStart(env, goodStartFields("sp-1", "node-1", 1))
+				case intent.OpSessionOpen:
+					_, nack, _ = verifier.VerifyOpen(env, OpenFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"})
+				case intent.OpSessionReauth:
+					_, nack, _ = verifier.VerifyReauth(env, ReauthFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"})
+				}
+				if gotRejected := nack == NACKTokenInvalid; gotRejected != test.wantRejected {
+					t.Fatalf("nack=%q rejected=%v want=%v", nack, gotRejected, test.wantRejected)
+				}
+			})
+		}
 	}
 }
 

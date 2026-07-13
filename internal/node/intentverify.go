@@ -49,28 +49,38 @@ const (
 
 // IntentVerifier implements the A4 node-side verification chain.
 type IntentVerifier struct {
-	artifacts  *token.Verifier
-	nodeOwner  string // for self-hosted owner enforcement
-	nodeID     string // the node's own id; target_node_id must match this
-	selfHosted bool
-	now        func() time.Time
-	jtiCache   *intent.JTICache
+	artifacts   *token.Verifier
+	nodeOwner   string // for self-hosted owner enforcement
+	nodeID      string // the node's own id; target_node_id must match this
+	selfHosted  bool
+	now         func() time.Time
+	jtiCache    *intent.JTICache
+	revocations UserRevocationLookup
+}
+
+type UserRevocationLookup interface {
+	IsRevoked(tokenID, accountID string, issuedAt int64) bool
 }
 
 // NewIntentVerifier constructs a verifier. artifacts is rooted in the environment CA and validates
 // certified session-token artifacts. nodeOwner is the declared node owner; selfHosted
 // enables the extra owner==NodeOwner enforcement. nodeID is this node's own id.
-func NewIntentVerifier(artifacts *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
+func NewIntentVerifier(artifacts *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time, revocations ...UserRevocationLookup) *IntentVerifier {
 	if now == nil {
 		now = time.Now
 	}
+	var lookup UserRevocationLookup
+	if len(revocations) > 0 {
+		lookup = revocations[0]
+	}
 	return &IntentVerifier{
-		artifacts:  artifacts,
-		nodeOwner:  nodeOwner,
-		nodeID:     nodeID,
-		selfHosted: selfHosted,
-		now:        now,
-		jtiCache:   intent.NewJTICache(now),
+		artifacts:   artifacts,
+		nodeOwner:   nodeOwner,
+		nodeID:      nodeID,
+		selfHosted:  selfHosted,
+		now:         now,
+		jtiCache:    intent.NewJTICache(now),
+		revocations: lookup,
 	}
 }
 
@@ -93,6 +103,7 @@ type StartFields struct {
 type Authorization struct {
 	AccountID      string
 	TokenID        string
+	IssuedAt       int64
 	ExpiresAt      time.Time
 	SessionKeyHash []byte
 }
@@ -169,6 +180,9 @@ func (v *IntentVerifier) verify(
 	if body.Audience != "node" {
 		return zero, NACKWrongAudience, fmt.Sprintf("aud=%q want node", body.Audience)
 	}
+	if v.revocations != nil && v.revocations.IsRevoked(body.TokenId, body.AccountId, body.IssuedAt) {
+		return zero, NACKTokenInvalid, "node authorization is revoked"
+	}
 
 	// Step 3: owner match. CP-asserted owner must match the token's account_id.
 	// In enforced cloud mode (not self-hosted) asserted_owner must not be empty: an empty
@@ -212,7 +226,7 @@ func (v *IntentVerifier) verify(
 		return zero, NACKCorrespondence, fmt.Sprintf("op: intent=%q expected=%q", intentBody.GetOp(), expectedOp)
 	}
 	auth := Authorization{
-		AccountID: body.GetAccountId(), TokenID: body.GetTokenId(),
+		AccountID: body.GetAccountId(), TokenID: body.GetTokenId(), IssuedAt: body.GetIssuedAt(),
 		ExpiresAt:      time.Unix(body.GetExpiresAt(), 0),
 		SessionKeyHash: bytes.Clone(body.GetSessionKeyHash()),
 	}

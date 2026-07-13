@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +33,7 @@ func seedFamily(t *testing.T, st store.Store, accountID string, spkiDER []byte, 
 		SessionPubkeySPKI: spkiDER,
 		CPAccessTokenID:   "cp-" + accountID,
 		NodeAccessTokenID: "node-" + accountID,
+		AccessExpiresAt:   now.Add(accessTokenTTL).Unix(),
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -260,13 +260,13 @@ func TestRefreshReuseOutsideGrace(t *testing.T) {
 	if err != nil || !successor.Revoked {
 		t.Fatalf("successor was not durably revoked: row=%+v err=%v", successor, err)
 	}
-	events, err := st.Revocations().Since(context.Background(), 0)
+	events, _, err := st.Revocations().PageAfter(context.Background(), 0, 256, staleTime.Unix())
 	if err != nil || len(events) != 1 {
 		t.Fatalf("reuse revocation events = %+v, err=%v", events, err)
 	}
-	var ids []string
-	if err := json.Unmarshal([]byte(events[0].TokenIDs), &ids); err != nil {
-		t.Fatal(err)
+	ids := make([]string, 0, len(events[0].RevokedTokens))
+	for _, revoked := range events[0].RevokedTokens {
+		ids = append(ids, revoked.TokenID)
 	}
 	want := []string{row.CPAccessTokenID, row.NodeAccessTokenID, successor.CPAccessTokenID, successor.NodeAccessTokenID}
 	sort.Strings(ids)
@@ -314,6 +314,7 @@ func TestRefreshFamilyMaxAge(t *testing.T) {
 		SessionPubkeySPKI: spkiDER,
 		CPAccessTokenID:   "cp-old",
 		NodeAccessTokenID: "node-old",
+		AccessExpiresAt:   now.Add(accessTokenTTL).Unix(),
 		CreatedAt:         oldFamilyTime.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),

@@ -9,10 +9,13 @@ import (
 	"io"
 	"net/http"
 	"reflect"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
@@ -62,7 +65,7 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	}
 
 	// Revocation event should be in the feed.
-	evs, err := st.Revocations().Since(context.Background(), 0)
+	evs, _, err := st.Revocations().PageAfter(context.Background(), 0, 256, now.Unix())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +73,12 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	for _, ev := range evs {
 		if ev.FamilyID == famID {
 			found = true
-			var ids []string
-			if err := json.Unmarshal([]byte(ev.TokenIDs), &ids); err != nil {
-				t.Fatal(err)
+			want := []store.RevokedToken{
+				{EventSeq: ev.Seq, TokenID: row.CPAccessTokenID, RetainUntil: row.AccessExpiresAt},
+				{EventSeq: ev.Seq, TokenID: row.NodeAccessTokenID, RetainUntil: row.AccessExpiresAt},
 			}
-			if want := []string{row.CPAccessTokenID, row.NodeAccessTokenID}; !reflect.DeepEqual(ids, want) {
-				t.Fatalf("revocation token ids = %v, want %v", ids, want)
+			if !reflect.DeepEqual(ev.RevokedTokens, want) {
+				t.Fatalf("revocation tokens = %v, want %v", ev.RevokedTokens, want)
 			}
 		}
 	}
@@ -89,8 +92,7 @@ func TestLogoutEverywherePropagatesStoreFailures(t *testing.T) {
 		name string
 		set  func(*storeFaults)
 	}{
-		{name: "lookup", set: func(f *storeFaults) { f.failOldestFamily = true }},
-		{name: "revoke", set: func(f *storeFaults) { f.failRevoke = true }},
+		{name: "revoke", set: func(f *storeFaults) { f.failRevokeAccount = true }},
 		{name: "event", set: func(f *storeFaults) { f.failAppend = true }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,11 +123,67 @@ func TestLogoutEverywherePropagatesStoreFailures(t *testing.T) {
 			if err != nil || row.Revoked {
 				t.Fatalf("family changed after failed logout-everywhere: row=%+v err=%v", row, err)
 			}
-			events, err := st.Revocations().Since(context.Background(), 0)
+			events, _, err := st.Revocations().PageAfter(context.Background(), 0, 256, now.Unix())
 			if err != nil || len(events) != 0 {
 				t.Fatalf("events after failed logout-everywhere = %+v, err=%v", events, err)
 			}
 		})
+	}
+}
+
+func TestLogoutEverywhereEmitsOneRecoverableAccountEvent(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	srv, _, st := testAS(t, fake, now)
+	seedUser(t, st, "acct-everywhere-one", 75002, now)
+	_, spkiDER := newTestP256(t)
+	rawToken, _ := seedFamily(t, st, "acct-everywhere-one", spkiDER, now)
+	first, err := st.RefreshSessions().Get(context.Background(), sha256Hex(rawToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.TokenHash = "second-family-hash"
+	second.FamilyID = "second-family"
+	second.CPAccessTokenID = "second-cp"
+	second.NodeAccessTokenID = "second-node"
+	second.AccessExpiresAt = now.Add(7 * time.Minute).Unix()
+	if err := st.RefreshSessions().Insert(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/logout?everywhere=1", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.AddCookie(&http.Cookie{Name: logoutSessionCookieName, Value: rawToken})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logout-everywhere status = %d", resp.StatusCode)
+	}
+
+	events, _, err := st.Revocations().PageAfter(context.Background(), 0, 256, now.Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events: want one account event, got %+v", events)
+	}
+	event := events[0]
+	if event.AccountID != "acct-everywhere-one" || event.FamilyID != "" || event.RevokeTokensIssuedBefore != now.Unix() {
+		t.Fatalf("account event binding: %+v", event)
+	}
+	want := []store.RevokedToken{
+		{EventSeq: event.Seq, TokenID: first.CPAccessTokenID, RetainUntil: first.AccessExpiresAt},
+		{EventSeq: event.Seq, TokenID: first.NodeAccessTokenID, RetainUntil: first.AccessExpiresAt},
+		{EventSeq: event.Seq, TokenID: second.CPAccessTokenID, RetainUntil: second.AccessExpiresAt},
+		{EventSeq: event.Seq, TokenID: second.NodeAccessTokenID, RetainUntil: second.AccessExpiresAt},
+	}
+	if !reflect.DeepEqual(event.RevokedTokens, want) {
+		t.Fatalf("account event tokens: want %+v, got %+v", want, event.RevokedTokens)
 	}
 }
 
@@ -138,7 +196,8 @@ func TestRevocationsFeedSigned(t *testing.T) {
 
 	// Seed a revocation event.
 	seq, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
-		AccountID: "acct-a", FamilyID: "fam-a", TokenIDs: `["t1"]`, RevokedAt: now.Unix(),
+		AccountID: "acct-a", FamilyID: "fam-a", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "t1", RetainUntil: now.Add(accessTokenTTL).Unix()}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -152,29 +211,23 @@ func TestRevocationsFeedSigned(t *testing.T) {
 		t.Fatalf("revocations: status %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	var entries []SignedRevocationEntry
-	if err := json.Unmarshal(body, &entries); err != nil {
+	var page RevocationPage
+	if err := json.Unmarshal(body, &page); err != nil {
 		t.Fatalf("parse: %v: %s", err, body)
 	}
-	if len(entries) == 0 {
-		t.Fatal("empty revocations feed")
+	if len(page.Entries) != 1 || page.Entries[0].Seq != seq {
+		t.Fatalf("revocation page = %+v", page)
 	}
-	found := false
-	for _, e := range entries {
-		if e.FamilyID == "fam-a" {
-			found = true
-			if e.Seq != seq {
-				t.Fatalf("seq mismatch: want %d, got %d", seq, e.Seq)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("revocation entry not found in feed")
-	}
-
 	// since= filters: since=seq should return nothing for this event.
-	resp2, _ := http.Get(srv.URL + "/revocations?since=" + strings.TrimSpace(string([]byte(strings.TrimSpace(strings.TrimRight(string([]byte{byte(48 + seq)}), ""))))))
-	_ = resp2
+	resp2, err := http.Get(srv.URL + "/revocations?since=" + strconv.FormatInt(seq, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	page = RevocationPage{}
+	if err := json.NewDecoder(resp2.Body).Decode(&page); err != nil || len(page.Entries) != 0 {
+		t.Fatalf("terminal page = %+v, err=%v", page, err)
+	}
 }
 
 // TestRevocationsFeedVerifiable: the Sig field verifies with the AS pubkey [AM10].
@@ -191,7 +244,8 @@ func TestRevocationsFeedVerifiable(t *testing.T) {
 	}
 
 	_, err = st.Revocations().Append(context.Background(), store.RevocationEvent{
-		AccountID: "acct-v", FamilyID: "fam-v", TokenIDs: `["t2"]`, RevokedAt: now.Unix(),
+		AccountID: "acct-v", FamilyID: "fam-v", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "t2", RetainUntil: now.Add(accessTokenTTL).Unix()}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -199,30 +253,26 @@ func TestRevocationsFeedVerifiable(t *testing.T) {
 
 	resp, _ := http.Get(srv.URL + "/revocations?since=0")
 	body, _ := io.ReadAll(resp.Body)
-	var entries []SignedRevocationEntry
-	_ = json.Unmarshal(body, &entries)
-
-	for _, e := range entries {
-		if e.FamilyID != "fam-v" {
-			continue
-		}
-		payload, err := verifier.Verify(e.Sig, token.ArtifactTypeRevocation, now)
-		if err != nil {
-			t.Fatalf("revocation sig invalid: %v", err)
-		}
-		var verified map[string]any
-		if err := json.Unmarshal(payload, &verified); err != nil || verified["family_id"] != "fam-v" {
-			t.Fatalf("verified payload = %s, err = %v", payload, err)
-		}
-		if _, err := verifier.Verify(e.Sig, token.ArtifactTypeSession, now); err == nil {
-			t.Fatal("revocation envelope verified as session")
-		}
-		if _, err := signer.Sign(token.ArtifactTypeSignerRevocation, payload); err == nil {
-			t.Fatal("online signer produced signer-revocation statement")
-		}
-		return
+	var page RevocationPage
+	_ = json.Unmarshal(body, &page)
+	if len(page.Entries) != 1 {
+		t.Fatalf("revocation page = %+v", page)
 	}
-	t.Fatal("revocation entry not found")
+	entry := page.Entries[0]
+	payload, err := verifier.Verify(entry.Sig, token.ArtifactTypeRevocation, now)
+	if err != nil {
+		t.Fatalf("revocation sig invalid: %v", err)
+	}
+	var verified authv1.RevocationEntry
+	if err := proto.Unmarshal(payload, &verified); err != nil || verified.FamilyId != "fam-v" {
+		t.Fatalf("verified payload = %x, err = %v", payload, err)
+	}
+	if _, err := verifier.Verify(entry.Sig, token.ArtifactTypeSession, now); err == nil {
+		t.Fatal("revocation envelope verified as session")
+	}
+	if _, err := signer.Sign(token.ArtifactTypeSignerRevocation, payload); err == nil {
+		t.Fatal("online signer produced signer-revocation statement")
+	}
 }
 
 // TestRateLimitTrips: /oauth/authorize trips after configured limit [§6].
@@ -331,7 +381,8 @@ func TestRevocationsFeedHandlerDoesNotInspectBearerSecrets(t *testing.T) {
 
 	// Seed a revocation event so the feed is non-empty.
 	_, err := st.Revocations().Append(context.Background(), store.RevocationEvent{
-		AccountID: "acct-gated", FamilyID: "fam-gated", TokenIDs: `["t-gated"]`, RevokedAt: now.Unix(),
+		AccountID: "acct-gated", FamilyID: "fam-gated", RevokedAt: now.Unix(),
+		RevokedTokens: []store.RevokedToken{{TokenID: "t-gated", RetainUntil: now.Add(accessTokenTTL).Unix()}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -342,9 +393,9 @@ func TestRevocationsFeedHandlerDoesNotInspectBearerSecrets(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("direct handler: want 200, got %d", resp.StatusCode)
 	}
-	var entries []SignedRevocationEntry
-	_ = json.NewDecoder(resp.Body).Decode(&entries)
-	if len(entries) == 0 {
+	var page RevocationPage
+	_ = json.NewDecoder(resp.Body).Decode(&page)
+	if len(page.Entries) == 0 {
 		t.Fatal("correct secret: want non-empty feed, got empty")
 	}
 }

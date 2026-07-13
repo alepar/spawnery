@@ -36,7 +36,6 @@ export default async function globalSetup(): Promise<void> {
   const api = new AcceptanceClient({
     baseUrl: cfg.cpEndpoint,
     bearer: await auth.oracleToken(systemIdentity),
-    keyStore: await auth.sessionKeyStore(systemIdentity),
   });
 
   await runPreflight(cfg, api);

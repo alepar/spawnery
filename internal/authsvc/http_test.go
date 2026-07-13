@@ -207,9 +207,9 @@ func TestHandlerFullVertical(t *testing.T) {
 	// 6. /revocations should contain the logout event.
 	revResp, _ := client.Get(srv.URL + "/revocations?since=0")
 	revBody, _ := io.ReadAll(revResp.Body)
-	var entries []authsvc.SignedRevocationEntry
-	_ = json.Unmarshal(revBody, &entries)
-	if len(entries) == 0 {
+	var page authsvc.RevocationPage
+	_ = json.Unmarshal(revBody, &page)
+	if len(page.Entries) == 0 {
 		t.Fatal("no revocation events after logout")
 	}
 }

@@ -42,8 +42,11 @@ type RefreshSessionRepo interface {
 	// row can replay), and inserts the successor row. Run inside WithTx.
 	Supersede(ctx context.Context, predecessorHash string, successor RefreshSession, successorCache string, now int64) error
 	// RevokeFamily marks every row of the family revoked and returns both audience token IDs
-	// for every live (non-revoked) generation, for the revocation-event payload.
-	RevokeFamily(ctx context.Context, familyID string) ([]string, error)
+	// for each non-revoked generation whose paired access token is still live at now.
+	RevokeFamily(ctx context.Context, familyID string, now int64) ([]RevokedToken, error)
+	// RevokeAccount atomically revokes every family owned by accountID and returns the still-live
+	// paired access tokens for one account-cutoff revocation event.
+	RevokeAccount(ctx context.Context, accountID string, now int64) ([]RevokedToken, error)
 	// CountFamilies counts distinct non-revoked families for the account.
 	CountFamilies(ctx context.Context, accountID string) (int, error)
 	// OldestFamily returns the non-revoked family with the earliest family_created_at.
@@ -77,7 +80,9 @@ type DeviceGrantRepo interface {
 type RevocationRepo interface {
 	// Append inserts an event and returns its assigned monotonically increasing seq.
 	Append(ctx context.Context, ev RevocationEvent) (int64, error)
-	Since(ctx context.Context, seq int64) ([]RevocationEvent, error)
+	// PageAfter prunes expired feed state and returns at most limit events above seq. Sequence
+	// gaps are expected because pruning never renumbers the AUTOINCREMENT high-water mark.
+	PageAfter(ctx context.Context, seq int64, limit int, now int64) ([]RevocationEvent, bool, error)
 }
 
 // DeviceSetRepo is the AS-side device-set registry.  The AS stores entries and

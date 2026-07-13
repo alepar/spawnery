@@ -18,8 +18,8 @@ const (
 func DefaultInternalPolicy() mtls.Policy {
 	return mtls.Policy{
 		"anonymous":        {operationEnroll: {}},
-		"node:cloud":       {operationCredentialMint: {}},
-		"node:self-hosted": {operationCredentialMint: {}},
+		"node:cloud":       {operationCredentialMint: {}, operationRevocations: {}},
+		"node:self-hosted": {operationCredentialMint: {}, operationRevocations: {}},
 		"service:cp":       {operationRevocations: {}, operationGitHubLink: {}},
 	}
 }

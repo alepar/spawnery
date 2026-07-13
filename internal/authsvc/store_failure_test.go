@@ -10,10 +10,10 @@ import (
 var errForcedStoreFailure = errors.New("forced store failure")
 
 type storeFaults struct {
-	failInsert       bool
-	failOldestFamily bool
-	failRevoke       bool
-	failAppend       bool
+	failInsert        bool
+	failRevoke        bool
+	failRevokeAccount bool
+	failAppend        bool
 }
 
 type failingStore struct {
@@ -47,18 +47,18 @@ func (r *failingRefreshSessions) Insert(ctx context.Context, session store.Refre
 	return r.RefreshSessionRepo.Insert(ctx, session)
 }
 
-func (r *failingRefreshSessions) OldestFamily(ctx context.Context, accountID string) (string, error) {
-	if r.faults.failOldestFamily {
-		return "", errForcedStoreFailure
-	}
-	return r.RefreshSessionRepo.OldestFamily(ctx, accountID)
-}
-
-func (r *failingRefreshSessions) RevokeFamily(ctx context.Context, familyID string) ([]string, error) {
+func (r *failingRefreshSessions) RevokeFamily(ctx context.Context, familyID string, now int64) ([]store.RevokedToken, error) {
 	if r.faults.failRevoke {
 		return nil, errForcedStoreFailure
 	}
-	return r.RefreshSessionRepo.RevokeFamily(ctx, familyID)
+	return r.RefreshSessionRepo.RevokeFamily(ctx, familyID, now)
+}
+
+func (r *failingRefreshSessions) RevokeAccount(ctx context.Context, accountID string, now int64) ([]store.RevokedToken, error) {
+	if r.faults.failRevokeAccount {
+		return nil, errForcedStoreFailure
+	}
+	return r.RefreshSessionRepo.RevokeAccount(ctx, accountID, now)
 }
 
 type failingRevocations struct {

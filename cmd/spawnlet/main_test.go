@@ -5,10 +5,16 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"errors"
+	"io"
 	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/proto"
 
 	configfiles "spawnery/config"
@@ -23,6 +30,8 @@ import (
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
 	"spawnery/internal/mtls"
+	"spawnery/internal/node"
+	"spawnery/internal/node/nodeid"
 	"spawnery/internal/pki"
 	"spawnery/internal/spawnlet"
 	"spawnery/internal/storage"
@@ -119,6 +128,9 @@ func TestSpawnletConfig_Defaults(t *testing.T) {
 	if cfg.Journal.Backend != "" {
 		t.Errorf("Journal.Backend should default to empty (disabled), got %q", cfg.Journal.Backend)
 	}
+	if cfg.Node.UserRevocationState != "/var/lib/spawnlet/user-revocations/revocations.db" || cfg.Node.UserRevocationPollInterval != 5*time.Second || cfg.Node.UserRevocationRequestTimeout != 10*time.Second || cfg.Node.UserRevocationMaxBackoff != time.Minute {
+		t.Errorf("user revocation defaults = %q/%s/%s/%s", cfg.Node.UserRevocationState, cfg.Node.UserRevocationPollInterval, cfg.Node.UserRevocationRequestTimeout, cfg.Node.UserRevocationMaxBackoff)
+	}
 	if cfg.Journal.S3.Region != "garage" {
 		t.Errorf("Journal.S3.Region = %q, want garage", cfg.Journal.S3.Region)
 	}
@@ -135,9 +147,9 @@ func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 		"NODE_ID":                      "node-prod-1",
 		"NODE_CLASS":                   "self-hosted",
 		"NODE_SIGNER_REVOCATION_STATE": "/tmp/spawnlet-test-signer-state",
-		"MEM_LIMIT_MB":                  "2048",
-		"EGRESS_ENFORCE":                "false",
-		"CP_ADDR":                       "http://cp.example.com:8080",
+		"MEM_LIMIT_MB":                 "2048",
+		"EGRESS_ENFORCE":               "false",
+		"CP_ADDR":                      "http://cp.example.com:8080",
 	})
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -162,6 +174,7 @@ func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 func TestSpawnletConfig_SetOverride(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", nil,
 		"node.auth_mode=enforced", "node.signer_revocation_state=/tmp/spawnlet-test-state",
+		"as_url=https://as.internal", "as_server_name=as.internal",
 		"node.certificate_revocation_state=/tmp/cert-state", "node.certificate_revocation_issuers=/tmp/issuer.pem",
 		"node.certificate_revocation_crls=/tmp/issuer.crl", "cp.server_name=cp.internal", "limits.pids=512")
 	if err != nil {
@@ -172,6 +185,55 @@ func TestSpawnletConfig_SetOverride(t *testing.T) {
 	}
 	if cfg.Limits.Pids != 512 {
 		t.Errorf("Limits.Pids = %d, want 512 (--set)", cfg.Limits.Pids)
+	}
+}
+
+func TestSpawnletConfigEnforcedUserRevocationRequirements(t *testing.T) {
+	base := []string{
+		"node.auth_mode=enforced", "node.signer_revocation_state=/tmp/signer-state",
+		"node.certificate_revocation_state=/tmp/cert-state", "node.certificate_revocation_issuers=/tmp/issuer.pem",
+		"node.certificate_revocation_crls=/tmp/issuer.crl", "cp.server_name=cp.internal",
+		"as_url=https://as.internal", "as_server_name=authsvc.internal",
+		"node.user_revocation_state=/tmp/user-revocations/revocations.db", "node.user_revocation_poll_interval=5s",
+		"node.user_revocation_request_timeout=10s", "node.user_revocation_max_backoff=1m",
+	}
+	for _, test := range []struct{ name, override, want string }{
+		{name: "missing AS URL", override: "as_url=", want: "as_url"},
+		{name: "missing AS server name", override: "as_server_name=", want: "as_server_name"},
+		{name: "missing state path", override: "node.user_revocation_state=", want: "user revocation state"},
+		{name: "zero interval", override: "node.user_revocation_poll_interval=0s", want: "positive poll interval"},
+		{name: "negative interval", override: "node.user_revocation_poll_interval=-1s", want: "positive poll interval"},
+		{name: "zero request timeout", override: "node.user_revocation_request_timeout=0s", want: "positive request timeout"},
+		{name: "negative request timeout", override: "node.user_revocation_request_timeout=-1s", want: "positive request timeout"},
+		{name: "zero max backoff", override: "node.user_revocation_max_backoff=0s", want: "positive max backoff"},
+		{name: "negative max backoff", override: "node.user_revocation_max_backoff=-1s", want: "positive max backoff"},
+		{name: "max backoff below interval", override: "node.user_revocation_max_backoff=4s", want: "at least the poll interval"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sets := append(append([]string(nil), base...), test.override)
+			if _, err := loadSpawnletTest(t, "dev", nil, sets...); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want actionable %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestNodeUserRevocationStoreRejectsCorruptSQLiteOnStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "user-revocations", "revocations.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"checkpoint":7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Spawnlet{}
+	cfg.Node.UserRevocationState = path
+	store, err := nodeUserRevocationStore(cfg)
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil {
+		t.Fatal("corrupt user revocation database accepted at startup")
 	}
 }
 
@@ -246,15 +308,22 @@ func TestBuildIntentVerifierRequiresTrustInEveryTransportMode(t *testing.T) {
 
 func TestSpawnletConfig_ArtifactTrustAliasesAndRemovedRawKeys(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
-		"NODE_AUTH_ENVIRONMENT":            "prod",
-		"NODE_SIGNER_REVOCATION_STATEMENT": "/deployment/revocations",
-		"NODE_SIGNER_REVOCATION_STATE":     "/state/revocations",
+		"NODE_AUTH_ENVIRONMENT":                "prod",
+		"NODE_SIGNER_REVOCATION_STATEMENT":     "/deployment/revocations",
+		"NODE_SIGNER_REVOCATION_STATE":         "/state/revocations",
+		"NODE_USER_REVOCATION_STATE":           "/state/users",
+		"NODE_USER_REVOCATION_POLL_INTERVAL":   "17s",
+		"NODE_USER_REVOCATION_REQUEST_TIMEOUT": "23s",
+		"NODE_USER_REVOCATION_MAX_BACKOFF":     "2m",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Node.Environment != "prod" || cfg.Node.SignerRevocationStatement != "/deployment/revocations" || cfg.Node.SignerRevocationState != "/state/revocations" {
 		t.Fatalf("artifact trust aliases not loaded: %+v", cfg.Node)
+	}
+	if cfg.Node.UserRevocationState != "/state/users" || cfg.Node.UserRevocationPollInterval != 17*time.Second || cfg.Node.UserRevocationRequestTimeout != 23*time.Second || cfg.Node.UserRevocationMaxBackoff != 2*time.Minute {
+		t.Fatalf("user revocation aliases not loaded: %+v", cfg.Node)
 	}
 	legacyAlias := strings.Join([]string{"NODE", "AS", "PUBKEYS"}, "_")
 	if _, exists := spawnletEnvAliases[legacyAlias]; exists {
@@ -719,6 +788,222 @@ func TestNodeGitHubMint_DisabledByDefault(t *testing.T) {
 	if got := nodeGitHubMint(cfg, nil); got != nil {
 		t.Fatal("insecure mode must not construct a production-capable AS client")
 	}
+}
+
+func startNodeASBoundaryServer(t *testing.T, root *x509.Certificate, identity *pki.Leaf, handler http.Handler) *httptest.Server {
+	t.Helper()
+	certificate, err := identity.TLSCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientRoots := x509.NewCertPool()
+	clientRoots.AddCert(root)
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientRoots, MinVersion: tls.VersionTLS13}
+	server.Config.TLSConfig = server.TLS
+	if err := http2.ConfigureServer(server.Config, &http2.Server{}); err != nil {
+		t.Fatal(err)
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
+}
+
+type nodeASRequestDoer func(*http.Request) (*http.Response, error)
+
+func (do nodeASRequestDoer) Do(request *http.Request) (*http.Response, error) { return do(request) }
+
+func saveNodeASBoundaryIdentity(t *testing.T, dir string, root *pki.CA, issuer *pki.CA, leaf *pki.Leaf) {
+	t.Helper()
+	keyPEM, err := pki.MarshalKeyPEM(leaf.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeid.Save(dir, nodeid.Identity{CertPEM: pki.MarshalCertPEM(leaf.Cert), ChainPEM: pki.MarshalCertPEM(issuer.Cert), KeyPEM: keyPEM, RootPEM: pki.MarshalCertPEM(root.Cert)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNodeASClientAndRevocationConsumerStartupBoundary(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	const trustDomain = "prod.spawnery.internal"
+	root, err := pki.NewRootCA("environment root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeIssuer, err := root.NewIntermediate(pki.IssuerCloudNode, trustDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceIssuer, err := root.NewIntermediate(pki.IssuerService, trustDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeLeaf, err := nodeIssuer.IssueNode("node-1", "system", pki.RoleCloud, trustDomain, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authsvcLeaf, err := serviceIssuer.IssueService(pki.RoleAuthService, "as-1", trustDomain, []string{"authsvc.internal"}, []net.IP{net.ParseIP("127.0.0.1")}, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	idDir := t.TempDir()
+	saveNodeASBoundaryIdentity(t, idDir, root, nodeIssuer, nodeLeaf)
+	state, err := pki.OpenRevocationState(filepath.Join(t.TempDir(), "cert-revocations", "state.json"), []*x509.Certificate{serviceIssuer.Cert}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialCRL, err := serviceIssuer.CreateCRL(big.NewInt(1), nil, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyPEM(pki.MarshalCRLPEM(initialCRL)); err != nil {
+		t.Fatal(err)
+	}
+	connections := mtls.NewConnectionRegistry()
+	runtime := &nodeCertificateRevocations{state: state, connections: connections, unsubscribe: mtls.SubscribeConnectionRegistry(state, connections)}
+	t.Cleanup(func() { runtime.unsubscribe(); _ = state.Close() })
+
+	observed := make(chan []byte, 1)
+	server := startNodeASBoundaryServer(t, root.Cert, authsvcLeaf, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var peer []byte
+		if request.TLS != nil && len(request.TLS.PeerCertificates) != 0 {
+			peer = append([]byte(nil), request.TLS.PeerCertificates[0].Raw...)
+		}
+		observed <- peer
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	cfg := &Spawnlet{ASURL: server.URL, ASServerName: "authsvc.internal"}
+	cfg.Node.AuthMode = "enforced"
+	cfg.Node.IDDir = idDir
+	cfg.Node.TrustDomain = trustDomain
+	cfg.Node.UserRevocationPollInterval = time.Hour
+	cfg.Node.UserRevocationRequestTimeout = 50 * time.Millisecond
+	cfg.Node.UserRevocationMaxBackoff = time.Hour
+	client, err := nodeASClient(cfg, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http2.Transport)
+	if !ok {
+		t.Fatalf("transport=%T", client.Transport)
+	}
+	if transport.TLSClientConfig.ServerName != "authsvc.internal" || transport.TLSClientConfig.RootCAs == nil || transport.DialTLSContext == nil {
+		t.Fatal("AS client omitted server name, pinned root, or connection registry dialer")
+	}
+	if len(transport.TLSClientConfig.Certificates) != 1 || len(transport.TLSClientConfig.Certificates[0].Certificate) == 0 || !strings.EqualFold(hex.EncodeToString(transport.TLSClientConfig.Certificates[0].Certificate[0]), hex.EncodeToString(nodeLeaf.Cert.Raw)) {
+		t.Fatal("AS client did not present enrolled node identity")
+	}
+	cpLeaf, err := serviceIssuer.IssueService(pki.RoleCP, "cp-1", trustDomain, []string{"authsvc.internal"}, []net.IP{net.ParseIP("127.0.0.1")}, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpServer := startNodeASBoundaryServer(t, root.Cert, cpLeaf, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if _, err := client.Get(cpServer.URL); err == nil {
+		t.Fatal("AS client accepted CP service principal")
+	}
+	wrongNameCfg := *cfg
+	wrongNameCfg.ASServerName = "wrong.internal"
+	wrongNameClient, err := nodeASClient(&wrongNameCfg, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	simpleASServer := startNodeASBoundaryServer(t, root.Cert, authsvcLeaf, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if _, err := wrongNameClient.Get(simpleASServer.URL); err == nil {
+		t.Fatal("AS client accepted wrong server name")
+	}
+	foreignRoot, _ := pki.NewRootCA("foreign")
+	foreignIssuer, _ := foreignRoot.NewIntermediate(pki.IssuerService, trustDomain)
+	foreignAS, _ := foreignIssuer.IssueService(pki.RoleAuthService, "foreign-as", trustDomain, []string{"authsvc.internal"}, []net.IP{net.ParseIP("127.0.0.1")}, now.Add(time.Hour))
+	foreignServer := startNodeASBoundaryServer(t, root.Cert, foreignAS, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if _, err := client.Get(foreignServer.URL); err == nil {
+		t.Fatal("AS client accepted service outside the environment root")
+	}
+	go func() {
+		response, _ := client.Get(server.URL + "/identity-proof")
+		if response != nil {
+			_ = response.Body.Close()
+		}
+	}()
+	select {
+	case peer := <-observed:
+		if !strings.EqualFold(hex.EncodeToString(peer), hex.EncodeToString(nodeLeaf.Cert.Raw)) {
+			t.Fatal("server did not observe enrolled node client certificate")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AS did not observe enrolled node identity")
+	}
+	artifacts, err := token.NewVerifier(root.Cert, "prod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userStore, err := node.OpenUserRevocationStore(filepath.Join(t.TempDir(), "users", "revocations.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = userStore.Close() })
+	exactRequest := make(chan struct{})
+	doer := nodeASRequestDoer(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != strings.TrimRight(cfg.ASURL, "/")+"/revocations?limit=256&since=0" {
+			t.Errorf("feed target=%s", request.URL.String())
+		}
+		deadline, ok := request.Context().Deadline()
+		if !ok || time.Until(deadline) > cfg.Node.UserRevocationRequestTimeout || time.Until(deadline) <= 0 {
+			t.Errorf("feed deadline=%v/%v", deadline, ok)
+		}
+		close(exactRequest)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"entries":[],"has_more":false}`))}, nil
+	})
+	consumer, err := nodeUserRevocationConsumer(cfg, doer, artifacts, userStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { consumer.Run(ctx, nil); close(done) }()
+	select {
+	case <-exactRequest:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not issue immediate exact feed request")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not stop")
+	}
+	address := strings.TrimPrefix(server.URL, "https://")
+	registeredConnection, err := transport.DialTLSContext(t.Context(), "tcp", address, transport.TLSClientConfig)
+	if err != nil {
+		t.Fatalf("registered AS dial: %v", err)
+	}
+	revokedCRL, err := serviceIssuer.CreateCRL(big.NewInt(2), []x509.RevocationListEntry{{SerialNumber: authsvcLeaf.Cert.SerialNumber, RevocationTime: now}}, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApplyPEM(pki.MarshalCRLPEM(revokedCRL)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, writeErr := registeredConnection.Write([]byte{0}); writeErr != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("certificate update did not cancel registered AS connection")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = registeredConnection.Close()
+	if !state.IsRevoked(serviceIssuer.Cert.SerialNumber, authsvcLeaf.Cert.SerialNumber) {
+		t.Fatal("AS client revocation callback is not backed by live state")
+	}
+	client.CloseIdleConnections()
+	if _, err := client.Get(server.URL + "/revocations?since=0"); err == nil {
+		t.Fatal("revoked AuthService certificate was accepted on a new connection")
+	}
+
 }
 
 func TestConfigureJournalS3FailsClosedWithoutGarageAdmin(t *testing.T) {

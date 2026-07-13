@@ -21,12 +21,13 @@ type fakeSessionExec struct {
 		name string
 		port int
 	}
-	killed        []string // tmux names killed
-	dials         int
-	acpClosed     int // count of AttachedStream.Close calls on acp dials (acp pump teardown / conn release)
-	launchMoshErr error
-	launchACPErr  error
-	dialErr       error
+	killed         []string // tmux names killed
+	dials          int
+	acpClosed      int // count of AttachedStream.Close calls on acp dials (acp pump teardown / conn release)
+	launchMoshErr  error
+	launchACPErr   error
+	dialErr        error
+	moshAttachArgv []string
 
 	// dialGate, when non-nil, parks the FIRST DialACP call (closing dialReached when it arrives) until
 	// dialGate is closed — a deterministic seam to interleave a CloseSession + a new CreateSession
@@ -65,6 +66,9 @@ func (f *fakeSessionExec) LaunchMosh(_ context.Context, _, _, tmuxName string) e
 	return f.launchMoshErr
 }
 func (f *fakeSessionExec) MoshAttachArgv(_, tmuxName string) ([]string, error) {
+	if f.moshAttachArgv != nil {
+		return f.moshAttachArgv, nil
+	}
 	return []string{"true"}, nil // a never-run argv: no client attaches in unit tests
 }
 func (f *fakeSessionExec) LaunchACP(_ context.Context, _, _, tmuxName string, port int) error {

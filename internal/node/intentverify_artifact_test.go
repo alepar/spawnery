@@ -263,6 +263,96 @@ func TestIntentVerifierRejectsExpiredCertifiedSessionBeforeIntent(t *testing.T) 
 	}
 }
 
+type mutableUserRevocationLookup struct {
+	revoked  atomic.Bool
+	issuedAt atomic.Int64
+	calls    atomic.Int64
+}
+
+func (r *mutableUserRevocationLookup) IsRevoked(_ string, _ string, issuedAt int64) bool {
+	r.calls.Add(1)
+	r.issuedAt.Store(issuedAt)
+	return r.revoked.Load()
+}
+
+func TestIntentVerifierChecksUserRevocationBeforeJTIAdmission(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	env, fields := certifiedIntent(t, fixture, now, "jti-user-revoked")
+	lookup := &mutableUserRevocationLookup{}
+	lookup.revoked.Store(true)
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("revoked token: got %q, want %q", nack, NACKTokenInvalid)
+	}
+	if lookup.issuedAt.Load() != now.Unix() {
+		t.Fatalf("revocation lookup issued_at=%d want=%d", lookup.issuedAt.Load(), now.Unix())
+	}
+	lookup.revoked.Store(false)
+	auth, nack, detail := v.VerifyStart(env, fields)
+	if nack != "" {
+		t.Fatalf("revocation rejection admitted JTI: %s %s", nack, detail)
+	}
+	if auth.IssuedAt != now.Unix() {
+		t.Fatalf("authorization issued_at=%d want=%d", auth.IssuedAt, now.Unix())
+	}
+}
+
+func TestIntentVerifierChecksUserRevocationAfterCertifiedTokenValidation(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	for _, test := range []struct {
+		name   string
+		mutate func(*authv1.SessionTokenBody)
+	}{
+		{name: "expired", mutate: func(body *authv1.SessionTokenBody) { body.ExpiresAt = now.Unix() }},
+		{name: "not yet valid", mutate: func(body *authv1.SessionTokenBody) { body.IssuedAt = now.Add(61 * time.Second).Unix() }},
+		{name: "wrong audience", mutate: func(body *authv1.SessionTokenBody) { body.Audience = "cp" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env, fields := certifiedIntent(t, fixture, now, "jti-validation-order-"+test.name)
+			raw, err := base64.RawURLEncoding.DecodeString(env.AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var artifact authv1.SignedAuthArtifact
+			if err := proto.Unmarshal(raw, &artifact); err != nil {
+				t.Fatal(err)
+			}
+			var body authv1.SessionTokenBody
+			if err := proto.Unmarshal(artifact.Payload, &body); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&body)
+			env.AccessToken = mintArtifactSession(t, fixture, &body)
+			lookup := &mutableUserRevocationLookup{}
+			verifier := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+			if _, nack, _ := verifier.VerifyStart(env, fields); nack == "" {
+				t.Fatal("invalid certified token accepted")
+			}
+			if lookup.calls.Load() != 0 {
+				t.Fatalf("revocation lookup called %d times", lookup.calls.Load())
+			}
+		})
+	}
+	t.Run("malformed body", func(t *testing.T) {
+		env, fields := certifiedIntent(t, fixture, now, "jti-validation-order-malformed")
+		wire, err := fixture.credential.Sign(token.ArtifactTypeSession, []byte{0xff})
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.AccessToken = wire
+		lookup := &mutableUserRevocationLookup{}
+		verifier := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+		if _, nack, _ := verifier.VerifyStart(env, fields); nack != NACKTokenInvalid {
+			t.Fatalf("malformed certified token nack=%q", nack)
+		}
+		if lookup.calls.Load() != 0 {
+			t.Fatalf("revocation lookup called %d times", lookup.calls.Load())
+		}
+	})
+}
+
 func TestIntentVerifierCertifiedArtifactFailuresPrecedeIntentState(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")

@@ -36,7 +36,7 @@ describe("establishOAuthSession", () => {
       }
       const state = new URL(String(fetchMock.mock.calls[0][0])).searchParams.get("state");
       return redirectResponse(
-        `https://web.example/callback?access_token=tok1&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32).fill(7))}`,
+        `https://web.example/callback?cp_access_token=tok1&node_access_token=node-tok1&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32).fill(7))}`,
         ["refresh_token=raw-rt-1; Path=/refresh; HttpOnly; Secure; SameSite=Strict"],
       );
     });
@@ -51,6 +51,7 @@ describe("establishOAuthSession", () => {
 
     expect(capturedLoginHint).toBe("alice");
     expect(session.accessToken).toBe("tok1");
+    expect(session.nodeAccessToken).toBe("node-tok1");
     expect(session.refreshTokenRaw).toBe("raw-rt-1");
     expect(session.refreshTokenHash).toEqual(new Uint8Array(32).fill(7));
     expect(session.expiresAt).toBeGreaterThanOrEqual(before + ACCESS_TOKEN_TTL_MS);
@@ -71,7 +72,7 @@ describe("establishOAuthSession", () => {
       cookieSeenAtCallback = new Headers(init?.headers).get("Cookie") ?? "";
       const state = new URL(String(fetchMock.mock.calls[0][0])).searchParams.get("state");
       return redirectResponse(
-        `https://web.example/callback?access_token=t&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
+        `https://web.example/callback?cp_access_token=t&node_access_token=n&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
         ["refresh_token=r; Path=/refresh"],
       );
     });
@@ -98,7 +99,7 @@ describe("establishOAuthSession", () => {
       }
       const state = new URL(String(fetchMock.mock.calls[0][0])).searchParams.get("state");
       return redirectResponse(
-        `https://web.example/callback?access_token=t&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
+        `https://web.example/callback?cp_access_token=t&node_access_token=n&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
         ["refresh_token=r; Path=/refresh"],
       );
     });
@@ -154,7 +155,7 @@ describe("establishOAuthSession", () => {
         return redirectResponse("https://as.example/oauth/callback?code=c&state=s");
       }
       return redirectResponse(
-        `https://web.example/callback?access_token=t&state=WRONG&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
+        `https://web.example/callback?cp_access_token=t&node_access_token=n&state=WRONG&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
         ["refresh_token=r; Path=/refresh"],
       );
     });
@@ -179,7 +180,7 @@ describe("establishOAuthSession", () => {
       }
       const state = new URL(String(fetchMock.mock.calls[0][0])).searchParams.get("state");
       return redirectResponse(
-        `https://web.example/callback?access_token=t&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
+        `https://web.example/callback?cp_access_token=t&node_access_token=n&state=${state}&refresh_token_hash=${toBase64Url(new Uint8Array(32))}`,
       );
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -203,6 +204,7 @@ describe("refreshOAuthSession", () => {
       privateKey: kp.privateKey,
       publicKey: kp.publicKey,
       accessToken: "old-token",
+      nodeAccessToken: "old-node-token",
       refreshTokenRaw: "old-raw",
       refreshTokenHash: new Uint8Array(32).fill(1),
       expiresAt: Date.now() - 1000,
@@ -221,7 +223,11 @@ describe("refreshOAuthSession", () => {
       expect(headers.get("X-PoP-Nonce")).toBeTruthy();
       expect(headers.get("X-PoP-Sig")).toBeTruthy();
       return new Response(
-        JSON.stringify({ access_token: "new-token", refresh_token_hash: toBase64Url(new Uint8Array(32).fill(2)) }),
+        JSON.stringify({
+          cp_access_token: "new-token",
+          node_access_token: "new-node-token",
+          refresh_token_hash: toBase64Url(new Uint8Array(32).fill(2)),
+        }),
         { status: 200, headers: [["set-cookie", "refresh_token=new-raw; Path=/refresh; HttpOnly"]] },
       );
     });
@@ -232,6 +238,7 @@ describe("refreshOAuthSession", () => {
 
     expect(seenCookie).toBe("refresh_token=old-raw");
     expect(next.accessToken).toBe("new-token");
+    expect(next.nodeAccessToken).toBe("new-node-token");
     expect(next.refreshTokenRaw).toBe("new-raw");
     expect(next.refreshTokenHash).toEqual(new Uint8Array(32).fill(2));
     expect(next.expiresAt).toBeGreaterThanOrEqual(before + ACCESS_TOKEN_TTL_MS);
@@ -251,7 +258,11 @@ describe("refreshOAuthSession", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ access_token: "t", refresh_token_hash: toBase64Url(new Uint8Array(32)) }), {
+        new Response(JSON.stringify({
+          cp_access_token: "t",
+          node_access_token: "n",
+          refresh_token_hash: toBase64Url(new Uint8Array(32)),
+        }), {
           status: 200,
         }),
       ),

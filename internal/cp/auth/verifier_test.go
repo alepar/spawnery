@@ -37,7 +37,7 @@ func TestVerifierCertifiedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id.Owner != "acct-1" || id.TokenID != "tok-1" {
+	if id.Owner != "acct-1" || id.TokenID != "tok-1" || id.IssuedAt != testNow.Unix() {
 		t.Fatalf("identity = %+v", id)
 	}
 }
@@ -101,10 +101,32 @@ func TestVerifierUserRevocationRemainsDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	revocations.mu.Lock()
-	revocations.revokedTokens["tok"] = struct{}{}
+	revocations.revokedTokens["tok"] = testNow.Add(time.Minute).Unix()
 	revocations.mu.Unlock()
 	if _, err := v.Verify(wire); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("want ErrRevoked, got %v", err)
+	}
+}
+
+func TestVerifierUsesSignedIssuedAtForExclusiveAccountCutoff(t *testing.T) {
+	fixture := newArtifactFixture(t)
+	revocations := NewRevocationRegistry(nil)
+	cutoff := &authv1.RevocationEntry{
+		Seq: 1, AccountId: "acct", RevokedAt: testNow.Unix() - 1, RevokeTokensIssuedBefore: testNow.Unix(),
+	}
+	if _, err := revocations.ApplyPage([]SignedFeedEntry{signedEntry(t, fixture.credential, cutoff)}, fixture.verifier, testNow, 0); err != nil {
+		t.Fatal(err)
+	}
+	verifier := NewVerifier(VerifierConfig{Artifacts: fixture.verifier, Revoked: revocations, Now: func() time.Time { return testNow }})
+	if _, err := verifier.Verify(mintToken(t, fixture.credential, "cp", "acct", "old", testNow.Add(-time.Second))); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("pre-cutoff token error=%v", err)
+	}
+	id, err := verifier.Verify(mintToken(t, fixture.credential, "cp", "acct", "equal", testNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.IssuedAt != testNow.Unix() {
+		t.Fatalf("identity issued_at=%d want=%d", id.IssuedAt, testNow.Unix())
 	}
 }
 

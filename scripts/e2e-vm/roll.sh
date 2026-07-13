@@ -40,7 +40,7 @@ fi
 vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spawnery-ca \
   && sudo install -d -m0750 -o root -g caddy /etc/spawnery/caddy \
   && ( if sudo test -f /etc/spawnery/pki/wildcard.crt && sudo test -f /etc/spawnery/pki/wildcard.key; then sudo install -m0644 -o root -g caddy /etc/spawnery/pki/wildcard.crt /etc/spawnery/caddy/wildcard.crt && sudo install -m0640 -o root -g caddy /etc/spawnery/pki/wildcard.key /etc/spawnery/caddy/wildcard.key; fi ) \
-  && sudo sed -i '\''s#/etc/spawnery/pki/wildcard\.#/etc/spawnery/caddy/wildcard.#g'\'' /etc/caddy/Caddyfile \
+  && printf '\''%s\n'\'' '\'':443 {'\'' '\''  tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key'\'' '\''  @cp path /cp.v1.* /ws*'\'' '\''  @as path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens'\'' '\''  reverse_proxy @cp 127.0.0.1:8080'\'' '\''  reverse_proxy @as 127.0.0.1:8090'\'' '\''  root * /var/www/spawnery'\'' '\''  file_server'\'' '\''}'\'' | sudo tee /etc/caddy/Caddyfile >/dev/null \
   && sudo rm -rf /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node \
   && sudo install -d -m0700 /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node /var/lib/spawnery-offline \
   && sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline bash ~/incoming/provision/gen-pki.sh /etc/spawnery/pki e2e.test \
@@ -50,8 +50,9 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
   && sudo cp -f /etc/spawnery/pki/{service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem} /etc/spawnery/node/ \
   && sudo find /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node -type f -exec chmod 0600 {} + \
   && sudo find /etc/spawnery/pki -mindepth 1 -delete \
-  && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations \
-  && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations \
+  && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
+  && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
+  && sudo cp -f /etc/spawnery/authsvc/self-hosted-node.crl.pem /var/lib/spawnery/authsvc-revocations/self-hosted-node.crl.pem \
   && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
   && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
   && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \

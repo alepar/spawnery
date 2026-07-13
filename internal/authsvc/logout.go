@@ -10,8 +10,6 @@ package authsvc
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -69,14 +67,14 @@ func (i *IdP) serveLogout(w http.ResponseWriter, r *http.Request) {
 
 	var logoutErr error
 	if r.URL.Query().Get("everywhere") == "1" {
-		logoutErr = i.logoutEverywhere(r.Context(), row.AccountID)
+		logoutErr = i.logoutEverywhere(r.Context(), row.AccountID, now)
 	} else {
 		logoutErr = i.store.WithTx(r.Context(), func(tx store.Store) error {
-			liveIDs, err := tx.RefreshSessions().RevokeFamily(r.Context(), row.FamilyID)
+			liveIDs, err := tx.RefreshSessions().RevokeFamily(r.Context(), row.FamilyID, now.Unix())
 			if err != nil {
 				return err
 			}
-			return appendRevocation(r.Context(), tx, row.AccountID, row.FamilyID, liveIDs, now)
+			return appendFamilyRevocation(r.Context(), tx, row.AccountID, row.FamilyID, liveIDs, now)
 		})
 	}
 
@@ -90,35 +88,15 @@ func (i *IdP) serveLogout(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-// logoutEverywhereMaxFamilies is the safety cap for the logout-everywhere loop. It is larger
-// than cfg.MaxFamilies (default 20) so normal accounts always complete, while guarding against
-// an infinite loop if the OldestFamily invariant (returns only non-revoked rows) ever regresses.
-const logoutEverywhereMaxFamilies = 200
-
-// logoutEverywhere revokes all non-revoked families for the account and emits per-family events.
-func (i *IdP) logoutEverywhere(ctx context.Context, accountID string) error {
-	// Iterate via OldestFamily; each successful RevokeFamily removes the family from the
-	// non-revoked set, so the loop terminates when OldestFamily returns ErrNotFound.
-	// The cap prevents an infinite loop if that invariant ever regresses.
-	for range logoutEverywhereMaxFamilies {
-		oldest, err := i.store.RefreshSessions().OldestFamily(ctx, accountID)
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
+// logoutEverywhere revokes all account families and appends one cutoff event atomically.
+func (i *IdP) logoutEverywhere(ctx context.Context, accountID string, now time.Time) error {
+	return i.store.WithTx(ctx, func(tx store.Store) error {
+		liveTokens, err := tx.RefreshSessions().RevokeAccount(ctx, accountID, now.Unix())
 		if err != nil {
 			return err
 		}
-		if err := i.store.WithTx(ctx, func(tx store.Store) error {
-			liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest)
-			if err != nil {
-				return err
-			}
-			return appendRevocation(ctx, tx, accountID, oldest, liveIDs, i.now())
-		}); err != nil {
-			return err
-		}
-	}
-	return fmt.Errorf("logout everywhere exceeded %d families", logoutEverywhereMaxFamilies)
+		return appendAccountRevocation(ctx, tx, accountID, liveTokens, now)
+	})
 }
 
 // expireRefreshCookie expires the refresh_token, logout_session, and device_session cookies.

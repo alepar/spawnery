@@ -78,9 +78,6 @@ describe("CliDriver — failing stubs (product parity gap, never skip)", () => {
   it("rename throws naming the parity gap", async () => {
     await expect(driver.rename(ctx, "s1", "new-name")).rejects.toThrow(/spawnctl has no rename/);
   });
-  it("suspend throws naming the parity gap", async () => {
-    await expect(driver.suspend(ctx, "s1")).rejects.toThrow(/spawnctl has no suspend/);
-  });
   it("stop throws naming the parity gap", async () => {
     await expect(driver.stop(ctx, "s1")).rejects.toThrow(/spawnctl has no stop/);
   });
@@ -154,6 +151,19 @@ describe("CliDriver — subprocess-backed verbs (execFile mocked)", () => {
     const driver = new CliDriver(cfg);
     const id = await driver.fork(ctx, "s1", {});
     expect(id).toBe("acc-fork-1");
+  });
+
+  it("suspend invokes the implemented spawnctl subcommand", async () => {
+    const cp = await import("node:child_process");
+    let seenArgs: string[] = [];
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, args: string[], cb: (...a: unknown[]) => void) => {
+      seenArgs = args;
+      cb(null, "", "");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await driver.suspend(ctx, "s1");
+    expect(seenArgs).toEqual(["suspend", "s1", "-cp", cfg.cpEndpoint, "-token", identity.token]);
   });
 
   it("waitActive returns once status polls ACTIVE", async () => {

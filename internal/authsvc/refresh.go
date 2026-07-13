@@ -54,6 +54,7 @@ func (i *IdP) rotateSession(ctx context.Context, tx store.Store, row store.Refre
 		SessionPubkeySPKI: row.SessionPubkeySPKI,
 		CPAccessTokenID:   pair.CPTokenID,
 		NodeAccessTokenID: pair.NodeTokenID,
+		AccessExpiresAt:   pair.ExpiresAt,
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(refreshSliding).Unix(),
@@ -121,11 +122,11 @@ func (i *IdP) handleRefresh(ctx context.Context, rawToken string, proof PoPProof
 				}
 			}
 			// Outside grace OR ≥2 generations old (cache cleared) → revoke family.
-			liveIDs, rErr := tx.RefreshSessions().RevokeFamily(ctx, row.FamilyID)
+			liveIDs, rErr := tx.RefreshSessions().RevokeFamily(ctx, row.FamilyID, now.Unix())
 			if rErr != nil {
 				return rErr
 			}
-			if err := appendRevocation(ctx, tx, row.AccountID, row.FamilyID, liveIDs, now); err != nil {
+			if err := appendFamilyRevocation(ctx, tx, row.AccountID, row.FamilyID, liveIDs, now); err != nil {
 				return err
 			}
 			reuseRevoked = true
