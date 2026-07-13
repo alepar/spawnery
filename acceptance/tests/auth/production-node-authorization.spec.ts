@@ -436,25 +436,25 @@ test("production authorization: exact node NACKs and target substitution refusal
       name: "node-id",
       substitution: { field: "targetNodeId", value: "node-substituted" },
       webError: /intent: response target node mismatch/,
-      cliError: /response target node mismatch/,
+      cliError: /response target_node_id .* does not match pending/,
     },
     {
       name: "node-class",
       substitution: { field: "targetNodeClass", value: "self-hosted" },
       webError: /target: typed node identity does not match certificate|response target class mismatch/,
-      cliError: /verify target:|response target class mismatch/,
+      cliError: /target_node_class .* does not match requested/,
     },
     {
       name: "node-account",
       substitution: { field: "targetNodeAccountId", value: "other-system-account" },
       webError: /target: typed node identity does not match certificate/,
-      cliError: /verify target:.*target account|verify target:.*typed target/,
+      cliError: /verify target: cloud target account .* does not match system account/,
     },
     {
       name: "certificate-chain",
       substitution: { field: "nodeCertChain", value: Buffer.from("not-a-certificate").toString("base64") },
       webError: /target:|certificate|x509/i,
-      cliError: /verify target:/,
+      cliError: /verify target: target node cert chain is not valid PEM/,
     },
   ];
 
