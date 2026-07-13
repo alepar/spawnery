@@ -37,7 +37,7 @@ export function BundleEntryChip({ entry, onRemove, onRepin }: BundleEntryChipPro
     setChecking(true);
     try {
       const res = await reingestBundle(entry.bundleId);
-      const upToDate = res.notModified || (!res.changed && latestSeq <= pinnedSeq);
+      const upToDate = !res.changed && latestSeq <= pinnedSeq;
       if (upToDate) {
         toast.success("Bundle is up to date");
         return;

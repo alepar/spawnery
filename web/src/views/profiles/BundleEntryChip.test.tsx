@@ -97,6 +97,30 @@ describe("BundleEntryChip", () => {
     successSpy.mockRestore();
   });
 
+  it("notModified but this entry is pinned behind latestSeq ⇒ opens the diff dialog, not 'up to date'", async () => {
+    // GitHub's ETag matched (server sets notModified=true, changed left false) but the bundle
+    // already has a newer version than this entry is pinned to (e.g. cut by another session) —
+    // the entry's own staleness must still surface the diff, not a false "up to date" toast.
+    vi.mocked(reingestBundle).mockResolvedValue({
+      versionId: "v2", changed: false, addedSubdirs: [], updatedSubdirs: [], removedSubdirs: [],
+      diffToken: "", fromVersionId: "", notModified: true, warnings: [],
+    });
+    const { toast } = await import("sonner");
+    const successSpy = vi.spyOn(toast, "success");
+
+    render(
+      <BundleEntryChip
+        entry={makeEntry({ pinnedSeq: 1, latestSeq: 2, versionId: "v1" })}
+        onRemove={vi.fn()} onRepin={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByTestId("bundle-chip-check-updates-e1"));
+
+    await waitFor(() => expect(screen.getByTestId("bundle-diff-dialog")).toBeTruthy());
+    expect(successSpy).not.toHaveBeenCalledWith(expect.stringMatching(/up to date/i));
+    successSpy.mockRestore();
+  });
+
   it("not changed and not behind ⇒ 'up to date' toast and no dialog", async () => {
     vi.mocked(reingestBundle).mockResolvedValue({
       versionId: "v1", changed: false, addedSubdirs: [], updatedSubdirs: [], removedSubdirs: [],
