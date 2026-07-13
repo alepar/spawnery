@@ -1,4 +1,4 @@
-import { BitString, Integer, OctetString, fromBER } from "asn1js";
+import { BitString, Integer, OctetString, Sequence, fromBER } from "asn1js";
 import {
   AltName,
   AuthorityKeyIdentifier,
@@ -57,6 +57,134 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function bytesCompare(left: Uint8Array, right: Uint8Array): number {
+  const shared = Math.min(left.length, right.length);
+  for (let index = 0; index < shared; index++) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.length - right.length;
+}
+
+function assertCanonicalPrimitive(
+  der: Uint8Array,
+  tag: number,
+  contentStart: number,
+  contentEnd: number,
+): void {
+  const length = contentEnd - contentStart;
+  if (tag === 0) throw new Error("end-of-contents is forbidden in DER");
+  if (tag === 1 && (length !== 1 || der[contentStart] !== 0 && der[contentStart] !== 0xff)) {
+    throw new Error("non-canonical BOOLEAN");
+  }
+  if (tag === 2 || tag === 10) {
+    if (length === 0
+        || length > 1 && der[contentStart] === 0 && (der[contentStart + 1] & 0x80) === 0
+        || length > 1 && der[contentStart] === 0xff && (der[contentStart + 1] & 0x80) !== 0) {
+      throw new Error("non-canonical INTEGER");
+    }
+  }
+  if (tag === 3) {
+    if (length === 0 || der[contentStart] > 7
+        || length === 1 && der[contentStart] !== 0
+        || length > 1 && der[contentEnd - 1] & (1 << der[contentStart]) - 1) {
+      throw new Error("non-canonical BIT STRING");
+    }
+  }
+  if (tag === 5 && length !== 0) throw new Error("non-canonical NULL");
+  if (tag === 6) {
+    if (length === 0) throw new Error("empty OBJECT IDENTIFIER");
+    let start = true;
+    for (let offset = contentStart; offset < contentEnd; offset++) {
+      if (start && der[offset] === 0x80) throw new Error("non-canonical OBJECT IDENTIFIER");
+      start = (der[offset] & 0x80) === 0;
+    }
+    if (!start) throw new Error("truncated OBJECT IDENTIFIER");
+  }
+  if (tag === 23 || tag === 24) {
+    const value = String.fromCharCode(...der.subarray(contentStart, contentEnd));
+    const canonical = tag === 23 ? /^\d{12}Z$/u : /^\d{14}Z$/u;
+    if (!canonical.test(value)) throw new Error("non-canonical time");
+  }
+}
+
+function assertCanonicalDER(der: Uint8Array, label: string): void {
+  const fail = (): never => { throw new Error(`node CRL: ${label} must use canonical DER`); };
+
+  const readElement = (start: number, limit: number): number => {
+    try {
+      let offset = start;
+      if (offset >= limit) return fail();
+      const identifier = der[offset++];
+      const tagClass = identifier & 0xc0;
+      const constructed = (identifier & 0x20) !== 0;
+      let tag = identifier & 0x1f;
+      if (tag === 0x1f) {
+        tag = 0;
+        let first = true;
+        for (;;) {
+          if (offset >= limit) return fail();
+          const octet = der[offset++];
+          if (first && (octet & 0x7f) === 0) return fail();
+          first = false;
+          tag = tag * 128 + (octet & 0x7f);
+          if (!Number.isSafeInteger(tag)) return fail();
+          if ((octet & 0x80) === 0) break;
+        }
+        if (tag < 31) return fail();
+      }
+
+      if (offset >= limit) return fail();
+      const firstLength = der[offset++];
+      let length = firstLength;
+      if (firstLength & 0x80) {
+        const octets = firstLength & 0x7f;
+        if (octets === 0 || octets > 4 || offset + octets > limit || der[offset] === 0) return fail();
+        length = 0;
+        for (let index = 0; index < octets; index++) length = length * 256 + der[offset++];
+        if (length < 128 || !Number.isSafeInteger(length)) return fail();
+      }
+      const contentStart = offset;
+      const contentEnd = contentStart + length;
+      if (contentEnd > limit) return fail();
+
+      if (tagClass === 0 && ((tag === 16 || tag === 17) !== constructed)) return fail();
+      if (tagClass === 0 && constructed && tag !== 16 && tag !== 17) return fail();
+      if (constructed) {
+        const children: Uint8Array[] = [];
+        while (offset < contentEnd) {
+          const childStart = offset;
+          offset = readElement(offset, contentEnd);
+          children.push(der.subarray(childStart, offset));
+        }
+        if (offset !== contentEnd) return fail();
+        if (tagClass === 0 && tag === 17) {
+          for (let index = 1; index < children.length; index++) {
+            if (bytesCompare(children[index - 1], children[index]) > 0) return fail();
+          }
+        }
+      } else if (tagClass === 0) {
+        assertCanonicalPrimitive(der, tag, contentStart, contentEnd);
+      }
+      return contentEnd;
+    } catch {
+      return fail();
+    }
+  };
+
+  if (readElement(0, der.length) !== der.length) fail();
+}
+
+type ASN1Block = ReturnType<typeof fromBER>["result"];
+
+function childBlocks(block: ASN1Block): ASN1Block[] {
+  const value = (block.valueBlock as unknown as { value?: ASN1Block[] }).value;
+  return value ?? [];
+}
+
+function rawBlock(block: ASN1Block): Uint8Array {
+  return byteView(block.valueBeforeDecodeView);
+}
+
 function parseDER<T>(
   der: Uint8Array,
   label: string,
@@ -87,7 +215,35 @@ function certificate(der: Uint8Array, label: string): Certificate {
 function revocationList(pem: string): CertificateRevocationList {
   const der = onePEM(pem, "CRL");
   if (der.length > MAX_CRL_DER_SIZE) throw new Error("node CRL: CRL exceeds size limit");
-  return parseDER(der, "CRL", (schema) => new CertificateRevocationList({ schema }));
+  assertCanonicalDER(der, "CRL");
+  const buffer = der.buffer.slice(der.byteOffset, der.byteOffset + der.byteLength) as ArrayBuffer;
+  const parsed = fromBER(buffer);
+  if (parsed.offset === -1 || parsed.offset !== der.byteLength || !(parsed.result instanceof Sequence)) {
+    throw new Error("node CRL: malformed CRL DER");
+  }
+  const outer = childBlocks(parsed.result);
+  const tbs = outer[0];
+  const tbsFields = tbs ? childBlocks(tbs) : [];
+  if (outer.length !== 3 || !(tbs instanceof Sequence) || !(tbsFields[0] instanceof Integer)) {
+    throw new Error("node CRL: CRL must be an X.509 v2 CRL");
+  }
+  let version: bigint;
+  try {
+    version = tbsFields[0].toBigInt();
+  } catch {
+    throw new Error("node CRL: CRL must be an X.509 v2 CRL");
+  }
+  if (version !== 1n) throw new Error("node CRL: CRL must be an X.509 v2 CRL");
+  if (!tbsFields[1] || !outer[1] || !bytesEqual(rawBlock(tbsFields[1]), rawBlock(outer[1]))) {
+    throw new Error("node CRL: inner and outer signature algorithms do not match");
+  }
+  try {
+    const crl = new CertificateRevocationList({ schema: parsed.result });
+    if (crl.version !== 1) throw new Error("invalid CRL version");
+    return crl;
+  } catch {
+    throw new Error("node CRL: malformed CRL DER");
+  }
 }
 
 function extensionSchema(extension: Extension, label: string): ReturnType<typeof fromBER>["result"] {

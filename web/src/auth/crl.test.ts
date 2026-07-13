@@ -20,6 +20,7 @@ interface Scenario {
 
 interface RejectedScenario extends Scenario {
   error: string;
+  goOutcome?: "parse-rejected" | "verify-rejected";
 }
 
 interface Vectors {
@@ -37,6 +38,14 @@ const vectors = JSON.parse(fs.readFileSync(path.resolve(
 ), "utf8")) as Vectors;
 const now = new Date(vectors.now);
 const trustDomain = "prod.spawnery.internal";
+const GO_OUTCOME_SCENARIOS = [
+  "outer-indefinite-length",
+  "outer-noncanonical-length",
+  "noncanonical-time",
+  "absent-version",
+  "non-v2-version",
+  "algorithm-identifier-mismatch",
+] as const;
 
 function pem(type: string, der: Uint8Array): string {
   const base64 = btoa(String.fromCharCode(...der));
@@ -125,4 +134,8 @@ describe("verifyNodeCertificateRevocation", () => {
       )).rejects.toThrow(scenario.error);
     },
   );
+
+  it.each(GO_OUTCOME_SCENARIOS)("records Go rejection for %s", (name) => {
+    expect(["parse-rejected", "verify-rejected"]).toContain(vectors.scenarios[name].goOutcome);
+  });
 });

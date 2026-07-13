@@ -48,6 +48,7 @@ type scenario struct {
 	Bundles     []bundle `json:"bundles"`
 	TrustDomain string   `json:"trustDomain,omitempty"`
 	Error       string   `json:"error,omitempty"`
+	GoOutcome   string   `json:"goOutcome,omitempty"`
 }
 
 type vectors struct {
@@ -235,14 +236,79 @@ type signedCRL struct {
 	Signature asn1.BitString
 }
 
+type rawSignedCRL struct {
+	TBS       asn1.RawValue
+	Algorithm pkix.AlgorithmIdentifier
+	Signature asn1.BitString
+}
+
+func rawSignedParts(der []byte) rawSignedCRL {
+	var out rawSignedCRL
+	rest, err := asn1.Unmarshal(der, &out)
+	if err != nil || len(rest) != 0 {
+		panic(fmt.Errorf("parse raw signed CRL: %w", err))
+	}
+	return out
+}
+
+func derTLV(tag byte, content []byte) []byte {
+	length := len(content)
+	if length < 128 {
+		return append([]byte{tag, byte(length)}, content...)
+	}
+	encoded := new(big.Int).SetInt64(int64(length)).Bytes()
+	out := []byte{tag, 0x80 | byte(len(encoded))}
+	out = append(out, encoded...)
+	return append(out, content...)
+}
+
+func nonCanonicalTimeCRL(label string, canonical []byte, signer *ecdsa.PrivateKey) []byte {
+	parts := rawSignedParts(canonical)
+	var fields [][]byte
+	rest := parts.TBS.Bytes
+	for len(rest) > 0 {
+		var field asn1.RawValue
+		var err error
+		rest, err = asn1.Unmarshal(rest, &field)
+		if err != nil {
+			panic(err)
+		}
+		fields = append(fields, bytes.Clone(field.FullBytes))
+	}
+	if len(fields) < 5 {
+		panic("canonical CRL has no thisUpdate field")
+	}
+	fields[3] = derTLV(0x17, []byte("300115110000+0000"))
+	tbsDER := derTLV(0x30, bytes.Join(fields, nil))
+	digest := sha256.Sum256(tbsDER)
+	sig, err := ecdsa.SignASN1(entropy("crl/"+label), signer, digest[:])
+	if err != nil {
+		panic(err)
+	}
+	der, err := asn1.Marshal(rawSignedCRL{
+		TBS:       asn1.RawValue{FullBytes: tbsDER},
+		Algorithm: parts.Algorithm,
+		Signature: asn1.BitString{Bytes: sig, BitLength: len(sig) * 8},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return der
+}
+
 func customCRL(label string, issuer *x509.Certificate, signer *ecdsa.PrivateKey, thisUpdate, nextUpdate time.Time, revoked []pkix.RevokedCertificate, extensions []pkix.Extension) []byte {
 	return customCRLWithRawIssuer(label, issuer.RawSubject, signer, thisUpdate, nextUpdate, revoked, extensions)
 }
 
 func customCRLWithRawIssuer(label string, rawIssuer []byte, signer *ecdsa.PrivateKey, thisUpdate, nextUpdate time.Time, revoked []pkix.RevokedCertificate, extensions []pkix.Extension) []byte {
-	alg := pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}
+	return customCRLWithVersionAndAlgorithms(label, 1, rawIssuer, signer, thisUpdate, nextUpdate, revoked, extensions,
+		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256},
+		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256})
+}
+
+func customCRLWithVersionAndAlgorithms(label string, version int, rawIssuer []byte, signer *ecdsa.PrivateKey, thisUpdate, nextUpdate time.Time, revoked []pkix.RevokedCertificate, extensions []pkix.Extension, innerAlg, outerAlg pkix.AlgorithmIdentifier) []byte {
 	tbs := tbsCRL{
-		Version: 1, Signature: alg, Issuer: asn1.RawValue{FullBytes: rawIssuer},
+		Version: version, Signature: innerAlg, Issuer: asn1.RawValue{FullBytes: rawIssuer},
 		ThisUpdate: thisUpdate.UTC(), NextUpdate: nextUpdate.UTC(), Revoked: revoked, Extensions: extensions,
 	}
 	tbsDER, err := asn1.Marshal(tbs)
@@ -255,11 +321,40 @@ func customCRLWithRawIssuer(label string, rawIssuer []byte, signer *ecdsa.Privat
 		panic(err)
 	}
 	tbs.Raw = tbsDER
-	der, err := asn1.Marshal(signedCRL{TBS: tbs, Algorithm: alg, Signature: asn1.BitString{Bytes: sig, BitLength: len(sig) * 8}})
+	der, err := asn1.Marshal(signedCRL{TBS: tbs, Algorithm: outerAlg, Signature: asn1.BitString{Bytes: sig, BitLength: len(sig) * 8}})
 	if err != nil {
 		panic(err)
 	}
 	return der
+}
+
+func outerContent(der []byte) []byte {
+	if len(der) < 2 || der[0] != 0x30 {
+		panic("CRL is not an outer SEQUENCE")
+	}
+	if der[1]&0x80 == 0 {
+		return der[2:]
+	}
+	lengthOctets := int(der[1] & 0x7f)
+	if lengthOctets == 0 || len(der) < 2+lengthOctets {
+		panic("CRL has invalid outer length")
+	}
+	return der[2+lengthOctets:]
+}
+
+func outerIndefiniteLength(der []byte) []byte {
+	out := []byte{0x30, 0x80}
+	out = append(out, outerContent(der)...)
+	return append(out, 0, 0)
+}
+
+func outerNonCanonicalLength(der []byte) []byte {
+	content := outerContent(der)
+	length := len(content)
+	encoded := new(big.Int).SetInt64(int64(length)).Bytes()
+	out := []byte{0x30, 0x80 | byte(len(encoded)+1), 0}
+	out = append(out, encoded...)
+	return append(out, content...)
 }
 
 func standardCRL(label string, issuer *x509.Certificate, signer *ecdsa.PrivateKey, number *big.Int, thisUpdate, nextUpdate time.Time, entries []x509.RevocationListEntry, extras ...pkix.Extension) []byte {
@@ -324,12 +419,16 @@ func main() {
 	}
 	addCRL := func(name, want string, der []byte) {
 		list, err := x509.ParseRevocationList(der)
-		if err == nil && pki.VerifyCRL(list, issuer, now) == nil {
-			panic(fmt.Errorf("Go verifier accepted negative %s", name))
+		outcome := "parse-rejected"
+		if err == nil {
+			outcome = "verify-rejected"
+			if err := pki.VerifyCRL(list, issuer, now); err == nil {
+				panic(fmt.Errorf("Go verifier accepted negative %s", name))
+			}
 		}
 		bad := validBundle
 		bad.CRLPEM = pemCRL(der)
-		v.Scenarios[name] = scenario{ChainPEM: chain, Bundles: []bundle{cloudBundle, bad}, Error: want}
+		v.Scenarios[name] = scenario{ChainPEM: chain, Bundles: []bundle{cloudBundle, bad}, Error: want, GoOutcome: outcome}
 	}
 	addIssuer := func(name, want string, opts issuerOptions) {
 		badIssuer, badKey := makeIssuer(name, now, root, rootKey, opts)
@@ -350,6 +449,27 @@ func main() {
 	}
 
 	validExts := []pkix.Extension{akiExtension(issuer.SubjectKeyId), numberExtension(big.NewInt(1))}
+	canonicalCustom := customCRL("canonical-custom", issuer, issuerKey, now.Add(-time.Hour), now.Add(time.Hour), nil, validExts)
+	algorithmMismatch := customCRLWithVersionAndAlgorithms(
+		"canonical-custom", 1, issuer.RawSubject, issuerKey, now.Add(-time.Hour), now.Add(time.Hour), nil, validExts,
+		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256},
+		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256, Parameters: asn1.RawValue{Tag: asn1.TagNull}})
+	canonicalParts := rawSignedParts(canonicalCustom)
+	mismatchParts := rawSignedParts(algorithmMismatch)
+	if !bytes.Equal(canonicalParts.TBS.FullBytes, mismatchParts.TBS.FullBytes) ||
+		!bytes.Equal(canonicalParts.Signature.Bytes, mismatchParts.Signature.Bytes) {
+		panic("algorithm mismatch vector changed the signed TBSCertList or signature")
+	}
+	addCRL("outer-indefinite-length", "canonical DER", outerIndefiniteLength(canonicalCustom))
+	addCRL("outer-noncanonical-length", "canonical DER", outerNonCanonicalLength(canonicalCustom))
+	addCRL("noncanonical-time", "canonical DER", nonCanonicalTimeCRL("noncanonical-time", canonicalCustom, issuerKey))
+	addCRL("absent-version", "X.509 v2 CRL", customCRLWithVersionAndAlgorithms(
+		"absent-version", 0, issuer.RawSubject, issuerKey, now.Add(-time.Hour), now.Add(time.Hour), nil, validExts,
+		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}, pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}))
+	addCRL("non-v2-version", "X.509 v2 CRL", customCRLWithVersionAndAlgorithms(
+		"non-v2-version", 2, issuer.RawSubject, issuerKey, now.Add(-time.Hour), now.Add(time.Hour), nil, validExts,
+		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}, pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}))
+	addCRL("algorithm-identifier-mismatch", "signature algorithms do not match", algorithmMismatch)
 	addCRL("delta", "CRL extension", standardCRL("delta", issuer, issuerKey, big.NewInt(2), now.Add(-time.Hour), now.Add(time.Hour), nil,
 		pkix.Extension{Id: oidDeltaCRL, Value: []byte{2, 1, 1}}))
 	addCRL("indirect", "CRL extension", standardCRL("indirect", issuer, issuerKey, big.NewInt(3), now.Add(-time.Hour), now.Add(time.Hour), nil,
