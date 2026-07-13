@@ -42,10 +42,10 @@ hard-fails before it runs. Only `@readonly` tests may run against prod.
 ## Namespacing & cleanup
 
 All artifacts created by this suite are named `acc-<runId>-w<workerIndex>-...`. Cleanup is
-two-layer: an in-process teardown sweeper removes the current run's namespace even on test
-failure, and a pre-run sweep removes stale `acc-*` artifacts older than `ACC_STALE_TTL_MS` (this
-catches runs whose process was killed/OOMed/timed out before its own teardown ran). There is no
-server-side reaper yet — see the epic's follow-up beads.
+three-layer: a per-test owner-visible ID snapshot removes only rows created by that test (including
+unnamed web/CLI rows and failed creates), an in-process teardown sweep removes the current run's
+namespace, and a pre-run sweep removes stale `acc-*` artifacts older than `ACC_STALE_TTL_MS`.
+There is no server-side reaper yet — see the epic's follow-up beads.
 
 ## Cost ceiling
 
@@ -71,14 +71,16 @@ a full page reload, and the agent's real side effect (a file it was prompted to 
 propagation + stdout capture with no LLM involved.
 
 Preconditions beyond the base `.env.*` vars (see `.env.example`):
+- `ACC_AGENT_INFERENCE_AVAILABLE` — must be explicit. `1` runs live inference; `0` marks only the
+  prompt/transcript scenario fixme with a reason while non-LLM ACP/session coverage remains active.
 - `ACC_AGENT_APP_ID` — a real coding-agent app registered on the target.
 - `ACC_AGENT_MODEL` — a pinned, cheap model (attributable cost, never "whatever the app
   defaults to").
 - `ACC_NODE_ADDR` — the node's terminal endpoint reachable from wherever the suite runs. `exec`
   (like `attach`/`shell`) dials the node **directly**, bypassing the CP entirely.
-- Missing `ACC_AGENT_APP_ID`/`ACC_AGENT_MODEL` makes the `@agent` scenario (and the
-  `exec-exitcode` spec, which reuses the agent app as its guaranteed-present spawn source) fail
-  loudly with a precondition error — never a silent skip.
+- A target that omits the capability declaration, or declares `1` without
+  `ACC_AGENT_APP_ID`/`ACC_AGENT_MODEL`, fails loudly with a precondition error.
+- The non-LLM `exec-exitcode` spec uses `ACC_TEST_APP_ID`, independent of live inference.
 - `@agent` describe-blocks set `retries: 0` — see Cost ceiling above.
 
 ## Ownership & SLO

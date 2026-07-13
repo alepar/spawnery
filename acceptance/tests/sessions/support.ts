@@ -110,3 +110,15 @@ export function agentModel(target: TargetConfig): string {
   }
   return target.agentModel;
 }
+
+/** agentInferenceAvailable requires an explicit target declaration so a live @agent lane cannot
+ * silently skip because its model-provider configuration was merely forgotten. */
+export function agentInferenceAvailable(target: TargetConfig): boolean {
+  if (target.agentInferenceAvailable === undefined) {
+    throw new Error(
+      "@agent scenarios require ACC_AGENT_INFERENCE_AVAILABLE=0 or 1; " +
+        "declare 0 only for a target that intentionally has no live inference provider",
+    );
+  }
+  return target.agentInferenceAvailable;
+}

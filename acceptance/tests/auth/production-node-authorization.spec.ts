@@ -222,7 +222,7 @@ test("production authorization: real web and stored-login CLI lifecycle", { tag:
   expect(await api.findSpawn(webId)).toMatchObject({ spawnId: webId, status: "ACTIVE" });
 
   await page.getByTestId(`spawn-kebab-${webId}`).click();
-  await page.getByTestId(`spawn-move-${webId}`).click();
+  await page.getByTestId(`spawn-moveto-${webId}`).click();
   await expect(page.getByTestId("migrate-no-targets")).toBeVisible();
   await page.keyboard.press("Escape");
 

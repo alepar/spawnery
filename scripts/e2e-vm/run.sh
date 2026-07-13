@@ -129,10 +129,11 @@ export ACC_CRLS="$PUBLIC/service.crl.pem,$PUBLIC/cloud-node.crl.pem,$PUBLIC/self
 # version-pin refs (preflight requires them). target==build here (the VM runs the code we just
 # rolled), so pin both to this run id so the check is meaningful and trivially satisfied.
 export ACC_TARGET_REF="$E2E_RUNID" ACC_BUILD_REF="$E2E_RUNID"
-export ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app ACC_AGENT_APP_ID=spawnery/secret-app
+export ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app
+export ACC_AGENT_INFERENCE_AVAILABLE=0
 export ACC_SEED_SKILL_APP_ID=spawnery/secret-app
 export ACC_APP_ID=spawnery/secret-app   # tenancy specs' generic app id
-export ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini
+export ACC_TEST_MODEL=openai/gpt-4o-mini
 export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
 export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the fresh spawnctl

@@ -112,8 +112,8 @@ export ACC_AUTH_MODE=oauth-pop \
   ACC_DESTRUCTIVE_DEV_TOKEN=devtoken1 \
   ACC_TARGET_REF=vm ACC_BUILD_REF=vm ACC_SPAWNCTL_BIN="$PWD/bin/spawnctl" \
   ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app \
-  ACC_AGENT_APP_ID=spawnery/secret-app ACC_APP_ID=spawnery/secret-app \
-  ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini \
+  ACC_AGENT_INFERENCE_AVAILABLE=0 ACC_APP_ID=spawnery/secret-app \
+  ACC_TEST_MODEL=openai/gpt-4o-mini \
   ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000 \
   NODE_EXTRA_CA_CERTS=/var/lib/libvirt/images/spawnery-e2e/golden-ca.crt
 ( cd acceptance && npx playwright test [tests/...] -g "cli" --reporter=list )

@@ -63,6 +63,18 @@ rg -q 'ACC_SEED_SKILL_APP_ID=spawnery/secret-app' "$runner" || {
   echo "run.sh does not wire the production skill-injection scenario to a seeded app" >&2
   exit 1
 }
+rg -q 'ACC_AGENT_INFERENCE_AVAILABLE=0' "$runner" || {
+  echo "fake VM profile does not explicitly declare inference unavailable" >&2
+  exit 1
+}
+if rg -q 'export .*ACC_AGENT_(APP_ID|MODEL)=' "$runner"; then
+  echo "fake VM profile falsely advertises live @agent inputs" >&2
+  exit 1
+fi
+rg -q 'ACC_TEST_MODEL' "$REPO/acceptance/tests/customization/injection.spec.ts" || {
+  echo "non-LLM customization injection still depends on @agent inference inputs" >&2
+  exit 1
+}
 
 common="$HERE/env/common.env"
 rg -q '^AGENT_IMAGE=spawnery/agent:dev$' "$common" || {
@@ -85,12 +97,20 @@ mkdir -p "$tmp/bin"
 cat >"$tmp/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+if [[ "$*" == "start spawnery-gitea-bootstrap.service" ]]; then
+  cat >"$GITEA_ENV_FILE" <<'ENVEOF'
+GITHUB_API_BASE_URL=https://github.com/api/v1
+GITHUB_HOST=github.com
+GITHUB_ALLOW_INSECURE_HOST=0
+GITHUB_STATIC_TOKEN=fresh-minted-token
+ENVEOF
+fi
 EOF
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
   *'/api/healthz'*) exit 0 ;;
-  *'/api/v1/user'*) [[ "$*" == *'Authorization: token minted-token'* ]] ;;
+  *'/api/v1/user'*) [[ "$*" == *'Authorization: token fresh-minted-token'* ]] ;;
   *) exit 1 ;;
 esac
 EOF
@@ -117,9 +137,10 @@ cat >"$tmp/gitea.env" <<'EOF'
 GITHUB_API_BASE_URL=https://github.com/api/v1
 GITHUB_HOST=github.com
 GITHUB_ALLOW_INSECURE_HOST=0
-GITHUB_STATIC_TOKEN=minted-token
+GITHUB_STATIC_TOKEN=pre-restart-token
 EOF
-SYSTEMCTL_LOG="$tmp/systemctl.log" PATH="$tmp/bin:$PATH" "$gitea_reconcile" "$tmp/gitea.env" "$tmp/app.ini"
+GITEA_ENV_FILE="$tmp/gitea.env" SYSTEMCTL_LOG="$tmp/systemctl.log" PATH="$tmp/bin:$PATH" \
+  "$gitea_reconcile" "$tmp/gitea.env" "$tmp/app.ini"
 expected_app_ini="$tmp/expected-app.ini"
 cat >"$expected_app_ini" <<'EOF'
 APP_NAME = Stale Golden Gitea
@@ -145,9 +166,12 @@ cmp -s "$expected_app_ini" "$tmp/app.ini" || {
   echo "Gitea reconciler changed the app.ini access mode" >&2
   exit 1
 }
-printf '%s\n' 'restart gitea' >"$tmp/expected-systemctl.log"
+printf '%s\n' \
+  'stop spawnery-gitea-bootstrap.service' \
+  'restart gitea' \
+  'start spawnery-gitea-bootstrap.service' >"$tmp/expected-systemctl.log"
 cmp -s "$tmp/expected-systemctl.log" "$tmp/systemctl.log" || {
-  echo "Gitea reconciler did not restart the service before probing it" >&2
+  echo "Gitea reconciler did not serialize Gitea restart and bootstrap" >&2
   exit 1
 }
 expected_gitea_env="$tmp/expected-gitea.env"
@@ -155,7 +179,7 @@ cat >"$expected_gitea_env" <<'EOF'
 GITHUB_API_BASE_URL=http://127.0.0.1:3000/api/v1
 GITHUB_HOST=127.0.0.1:3000
 GITHUB_ALLOW_INSECURE_HOST=1
-GITHUB_STATIC_TOKEN=minted-token
+GITHUB_STATIC_TOKEN=fresh-minted-token
 EOF
 cmp -s "$expected_gitea_env" "$tmp/gitea.env" || {
   echo "Gitea environment reconciler did not restore the HEAD-owned local topology" >&2

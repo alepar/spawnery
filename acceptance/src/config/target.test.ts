@@ -127,4 +127,26 @@ describe("loadTargetConfig", () => {
     expect(cfg.agentModel).toBe("cheap/model");
     expect(cfg.agentAppId).toBe("acc/agent-app");
   });
+
+  it("parses an explicit @agent inference capability", () => {
+    expect(loadTargetConfig({
+      ...baseEnv,
+      ACC_AGENT_INFERENCE_AVAILABLE: "1",
+    } as unknown as NodeJS.ProcessEnv).agentInferenceAvailable).toBe(true);
+    expect(loadTargetConfig({
+      ...baseEnv,
+      ACC_AGENT_INFERENCE_AVAILABLE: "0",
+    } as unknown as NodeJS.ProcessEnv).agentInferenceAvailable).toBe(false);
+  });
+
+  it("leaves @agent inference capability undefined when the target did not declare it", () => {
+    expect(loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv).agentInferenceAvailable).toBeUndefined();
+  });
+
+  it("rejects an invalid @agent inference capability", () => {
+    expect(() => loadTargetConfig({
+      ...baseEnv,
+      ACC_AGENT_INFERENCE_AVAILABLE: "maybe",
+    } as unknown as NodeJS.ProcessEnv)).toThrow(/ACC_AGENT_INFERENCE_AVAILABLE/);
+  });
 });

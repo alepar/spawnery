@@ -29,9 +29,8 @@ test(
           "(claude or codex); see acceptance/.env.example.",
       );
     }
-    if (!target.agentModel) {
-      throw new Error("ACC_AGENT_MODEL is unset — injection.spec.ts needs a model for the selected agent runnable");
-    }
+    const model = process.env.ACC_TEST_MODEL;
+    if (!model) throw new Error("ACC_TEST_MODEL is unset — injection.spec.ts needs a model for the selected agent runnable");
 
     const profileCli = new ProfileCli(cli.configuration(), identity);
     const cliCfg = { cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin };
@@ -54,7 +53,7 @@ test(
       // canonical agentinstall lane, then observe the result through spawnctl below.
       spawnId = await api.createSpawn({
         appId: target.seedSkillAppId,
-        model: target.agentModel,
+        model,
         profileId,
         image: "spawnery/agent:dev",
         runnableId: "claude-tui",

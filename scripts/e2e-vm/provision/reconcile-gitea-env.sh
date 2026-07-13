@@ -14,15 +14,12 @@ api_base="$origin/api/v1"
   echo "missing Gitea configuration: $app_ini" >&2
   exit 1
 }
-token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
-[[ -n "$token" && "$token" != *[[:space:]]* ]] || {
-  echo "missing or malformed GITHUB_STATIC_TOKEN in $env_file" >&2
-  exit 1
-}
 
 # Golden images may predate this branch. Replace only the HEAD-owned server keys, leaving the
-# database and generated security secrets intact, then prove the preserved token against that
-# exact local topology before publishing it to the node environment.
+# database and generated security secrets intact. Stop the golden-image bootstrap first: restarting
+# Gitea otherwise reactivates that oneshot unit asynchronously and lets it overwrite gitea.env
+# after this reconciler has returned.
+systemctl stop spawnery-gitea-bootstrap.service
 app_mode="$(stat -c %a "$app_ini")"
 app_uid="$(stat -c %u "$app_ini")"
 app_gid="$(stat -c %g "$app_ini")"
@@ -68,6 +65,16 @@ for _ in $(seq 1 60); do
 done
 [[ "$healthy" == 1 ]] || {
   echo "Gitea did not become healthy at $origin" >&2
+  exit 1
+}
+
+# Bootstrap synchronously against the reconciled server, then consume the token it just minted.
+# Golden-image bootstrap scripts may still publish stale endpoint values; the atomic write below
+# replaces those values only after proving the new token against the local Gitea API.
+systemctl start spawnery-gitea-bootstrap.service
+token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
+[[ -n "$token" && "$token" != *[[:space:]]* ]] || {
+  echo "missing or malformed GITHUB_STATIC_TOKEN in $env_file" >&2
   exit 1
 }
 curl -fsS -H "Authorization: token $token" "$api_base/user" >/dev/null

@@ -16,6 +16,7 @@ import { nsName } from "../fixtures/namespace";
 import { teardownSweep } from "../fixtures/sweep";
 import { CostLedger } from "../fixtures/budget";
 import { guardMutation } from "./guardrail";
+import { cleanupNewSpawns } from "./spawn-registry";
 import { AcceptanceClient, createKnownVMTargetVerifier, type SpawnSummary } from "../drivers/oracle";
 import { WebDriver } from "../drivers/web";
 import { CliDriver } from "../drivers/cli";
@@ -44,6 +45,8 @@ interface TestFixtures {
   cli: CliDriver;
   /** guardrail is an auto, test-scoped fixture: no test consumes it directly. */
   guardrail: void;
+  /** postTestSpawnCleanup removes only owner-visible spawns created by this test. */
+  postTestSpawnCleanup: void;
 }
 
 function selectAuth(target: TargetConfig): AuthStrategy {
@@ -191,6 +194,25 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     async ({ target }, use, testInfo) => {
       guardMutation(testInfo.tags, target.targetHost, target.nonprodHosts);
       await use();
+    },
+    { auto: true },
+  ],
+
+  // Snapshot by opaque id, not by name: web/CLI-created spawns use product-default names, and a
+  // failed CLI create can leave an ERROR row without returning its id. The baseline prevents this
+  // cleanup from touching any owner resource that existed before the test.
+  postTestSpawnCleanup: [
+    async ({ api }, use) => {
+      const baseline = new Set((await api.listSpawns()).map((spawn) => spawn.spawnId));
+      try {
+        await use();
+      } finally {
+        try {
+          await cleanupNewSpawns(api, baseline);
+        } catch (e) {
+          console.warn(`postTestSpawnCleanup: failed to list owner spawns: ${(e as Error).message}`);
+        }
+      }
     },
     { auto: true },
   ],

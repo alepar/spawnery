@@ -49,6 +49,9 @@ export interface TargetConfig {
   agentModel?: string;
   /** App id of a real coding-agent app on the target, for @agent scenarios. Same absence rule as agentModel. */
   agentAppId?: string;
+  /** Explicit target capability for live inference. Undefined is a configuration error only when
+   * an @agent scenario is selected; false lets deterministic lanes report a reasoned fixme. */
+  agentInferenceAvailable?: boolean;
 }
 
 const REQUIRED_VARS = ["ACC_WEB_ORIGIN", "ACC_CP_ENDPOINT", "ACC_IDENTITY_POOL", "ACC_TARGET_REF", "ACC_BUILD_REF"] as const;
@@ -93,6 +96,10 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
       if (!env[name]?.trim()) throw new Error(`oauth-pop requires ${name}`);
     }
   }
+  const inferenceCapability = env.ACC_AGENT_INFERENCE_AVAILABLE;
+  if (inferenceCapability !== undefined && inferenceCapability !== "0" && inferenceCapability !== "1") {
+    throw new Error(`ACC_AGENT_INFERENCE_AVAILABLE must be "0" or "1", got ${JSON.stringify(inferenceCapability)}`);
+  }
   return {
     webOrigin,
     cpEndpoint,
@@ -119,5 +126,6 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
     runId: env.ACC_RUN_ID || undefined,
     agentModel: env.ACC_AGENT_MODEL || undefined,
     agentAppId: env.ACC_AGENT_APP_ID || undefined,
+    agentInferenceAvailable: inferenceCapability === undefined ? undefined : inferenceCapability === "1",
   };
 }

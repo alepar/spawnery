@@ -1,5 +1,21 @@
 import type { AcceptanceClient } from "../drivers/oracle";
 
+type SpawnCleanupClient = Pick<AcceptanceClient, "listSpawns" | "deleteSpawn">;
+
+/** cleanupNewSpawns deletes only owner-visible ids absent from the pre-test snapshot. This catches
+ * failed CLI creates whose ERROR row exists even though no spawn id was returned to the caller. */
+export async function cleanupNewSpawns(api: SpawnCleanupClient, baseline: ReadonlySet<string>): Promise<void> {
+  const current = await api.listSpawns();
+  for (const spawn of current) {
+    if (baseline.has(spawn.spawnId)) continue;
+    try {
+      await api.deleteSpawn(spawn.spawnId);
+    } catch (e) {
+      console.warn(`cleanupNewSpawns: failed to delete ${spawn.spawnId}: ${(e as Error).message}`);
+    }
+  }
+}
+
 /**
  * SpawnRegistry: per-test tracker for spawns a scenario creates so they are reliably deleted at
  * test end via the api oracle. Needed because web/cli createSpawn cannot set a name, so the
