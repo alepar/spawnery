@@ -240,18 +240,21 @@ export function cpAuthModePlan(
   };
 }
 
+export function cpAuthModeReadinessCommand(expectedLog: string): string {
+  return "sudo systemctl is-active spawnery-cp >/dev/null && "
+    + "pid=$(sudo systemctl show --property MainPID --value spawnery-cp); "
+    + "test \"$pid\" -gt 0 && "
+    + "logs=$(sudo journalctl _SYSTEMD_UNIT=spawnery-cp.service _PID=\"$pid\" --no-pager); "
+    + `printf %s "$logs" | grep -Fq ${posixShellQuote(expectedLog)} && `
+    + `printf %s "$logs" | grep -Fq 'node connected' && echo ready`;
+}
+
 export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Promise<void> {
-  const restartEpoch = Math.floor(Date.now() / 1000) - 1;
   const plan = cpAuthModePlan(cfg, mode);
   await ssh(cfg, remoteArgv("sudo", "sh", "-c", plan.configureCommand));
   await ssh(cfg, "sudo systemctl daemon-reload && sudo systemctl restart spawnery-cp");
   for (let i = 0; i < 60; i++) {
-    const journal = remoteArgv(
-      "sudo", "journalctl", "-u", "spawnery-cp", "--since", `@${restartEpoch}`, "--no-pager",
-    );
-    const ready = await ssh(cfg,
-      `sudo systemctl is-active spawnery-cp >/dev/null && ${journal} | grep -Fq ${posixShellQuote(plan.expectedLog)} && echo ready`,
-    ).catch(() => "");
+    const ready = await ssh(cfg, cpAuthModeReadinessCommand(plan.expectedLog)).catch(() => "");
     if (ready === "ready") return;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }

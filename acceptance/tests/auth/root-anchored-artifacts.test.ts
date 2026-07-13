@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { cpAuthModePlan, posixShellQuote } from "./root-anchored-artifacts";
+import { cpAuthModePlan, cpAuthModeReadinessCommand, posixShellQuote } from "./root-anchored-artifacts";
 
 describe("posixShellQuote", () => {
   it.each([
@@ -36,5 +36,18 @@ describe("cpAuthModePlan", () => {
       configureCommand: "rm -f /etc/spawnery/env.d/zz-destructive.env /etc/systemd/system/spawnery-cp.service.d/zz-destructive.conf",
       expectedLog: "cp: auth mode=prod",
     });
+  });
+});
+
+describe("cpAuthModeReadinessCommand", () => {
+  it("requires auth mode and node registration from the current CP process", () => {
+    expect(cpAuthModeReadinessCommand("cp: auth mode=dev")).toBe(
+      "sudo systemctl is-active spawnery-cp >/dev/null && "
+      + "pid=$(sudo systemctl show --property MainPID --value spawnery-cp); "
+      + "test \"$pid\" -gt 0 && "
+      + "logs=$(sudo journalctl _SYSTEMD_UNIT=spawnery-cp.service _PID=\"$pid\" --no-pager); "
+      + "printf %s \"$logs\" | grep -Fq 'cp: auth mode=dev' && "
+      + "printf %s \"$logs\" | grep -Fq 'node connected' && echo ready",
+    );
   });
 });
