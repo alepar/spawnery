@@ -129,6 +129,45 @@ describe("ProfilesView", () => {
     expect(screen.getByTestId("add-catalog-entry-cat1")).toBeTruthy();
   });
 
+  it("renders a provenance block for a URL-ingested catalog entry, with distinct content-sha256 and commit labels", async () => {
+    vi.mocked(listCatalogEntries).mockResolvedValueOnce([
+      { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL", name: "My Skill", description: "A test skill" },
+      {
+        catalogId: "cat-prov",
+        kind: "PROFILE_ENTRY_KIND_SKILL",
+        name: "Provenance Skill",
+        description: "a url-ingested skill",
+        sourceUrl: "https://github.com/obra/superpowers",
+        sourceRef: "main",
+        sourceSubdir: "skills/x",
+        sourceCommit: "1111111111111111111111111111111111aaaa",
+        sha256: "2222222222222222222222222222222222222222222222222222222222bbbb",
+        size: "4096",
+        bundleMember: true,
+      },
+    ]);
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("add-catalog-btn"));
+    await userEvent.click(screen.getByTestId("add-catalog-btn"));
+    await waitFor(() => screen.getByTestId("catalog-picker"));
+
+    // Inline entry (cat1) has no provenance block.
+    expect(screen.queryByTestId("catalog-provenance-cat1")).toBeNull();
+
+    // URL-ingested entry (cat-prov) has one, with a resolving anchor and the two distinct labels.
+    const block = screen.getByTestId("catalog-provenance-cat-prov");
+    expect(block).toBeTruthy();
+    const anchor = block.querySelector("a") as HTMLAnchorElement;
+    expect(anchor.getAttribute("href")).toBe("https://github.com/obra/superpowers");
+    expect(block.textContent).toContain("main");
+    expect(block.textContent).toContain("skills/x");
+    expect(block.textContent).toContain("commit 111111111111");
+    expect(block.textContent).toContain("content sha256 222222222222");
+    expect(block.textContent).toContain("4096");
+  });
+
   it("clicking Add in catalog picker calls addProfileEntry with catalog ref", async () => {
     render(<ProfilesView />);
     await waitFor(() => screen.getByTestId("profile-item-p1"));

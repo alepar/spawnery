@@ -541,6 +541,37 @@ export function ProfilesView() {
                       {ce.description && (
                         <span className="ml-2 text-xs text-muted-foreground">{ce.description}</span>
                       )}
+                      {ce.sourceUrl && (
+                        <div
+                          data-testid={`catalog-provenance-${ce.catalogId}`}
+                          className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground"
+                        >
+                          {ce.sourceUrl.startsWith("https://") || ce.sourceUrl.startsWith("http://") ? (
+                            <a
+                              href={ce.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="underline"
+                            >
+                              {ce.sourceUrl}
+                            </a>
+                          ) : (
+                            <span>{ce.sourceUrl}</span>
+                          )}
+                          {ce.sourceRef && <span>ref {ce.sourceRef}</span>}
+                          {ce.sourceSubdir && <span>subdir {ce.sourceSubdir}</span>}
+                          {ce.sourceCommit && (
+                            <span title={ce.sourceCommit}>commit {ce.sourceCommit.slice(0, 12)}</span>
+                          )}
+                          {ce.sha256 && (
+                            <span title={ce.sha256}>content sha256 {ce.sha256.slice(0, 12)}</span>
+                          )}
+                          {ce.size && <span>{ce.size} bytes</span>}
+                          {ce.bundleMember && (
+                            <span className="rounded bg-muted px-1">bundle member</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <Button
                       data-testid={`add-catalog-entry-${ce.catalogId}`}

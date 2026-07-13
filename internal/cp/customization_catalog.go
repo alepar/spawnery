@@ -88,12 +88,7 @@ func (s *Server) ListCatalogEntries(ctx context.Context, _ *connect.Request[cpv1
 	}
 	out := make([]*cpv1.CatalogEntrySummary, len(entries))
 	for i, e := range entries {
-		out[i] = &cpv1.CatalogEntrySummary{
-			CatalogId:   e.CatalogID,
-			Kind:        entryKindToProto(store.ProfileEntryKind(e.Kind)),
-			Name:        e.Name,
-			Description: e.Description,
-		}
+		out[i] = catalogEntrySummaryToProto(e)
 	}
 	return connect.NewResponse(&cpv1.ListCatalogEntriesResponse{Entries: out}), nil
 }
@@ -405,16 +400,72 @@ func catalogEntryVisibleTo(e store.CustomizationCatalogEntry, owner string) bool
 
 // --- Wire <-> store conversions -----------------------------------------------
 
+// provenanceSourceURL renders the persisted provenance source as a resolvable URL.
+// ingest_skill.go persists a bare "owner/repo" slug (github.com is the only supported host);
+// a value that already has a scheme passes through unchanged. The STORED value stays canonical:
+// it is the bundle unique key (creator_id, source_url, source_ref, source_subdir) and
+// skillfetch.ParseRepoURL accepts both forms, so nothing downstream cares.
+func provenanceSourceURL(s string) string {
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		return s // deliberately dumb + total
+	}
+	return "https://github.com/" + s
+}
+
+// derefString returns "" for a nil pointer, else the pointed-to value.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// derefInt64 returns 0 for a nil pointer, else the pointed-to value.
+func derefInt64(i *int64) int64 {
+	if i == nil {
+		return 0
+	}
+	return *i
+}
+
 func catalogEntryToProto(e store.CustomizationCatalogEntry) *cpv1.CustomizationCatalogEntry {
 	return &cpv1.CustomizationCatalogEntry{
-		CatalogId:   e.CatalogID,
-		CreatorId:   e.CreatorID,
-		Kind:        entryKindToProto(store.ProfileEntryKind(e.Kind)),
-		Name:        e.Name,
-		Description: e.Description,
-		Content:     e.Content,
-		Listed:      e.Listed,
-		CreatedAt:   e.CreatedAt,
-		UpdatedAt:   e.UpdatedAt,
+		CatalogId:    e.CatalogID,
+		CreatorId:    e.CreatorID,
+		Kind:         entryKindToProto(store.ProfileEntryKind(e.Kind)),
+		Name:         e.Name,
+		Description:  e.Description,
+		Content:      e.Content,
+		Listed:       e.Listed,
+		CreatedAt:    e.CreatedAt,
+		UpdatedAt:    e.UpdatedAt,
+		SourceUrl:    provenanceSourceURL(e.SourceURL),
+		SourceRef:    e.SourceRef,
+		SourceSubdir: e.SourceSubdir,
+		SourceCommit: e.SourceCommit,
+		Sha256:       derefString(e.SHA256),
+		Size:         derefInt64(e.Size),
+		BundleMember: e.BundleMember,
+	}
+}
+
+// catalogEntrySummaryToProto builds the lightweight list view, including the same provenance
+// fields as catalogEntryToProto (same helpers, so the two mappers cannot drift).
+func catalogEntrySummaryToProto(e store.CustomizationCatalogEntry) *cpv1.CatalogEntrySummary {
+	return &cpv1.CatalogEntrySummary{
+		CatalogId:    e.CatalogID,
+		Kind:         entryKindToProto(store.ProfileEntryKind(e.Kind)),
+		Name:         e.Name,
+		Description:  e.Description,
+		SourceUrl:    provenanceSourceURL(e.SourceURL),
+		SourceRef:    e.SourceRef,
+		SourceSubdir: e.SourceSubdir,
+		SourceCommit: e.SourceCommit,
+		Sha256:       derefString(e.SHA256),
+		Size:         derefInt64(e.Size),
+		BundleMember: e.BundleMember,
 	}
 }
