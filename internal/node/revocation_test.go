@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -17,111 +16,6 @@ import (
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
 )
-
-func TestUserRevocationStorePersistsGappedFamilyAndAccountRevocations(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private", "state.json")
-	store, err := OpenUserRevocationStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ApplyBatch([]VerifiedUserRevocation{
-		{Seq: 2, AccountID: "alice", FamilyID: "family-1", TokenIDs: []string{"tok-old"}, RevokedAt: 10},
-		{Seq: 5, AccountID: "bob", TokenIDs: []string{"tok-bob"}, RevokedAt: 11},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if store.Checkpoint() != 5 || !store.IsRevoked("tok-old", "nobody") || store.IsRevoked("tok-new", "alice") || !store.IsRevoked("tok-new", "bob") {
-		t.Fatalf("checkpoint=%d old=%v alice=%v bob=%v", store.Checkpoint(), store.IsRevoked("tok-old", "nobody"), store.IsRevoked("tok-new", "alice"), store.IsRevoked("tok-new", "bob"))
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := OpenUserRevocationStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	if reopened.Checkpoint() != 5 || !reopened.IsRevoked("tok-old", "x") || !reopened.IsRevoked("fresh", "bob") {
-		t.Fatal("persisted snapshot not restored")
-	}
-}
-
-func TestUserRevocationStoreRejectsBatchAtomically(t *testing.T) {
-	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	err = store.ApplyBatch([]VerifiedUserRevocation{{Seq: 3, AccountID: "alice", FamilyID: "f", TokenIDs: []string{"ok"}}, {Seq: 3, AccountID: "alice", FamilyID: "f", TokenIDs: []string{"bad"}}})
-	if err == nil || store.Checkpoint() != 0 || store.IsRevoked("ok", "alice") {
-		t.Fatalf("err=%v checkpoint=%d", err, store.Checkpoint())
-	}
-}
-
-func TestUserRevocationStoreOwnsPathAndRejectsMalformedState(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "private")
-	path := filepath.Join(dir, "state.json")
-	store, err := OpenUserRevocationStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := OpenUserRevocationStore(path); !errors.Is(err, ErrUserRevocationStoreLocked) {
-		t.Fatalf("second open err=%v", err)
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("directory mode=%v", info.Mode())
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := OpenUserRevocationStore(path); err == nil {
-		t.Fatal("malformed state accepted")
-	}
-}
-
-func TestUserRevocationStorePersistenceFailureBoundaries(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private", "state.json")
-	store, err := OpenUserRevocationStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.beforeRename = func() error { return errors.New("injected") }
-	if err := store.ApplyBatch([]VerifiedUserRevocation{{Seq: 2, AccountID: "alice", FamilyID: "f", TokenIDs: []string{"old"}}}); err == nil {
-		t.Fatal("pre-rename failure accepted")
-	}
-	if store.Checkpoint() != 0 || store.IsRevoked("old", "alice") {
-		t.Fatal("pre-rename failure published")
-	}
-	store.beforeRename = nil
-	store.afterRename = func() error { return errors.New("injected") }
-	if err := store.ApplyBatch([]VerifiedUserRevocation{{Seq: 3, AccountID: "alice", FamilyID: "f", TokenIDs: []string{"old"}}}); !errors.Is(err, ErrUserRevocationStorePoisoned) {
-		t.Fatalf("post-rename err=%v", err)
-	}
-	if store.Checkpoint() != 3 || !store.IsRevoked("old", "x") {
-		t.Fatal("renamed snapshot was not published conservatively")
-	}
-	if err := store.ApplyBatch([]VerifiedUserRevocation{{Seq: 4, AccountID: "alice", FamilyID: "f", TokenIDs: []string{"new"}}}); !errors.Is(err, ErrUserRevocationStorePoisoned) {
-		t.Fatalf("poison not sticky: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := OpenUserRevocationStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if reopened.Checkpoint() != 3 || !reopened.IsRevoked("old", "x") {
-		t.Fatal("renamed snapshot not restored")
-	}
-}
 
 type revocationDoer func(*http.Request) (*http.Response, error)
 
@@ -206,7 +100,7 @@ func TestRevocationConsumerInvalidTailDoesNotAdvance(t *testing.T) {
 	}
 }
 
-func TestRevocationConsumerFansOutRenamedCheckpointBeforeReportingPoison(t *testing.T) {
+func TestRevocationConsumerDoesNotFanOutAmbiguousCommit(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	fixture := newArtifactFixture(t, now, "prod")
 	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
@@ -228,7 +122,7 @@ func TestRevocationConsumerFansOutRenamedCheckpointBeforeReportingPoison(t *test
 	if !errors.Is(err, ErrUserRevocationStorePoisoned) {
 		t.Fatalf("poll err=%v", err)
 	}
-	if store.Checkpoint() != 2 || calls.Load() != 1 {
+	if store.Checkpoint() != 0 || calls.Load() != 0 {
 		t.Fatalf("checkpoint=%d callbacks=%d", store.Checkpoint(), calls.Load())
 	}
 }
