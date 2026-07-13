@@ -1,14 +1,39 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   assertDisposableVM,
   cpAuthModePlan,
   cpAuthModeReadinessCommand,
+  deployAlternateSPABundle,
+  deployCurrentRevocation,
+  loadDestructiveVMAuthConfig,
   loadVMAuthConfig,
   posixShellQuote,
+  setCPAuthMode,
+  spaBundlePublicationPlan,
   vmRunMarkerVerificationCommand,
 } from "./root-anchored-artifacts";
+
+const temporaryDirectories: string[] = [];
+
+async function spaBundle(index: "file" | "directory" | "missing" = "file"): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "spawnery-spa-bundle-"));
+  temporaryDirectories.push(directory);
+  if (index === "file") await writeFile(join(directory, "index.html"), "<!doctype html>");
+  if (index === "directory") await mkdir(join(directory, "index.html"));
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, {
+    recursive: true,
+    force: true,
+  })));
+});
 
 describe("AS signer custody", () => {
   it("has no acceptance-side short-lived token mint or AS private-key read/sign path", () => {
@@ -59,7 +84,7 @@ describe("cpAuthModePlan", () => {
 });
 
 describe("destructive VM identity", () => {
-  const env = {
+  const baseEnv = {
     ACC_E2E_VM_IP: "192.0.2.10",
     ACC_E2E_SSH_KEY: "/tmp/key",
     ACC_E2E_SSH_USER: "spawnery",
@@ -67,13 +92,30 @@ describe("destructive VM identity", () => {
     ACC_WEB_ORIGIN: "https://vm.example",
     ACC_TEST_APP_ID: "spawnery/secret-app",
     ACC_TEST_MODEL: "test-model",
-    ACC_DESTRUCTIVE_DEV_TOKEN: "devtoken1",
     ACC_IDENTITY_POOL: "acc-owner-1=acc-owner-1",
   };
 
-  it("requires the runner-provided disposable VM run id", () => {
-    expect(() => loadVMAuthConfig(env)).toThrow("ACC_E2E_VM_RUNID");
+  it("loads ordinary VM auth without destructive-only variables", () => {
+    expect(loadVMAuthConfig(baseEnv)).toMatchObject({
+      ip: "192.0.2.10",
+      owner: "acc-owner-1",
+    });
   });
+
+  it("requires the destructive dev token only in the destructive loader", () => {
+    expect(() => loadDestructiveVMAuthConfig({ ...baseEnv, ACC_E2E_VM_RUNID: "run-123" }))
+      .toThrow("ACC_DESTRUCTIVE_DEV_TOKEN");
+  });
+
+  it("requires the disposable VM run id only in the destructive loader", () => {
+    expect(() => loadDestructiveVMAuthConfig({ ...baseEnv, ACC_DESTRUCTIVE_DEV_TOKEN: "devtoken1" }))
+      .toThrow("ACC_E2E_VM_RUNID");
+  });
+
+  const env = {
+    ...baseEnv,
+    ACC_DESTRUCTIVE_DEV_TOKEN: "devtoken1",
+  };
 
   it("verifies exact marker contents and root-only ownership", () => {
     expect(vmRunMarkerVerificationCommand("run-'quoted")).toBe(
@@ -84,7 +126,7 @@ describe("destructive VM identity", () => {
   });
 
   it("fails closed unless SSH confirms the exact disposable marker", async () => {
-    const cfg = loadVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
     const commands: string[] = [];
     const executeSSH = async (_cfg: typeof cfg, command: string) => {
       commands.push(command);
@@ -94,10 +136,152 @@ describe("destructive VM identity", () => {
     expect(commands).toEqual([vmRunMarkerVerificationCommand("run-123")]);
   });
 
-  it("gates the destructive spec before its first SSH operation", () => {
+  it.each(["dev", "prod"] as const)(
+    "checks the disposable marker before the %s CP auth-mode mutation",
+    async (mode) => {
+      const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+      const commands: string[] = [];
+      const executeSSH = async (_cfg: typeof cfg, command: string) => {
+        commands.push(command);
+        if (command.includes("journalctl")) return "ready";
+        return "wrong-run";
+      };
+
+      await expect(setCPAuthMode(cfg, mode, executeSSH)).rejects.toThrow("did not verify");
+      expect(commands).toEqual([vmRunMarkerVerificationCommand("run-123")]);
+    },
+  );
+
+  it("checks the disposable marker before revocation deployment performs any remote mutation", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const commands: string[] = [];
+    const executeSSH = async (_cfg: typeof cfg, command: string) => {
+      commands.push(command);
+      if (command.includes("signer-revocation")) return "wire";
+      if (command.includes("curl -fsS")) return "ready";
+      return "wrong-run";
+    };
+
+    await expect(deployCurrentRevocation(cfg, 1, executeSSH)).rejects.toThrow("did not verify");
+    expect(commands).toEqual([vmRunMarkerVerificationCommand("run-123")]);
+  });
+
+  it("does not publish an alternate SPA bundle when the disposable marker fails", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const bundleDir = await spaBundle();
+    const publications: string[] = [];
+    const executeFile = async (file: string) => { publications.push(file); };
+    const executeSSH = async () => "wrong-run";
+
+    await expect(deployAlternateSPABundle(
+      cfg,
+      bundleDir,
+      executeSSH,
+      executeFile,
+    )).rejects.toThrow("did not verify");
+    expect(publications).toEqual([]);
+  });
+
+  it("plans an absolute rsync-over-SSH publication with an operand boundary", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const bundleDir = await spaBundle();
+    const plan = await spaBundlePublicationPlan(cfg, relative(process.cwd(), bundleDir));
+
+    expect(plan).toEqual({
+      file: "rsync",
+      args: [
+        "-a",
+        "--delete",
+        "-e",
+        "ssh -i '/tmp/key' -o BatchMode=yes -o StrictHostKeyChecking=no",
+        "--rsync-path",
+        "sudo rsync",
+        "--",
+        `${bundleDir}/`,
+        "spawnery@192.0.2.10:/var/www/spawnery/",
+      ],
+      options: { maxBuffer: 4 * 1024 * 1024 },
+    });
+  });
+
+  it.each([
+    ["empty", ""],
+    ["dash-prefixed", "--delete"],
+    ["missing", join(tmpdir(), `missing-spa-bundle-${process.pid}`)],
+  ])("rejects a %s SPA bundle input before exec", async (_name, bundleDir) => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const executions: string[] = [];
+
+    await expect(deployAlternateSPABundle(
+      cfg,
+      bundleDir,
+      async () => "verified",
+      async (file) => { executions.push(file); },
+    )).rejects.toThrow("alternate SPA bundle");
+    expect(executions).toEqual([]);
+  });
+
+  it.each(["missing", "directory"] as const)(
+    "rejects a bundle whose index.html is %s before exec",
+    async (index) => {
+      const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+      const bundleDir = await spaBundle(index);
+      const executions: string[] = [];
+
+      await expect(deployAlternateSPABundle(
+        cfg,
+        bundleDir,
+        async () => "verified",
+        async (file) => { executions.push(file); },
+      )).rejects.toThrow("regular index.html");
+      expect(executions).toEqual([]);
+    },
+  );
+
+  it("stops revocation deployment when the disposable marker changes after artifact generation", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const commands: string[] = [];
+    const marker = vmRunMarkerVerificationCommand("run-123");
+    let markerChecks = 0;
+    const executeSSH = async (_cfg: typeof cfg, command: string) => {
+      commands.push(command);
+      if (command === marker) {
+        markerChecks++;
+        return markerChecks === 1 ? "verified" : "wrong-run";
+      }
+      if (command.includes("signer-revocation")) return "wire";
+      return "";
+    };
+
+    await expect(deployCurrentRevocation(cfg, 1, executeSSH)).rejects.toThrow("did not verify");
+    expect(markerChecks).toBe(2);
+    expect(commands.some((command) => command.includes("signer-revocation"))).toBe(true);
+    expect(commands.some((command) => command.includes("signer-revocations.artifact"))).toBe(false);
+    expect(commands.some((command) => command.includes("systemctl restart"))).toBe(false);
+  });
+
+  it("rechecks the disposable marker immediately before installing revocation state", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const commands: string[] = [];
+    const marker = vmRunMarkerVerificationCommand("run-123");
+    const executeSSH = async (_cfg: typeof cfg, command: string) => {
+      commands.push(command);
+      if (command === marker) return "verified";
+      if (command.includes("signer-revocation")) return "wire";
+      if (command.includes("curl -fsS")) return "ready";
+      return "";
+    };
+
+    await deployCurrentRevocation(cfg, 1, executeSSH);
+    const installIndex = commands.findIndex((command) => command.includes("signer-revocations.artifact"));
+    expect(installIndex).toBeGreaterThan(0);
+    expect(commands[installIndex - 1]).toBe(marker);
+  });
+
+  it("loads destructive config and gates the destructive spec before its first SSH operation", () => {
     const source = readFileSync(new URL("./root-anchored-artifacts.spec.ts", import.meta.url), "utf8");
     expect(source).toMatch(
-      /const cfg = loadVMAuthConfig\(\);\s+await assertDisposableVM\(cfg\);\s+const env = await ssh/,
+      /const cfg = loadDestructiveVMAuthConfig\(\);\s+await assertDisposableVM\(cfg\);\s+const env = await ssh/,
     );
   });
 });
