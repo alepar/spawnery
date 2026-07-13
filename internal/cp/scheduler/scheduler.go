@@ -29,8 +29,28 @@ type Scheduler struct {
 	rt      *router.Router
 	timeout time.Duration
 
-	mu      sync.Mutex
-	pending map[string]chan spawnResult // spawn_id -> ACTIVE/ERROR signal
+	mu       sync.Mutex
+	pending  map[string]chan spawnResult // spawn_id -> ACTIVE/ERROR signal
+	inflight map[string]InFlightStart    // spawn_id -> the node/gen Provision is currently starting it on
+}
+
+// InFlightStart is the placement Provision has picked for a spawn that has not yet reached ACTIVE.
+// This is the ONLY ownership signal available during artifact staging (sp-mwco.4.3): the live
+// container row's node_id is set by Spawns().SetActive only AFTER Provision returns ACTIVE, so
+// LiveContainer(spawnID).NodeID == nodeID is false during the exact window a re-presign can be
+// requested. Provision writes an entry right after picking a node and removes it (via the same
+// defer that clears pending) when it returns, success or failure.
+type InFlightStart struct {
+	NodeID string
+	Gen    uint64
+}
+
+// InFlightStart returns the placement Provision currently has in flight for spawnID, if any.
+func (s *Scheduler) InFlightStart(spawnID string) (InFlightStart, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fs, ok := s.inflight[spawnID]
+	return fs, ok
 }
 
 type RootfsRestore struct {
@@ -40,7 +60,7 @@ type RootfsRestore struct {
 }
 
 func New(reg *registry.Registry, rt *router.Router, timeout time.Duration) *Scheduler {
-	return &Scheduler{reg: reg, rt: rt, timeout: timeout, pending: map[string]chan spawnResult{}}
+	return &Scheduler{reg: reg, rt: rt, timeout: timeout, pending: map[string]chan spawnResult{}, inflight: map[string]InFlightStart{}}
 }
 
 // OnStatus is called by the node receive loop when a SpawnStatus arrives.
@@ -90,8 +110,14 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	ch := make(chan spawnResult, 1)
 	s.mu.Lock()
 	s.pending[id] = ch
+	s.inflight[id] = InFlightStart{NodeID: n.ID, Gen: gen}
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.pending, id); s.mu.Unlock() }()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, id)
+		delete(s.inflight, id)
+		s.mu.Unlock()
+	}()
 
 	start := &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
