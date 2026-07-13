@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"spawnery/internal/agentinstall/spec"
 )
 
 // installSkill is the shared skill-install implementation used by every emitter.
@@ -125,14 +127,16 @@ func installSkill(layout AgentLayout, a Artifact, opts Options) Report {
 	}
 
 	var skipped []string
+	var sanitized bool
 	for _, dir := range dirs {
-		s, err := installTreeAt(dir, a.Name, src, marker)
+		s, changed, err := installTreeAt(dir, a.Name, src, marker)
 		if err != nil {
 			base.Status = StatusFailed
 			base.Reason = fmt.Sprintf("install skill to %s: %v", dir, err)
 			return base
 		}
 		skipped = append(skipped, s...)
+		sanitized = sanitized || changed
 	}
 
 	base.Status = StatusApplied
@@ -143,23 +147,28 @@ func installSkill(layout AgentLayout, a Artifact, opts Options) Report {
 	if len(overwritten) > 0 {
 		reasonParts = append(reasonParts, fmt.Sprintf("overwrote previously-managed skill install at: %s", strings.Join(overwritten, ", ")))
 	}
+	if sanitized {
+		reasonParts = append(reasonParts, "sanitized SKILL.md frontmatter (description capped to 1 KiB)")
+	}
 	base.Reason = strings.Join(reasonParts, "; ")
 	return base
 }
 
 // installTreeAt performs the atomic upsert-by-name of src into dir/name: copy into a
-// sibling temp dir, stamp the ownership marker, then atomically replace dir/name with
-// os.Rename. Returns the relative paths of any symlinks skipped during the copy.
-func installTreeAt(dir, name, src string, marker skillMarker) (skippedSymlinks []string, err error) {
+// sibling temp dir, sanitize the staged SKILL.md's frontmatter (never the source — the
+// stored tar upstream must stay byte-identical, sp-mwco.1.11), stamp the ownership marker,
+// then atomically replace dir/name with os.Rename. Returns the relative paths of any
+// symlinks skipped during the copy, and whether SKILL.md's frontmatter was rewritten.
+func installTreeAt(dir, name, src string, marker skillMarker) (skippedSymlinks []string, sanitized bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create skills directory: %w", err)
+		return nil, false, fmt.Errorf("create skills directory: %w", err)
 	}
 
 	dest := filepath.Join(dir, name)
 
 	tmp, err := os.MkdirTemp(dir, ".tmp-"+name+"-")
 	if err != nil {
-		return nil, fmt.Errorf("create temp directory for skill: %w", err)
+		return nil, false, fmt.Errorf("create temp directory for skill: %w", err)
 	}
 	ok := false
 	defer func() {
@@ -170,33 +179,43 @@ func installTreeAt(dir, name, src string, marker skillMarker) (skippedSymlinks [
 
 	skipped, err := copyTree(src, tmp)
 	if err != nil {
-		return nil, fmt.Errorf("copy skill tree: %w", err)
+		return nil, false, fmt.Errorf("copy skill tree: %w", err)
+	}
+
+	sanitized, err = sanitizeSkillMD(tmp, name)
+	if err != nil {
+		return nil, false, fmt.Errorf("sanitize SKILL.md: %w", err)
 	}
 
 	if err := writeMarker(tmp, marker); err != nil {
-		return nil, fmt.Errorf("write skill ownership marker: %w", err)
+		return nil, false, fmt.Errorf("write skill ownership marker: %w", err)
 	}
 
 	if err := os.RemoveAll(dest); err != nil {
-		return nil, fmt.Errorf("remove previous skill install: %w", err)
+		return nil, false, fmt.Errorf("remove previous skill install: %w", err)
 	}
 	if err := os.Rename(tmp, dest); err != nil {
-		return nil, fmt.Errorf("rename temp dir to dest: %w", err)
+		return nil, false, fmt.Errorf("rename temp dir to dest: %w", err)
 	}
 	ok = true
 
 	// Restrict the skill top-level directory to owner-only access (0700).
 	if err := os.Chmod(dest, 0o700); err != nil {
-		return nil, fmt.Errorf("chmod skill top dir: %w", err)
+		return nil, false, fmt.Errorf("chmod skill top dir: %w", err)
 	}
 
-	return skipped, nil
+	return skipped, sanitized, nil
 }
 
-// validateSkillName returns an error if name is not a clean single path segment.
+// validateSkillName returns an error if name is not a clean single path segment, or exceeds
+// spec.MaxSkillNameBytes (§4.9: the name is loaded into a harness's system prompt alongside
+// the description, so it gets the same bound).
 func validateSkillName(name string) error {
 	if name == "" {
 		return fmt.Errorf("skill name must not be empty")
+	}
+	if len(name) > spec.MaxSkillNameBytes {
+		return fmt.Errorf("skill name exceeds %d bytes: %q", spec.MaxSkillNameBytes, name)
 	}
 	if strings.ContainsAny(name, "/\\") {
 		return fmt.Errorf("skill name must not contain path separators: %q", name)

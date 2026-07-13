@@ -312,3 +312,28 @@ used.*
   exclude/rename overrides (§4.4); layout-change branch (§4.5); ETag + shared rate budget (§4.8);
   content threat model (§4.9); `listed=false` default with admin-only publish (§4.3). Bundle-of-one
   adopted family-wide, superseding `sp-mwco.3`'s derived-lineage model.
+
+- **2026-07-12 — sp-mwco.1.11: §4.9's frontmatter sanitization only closed the catalog row; the
+  installed SKILL.md a harness actually loads was still raw.** The whole-epic review caught that
+  `sanitizeDescription` was wired to `Result.Description` / bundle `Member.Description` only — the
+  **catalog row's** metadata. `canonicalRepack` ships every member's `SKILL.md` byte-for-byte, on
+  purpose: `sha(bundle member) == sha(subdir ingest)` (§4.2, §4.11) is the content-addressed dedup
+  identity, and rewriting `SKILL.md` at repack time would redefine that identity per-skill. So the
+  raw, unbounded, attacker-controlled `description:` (and `name:`) shipped in the stored tar was
+  exactly what every harness loaded into its system prompt at startup — the threat this section
+  describes was **not** closed by what landed.
+
+  Resolution: sanitize at **install time**, in `agentinstall`, not at repack. `installTreeAt`
+  rewrites the staged (temp-dir) copy's `SKILL.md` frontmatter — description capped/stripped via
+  the (now-shared) `spec.SanitizeDescription`, `name` pinned to the installed artifact name and
+  length-capped (`spec.MaxSkillNameBytes = 64`) — immediately before the atomic rename, so both the
+  canonical (`~/.agents/skills/<name>/`) and any native per-agent copy get the sanitized file. The
+  source staging dir, the stored tar, and its sha are never touched: the dedup invariant survives
+  by construction, pinned by `internal/cp/skillfetch/rawtar_test.go`.
+
+  Residual, stated plainly: the raw description/name **do** persist — in the stored tar (dedup
+  identity) and in the node's staging dir — but neither is ever read by a harness; only the
+  install-time-rewritten copy is. A malformed frontmatter block (unclosed `---`, or not a YAML
+  mapping) fails the install closed (`StatusFailed`, nothing written) rather than let unbounded
+  content reach a system prompt. See `internal/agentinstall/frontmatter.go` and
+  `internal/agentinstall/spec/skillmeta.go`.
