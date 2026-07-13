@@ -486,6 +486,23 @@ func main() {
 		"noncanonical-time", canonicalCustom, issuerKey, 0x17, "300115110000+0000"))
 	addCRL("invalid-calendar-time", "canonical DER", crlWithThisUpdate(
 		"invalid-calendar-time", canonicalCustom, issuerKey, 0x17, "300231110000Z"))
+	// The parity target is crypto/x509.ParseRevocationList. Its cryptobyte
+	// GeneralizedTime parser rejects every fractional form, even forms accepted
+	// by encoding/asn1's lower-level time parser.
+	addCRL("fractional-generalized-time-1-digit", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-1-digit", canonicalCustom, issuerKey, 0x18, "20300115110000.1Z"))
+	addCRL("fractional-generalized-time-9-digit", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-9-digit", canonicalCustom, issuerKey, 0x18, "20300115110000.123456789Z"))
+	addCRL("fractional-generalized-time-offset", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-offset", canonicalCustom, issuerKey, 0x18, "20300115120000.123456789+0100"))
+	addCRL("fractional-generalized-time-nanosecond-boundary", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-nanosecond-boundary", canonicalCustom, issuerKey, 0x18, "20300115120000.000000001Z"))
+	addCRL("fractional-generalized-time-trailing-zero", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-trailing-zero", canonicalCustom, issuerKey, 0x18, "20300115110000.10Z"))
+	addCRL("fractional-generalized-time-overprecision", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-overprecision", canonicalCustom, issuerKey, 0x18, "20300115110000.1234567891Z"))
+	addCRL("fractional-generalized-time-comma", "canonical DER", crlWithThisUpdate(
+		"fractional-generalized-time-comma", canonicalCustom, issuerKey, 0x18, "20300115110000,1Z"))
 	addCRL("absent-version", "X.509 v2 CRL", customCRLWithVersionAndAlgorithms(
 		"absent-version", 0, issuer.RawSubject, issuerKey, now.Add(-time.Hour), now.Add(time.Hour), nil, validExts,
 		pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}, pkix.AlgorithmIdentifier{Algorithm: oidECDSAWithSHA256}))
