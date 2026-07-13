@@ -8,6 +8,13 @@ import {
 import { refreshOAuthSession } from "../../src/auth/oauth-session";
 import { restoreAuthService } from "./auth-service-restoration";
 import {
+  aggregateLifecycleFailures,
+  cleanupSpawnFailures,
+  lifecycleFailure,
+  NO_LIFECYCLE_FAILURE,
+  type LifecycleFailureState,
+} from "./user-revocation-lifecycle";
+import {
   cpClient,
   decodeSessionArtifact,
   establishCurrentSession,
@@ -231,8 +238,9 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
   const createdSpawnIds: string[] = [];
   let authsvcStopped = false;
   let cleanupToken = "";
-  let testError: unknown;
-  let restorationError: unknown;
+  let testError: LifecycleFailureState = NO_LIFECYCLE_FAILURE;
+  let restorationError: LifecycleFailureState = NO_LIFECYCLE_FAILURE;
+  let cleanupErrors: unknown[] = [];
 
   try {
     let logoutSession = await establishCurrentSession(cfg);
@@ -343,7 +351,7 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     expect(expiryClose.timestampMs).toBeGreaterThanOrEqual(signedExpiresAtMs - 2_000);
     expect(expiryClose.timestampMs).toBeLessThanOrEqual(signedExpiresAtMs + 20_000);
   } catch (error) {
-    testError = error;
+    testError = lifecycleFailure(error);
   } finally {
     if (authsvcStopped) {
       try {
@@ -356,17 +364,17 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
         cleanupToken = refreshedCleanup.accessToken;
         authsvcStopped = false;
       } catch (error) {
-        restorationError = error;
+        restorationError = lifecycleFailure(error);
       }
     }
     if (cleanupToken) {
       const cleanup = cpClient(cfg, cleanupToken);
-      await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
+      cleanupErrors = await cleanupSpawnFailures(
+        createdSpawnIds,
+        (spawnId) => cleanup.deleteSpawn({ spawnId }),
+      );
     }
   }
-  if (testError && restorationError) {
-    throw new AggregateError([testError, restorationError], "revocation lifecycle and auth service restoration failed");
-  }
-  if (restorationError) throw restorationError;
-  if (testError) throw testError;
+  const failure = aggregateLifecycleFailures(testError, restorationError, cleanupErrors);
+  if (failure) throw failure;
 });
