@@ -1,5 +1,6 @@
 import { BitString, Integer, OctetString, fromBER } from "asn1js";
 import {
+  AltName,
   AuthorityKeyIdentifier,
   BasicConstraints,
   Certificate,
@@ -9,7 +10,11 @@ import {
 
 import type { Extension } from "pkijs";
 import type { NodeCRLTrustInput } from "../../build/trust-inputs";
-import { parseCertDER, pemToDerList } from "@/keys/x509";
+import {
+  parseCertificatePoliciesDER,
+  pemToDerList,
+  validateTrustDomain,
+} from "@/keys/x509";
 
 const BASIC_CONSTRAINTS_OID = "2.5.29.19";
 const KEY_USAGE_OID = "2.5.29.15";
@@ -133,7 +138,6 @@ function integerValue(value: number | Integer | undefined): bigint | undefined {
 
 function validateIssuerProfile(
   issuer: Certificate,
-  issuerDER: Uint8Array,
   trustDomain: string,
 ): Uint8Array {
   const basicExtension = oneExtension(issuer.extensions, BASIC_CONSTRAINTS_OID, "basic constraints");
@@ -158,15 +162,18 @@ function validateIssuerProfile(
     throw new Error("node CRL: issuer has invalid identity");
   }
 
-  oneExtension(issuer.extensions, CERTIFICATE_POLICIES_OID, "certificate policies");
-  oneExtension(issuer.extensions, SUBJECT_ALT_NAME_OID, "subject alternative name");
-  const parsedIssuer = parseCertDER(issuerDER);
-  if (parsedIssuer.policies.length !== 1 || !ISSUER_ROLE_POLICIES.has(parsedIssuer.policies[0])) {
+  const policiesExtension = oneExtension(issuer.extensions, CERTIFICATE_POLICIES_OID, "certificate policies");
+  const policies = parseCertificatePoliciesDER(byteView(policiesExtension.extnValue.valueBlock.valueHexView));
+  if (policies.length !== 1 || !ISSUER_ROLE_POLICIES.has(policies[0])) {
     throw new Error("node CRL: invalid issuer role");
   }
 
-  if (parsedIssuer.sanURIs.length !== 1
-      || parsedIssuer.sanURIs[0] !== `spiffe://${trustDomain}`) {
+  validateTrustDomain(trustDomain);
+  const sanExtension = oneExtension(issuer.extensions, SUBJECT_ALT_NAME_OID, "subject alternative name");
+  const san = new AltName({ schema: extensionSchema(sanExtension, "issuer subject alternative name") });
+  const uriNames = san.altNames.filter((name) => name.type === 6);
+  if (uriNames.length !== 1
+      || uriNames[0].value !== `spiffe://${trustDomain}`) {
     throw new Error("node CRL: issuer trust domain does not match configured trust domain");
   }
   return byteView(skid.valueBlock.valueHexView);
@@ -264,7 +271,7 @@ export async function verifyNodeCertificateRevocation(
 
   const issuerRooted = await chainIssuer.verify(root, cryptoEngine);
   if (!issuerRooted) throw new Error("node CRL: stamped issuer is not rooted in the pinned root");
-  const issuerSKID = validateIssuerProfile(chainIssuer, chainDER[1], trustDomain);
+  const issuerSKID = validateIssuerProfile(chainIssuer, trustDomain);
 
   const crl = revocationList(matching[0].bundle.crlPEM);
   const rawCRLIssuer = crl.issuer.toSchema().valueBeforeDecodeView;

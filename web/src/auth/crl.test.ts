@@ -15,6 +15,10 @@ interface Bundle {
 interface Scenario {
   chainPEM: string;
   bundles: Bundle[];
+  trustDomain?: string;
+}
+
+interface RejectedScenario extends Scenario {
   error: string;
 }
 
@@ -23,7 +27,8 @@ interface Vectors {
   rootPEM: string;
   chainPEM: string;
   validBundles: Bundle[];
-  scenarios: Record<string, Scenario>;
+  acceptedScenarios: Record<string, Scenario>;
+  scenarios: Record<string, RejectedScenario>;
 }
 
 const vectors = JSON.parse(fs.readFileSync(path.resolve(
@@ -57,6 +62,19 @@ describe("verifyNodeCertificateRevocation", () => {
       trustDomain,
     )).resolves.toBeUndefined();
   });
+
+  it.each(Object.entries(vectors.acceptedScenarios))(
+    "accepts the Go-approved signed %s scenario",
+    async (_name, scenario) => {
+      await expect(verifyNodeCertificateRevocation(
+        scenario.chainPEM,
+        vectors.rootPEM,
+        scenario.bundles,
+        now,
+        scenario.trustDomain ?? trustDomain,
+      )).resolves.toBeUndefined();
+    },
+  );
 
   it("fails when the chain issuer has no stamped bundle", async () => {
     await expect(verifyNodeCertificateRevocation(
@@ -103,7 +121,7 @@ describe("verifyNodeCertificateRevocation", () => {
         vectors.rootPEM,
         scenario.bundles,
         now,
-        trustDomain,
+        scenario.trustDomain ?? trustDomain,
       )).rejects.toThrow(scenario.error);
     },
   );

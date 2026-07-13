@@ -44,9 +44,10 @@ type bundle struct {
 }
 
 type scenario struct {
-	ChainPEM string   `json:"chainPEM"`
-	Bundles  []bundle `json:"bundles"`
-	Error    string   `json:"error"`
+	ChainPEM    string   `json:"chainPEM"`
+	Bundles     []bundle `json:"bundles"`
+	TrustDomain string   `json:"trustDomain,omitempty"`
+	Error       string   `json:"error,omitempty"`
 }
 
 type vectors struct {
@@ -54,6 +55,7 @@ type vectors struct {
 	RootPEM   string              `json:"rootPEM"`
 	ChainPEM  string              `json:"chainPEM"`
 	Valid     []bundle            `json:"validBundles"`
+	Accepted  map[string]scenario `json:"acceptedScenarios"`
 	Scenarios map[string]scenario `json:"scenarios"`
 }
 
@@ -141,6 +143,7 @@ type issuerOptions struct {
 	keyUsage    x509.KeyUsage
 	policy      x509.OID
 	uri         string
+	emails      []string
 	emptySKID   bool
 	notBefore   time.Time
 	notAfter    time.Time
@@ -153,7 +156,7 @@ func makeIssuer(label string, now time.Time, root *x509.Certificate, rootKey *ec
 		NotBefore: opts.notBefore, NotAfter: opts.notAfter,
 		KeyUsage: opts.keyUsage, BasicConstraintsValid: true, IsCA: true,
 		MaxPathLen: opts.pathLen, MaxPathLenZero: opts.pathLenZero,
-		URIs: []*url.URL{mustURL(opts.uri)}, Policies: []x509.OID{opts.policy},
+		URIs: []*url.URL{mustURL(opts.uri)}, EmailAddresses: opts.emails, Policies: []x509.OID{opts.policy},
 	}
 	if opts.emptySKID {
 		empty, err := asn1.Marshal([]byte{})
@@ -303,7 +306,22 @@ func main() {
 	cloudBundle := bundle{Class: "cloud", IssuerPEM: pemCert(cloudIssuer), CRLPEM: pemCRL(cloudCRL)}
 
 	v := vectors{Now: now.Format(time.RFC3339), RootPEM: pemCert(root), ChainPEM: chain,
-		Valid: []bundle{cloudBundle, validBundle}, Scenarios: map[string]scenario{}}
+		Valid: []bundle{cloudBundle, validBundle}, Accepted: map[string]scenario{}, Scenarios: map[string]scenario{}}
+	extraSANOpts := validOpts
+	extraSANOpts.emails = []string{"crl-operator@spawnery.internal"}
+	extraSANIssuer, extraSANKey := makeIssuer("issuer-extra-email-san", now, root, rootKey, extraSANOpts)
+	extraSANLeaf := makeLeaf("issuer-extra-email-san", now, extraSANIssuer, extraSANKey)
+	extraSANCRL := standardCRL("issuer-extra-email-san", extraSANIssuer, extraSANKey, big.NewInt(1), now.Add(-time.Hour), now.Add(time.Hour), nil)
+	parsedExtraSANCRL, err := x509.ParseRevocationList(extraSANCRL)
+	if err != nil || pki.VerifyCRL(parsedExtraSANCRL, extraSANIssuer, now) != nil {
+		panic("Go verifier rejected issuer with an allowed non-URI SAN")
+	}
+	v.Accepted["issuer-extra-email-san"] = scenario{
+		ChainPEM: pemCert(extraSANLeaf) + pemCert(extraSANIssuer),
+		Bundles: []bundle{cloudBundle, {
+			Class: "self-hosted", IssuerPEM: pemCert(extraSANIssuer), CRLPEM: pemCRL(extraSANCRL),
+		}},
+	}
 	addCRL := func(name, want string, der []byte) {
 		list, err := x509.ParseRevocationList(der)
 		if err == nil && pki.VerifyCRL(list, issuer, now) == nil {
@@ -387,6 +405,13 @@ func main() {
 	badURI := validOpts
 	badURI.uri = "spiffe://other.spawnery.internal"
 	addIssuer("bad-trust-domain", "trust domain", badURI)
+	uppercaseTrustDomain := "PROD.spawnery.internal"
+	uppercaseURI := validOpts
+	uppercaseURI.uri = "spiffe://" + uppercaseTrustDomain
+	addIssuer("uppercase-configured-trust-domain", "trust domain", uppercaseURI)
+	uppercaseScenario := v.Scenarios["uppercase-configured-trust-domain"]
+	uppercaseScenario.TrustDomain = uppercaseTrustDomain
+	v.Scenarios["uppercase-configured-trust-domain"] = uppercaseScenario
 	emptySKID := validOpts
 	emptySKID.emptySKID = true
 	addIssuer("missing-skid", "invalid identity", emptySKID)
