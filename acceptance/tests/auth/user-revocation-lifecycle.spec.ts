@@ -10,6 +10,9 @@ import { restoreAuthService } from "./auth-service-restoration";
 import {
   aggregateLifecycleFailures,
   cleanupSpawnFailures,
+  lifecycleFailure,
+  NO_LIFECYCLE_FAILURE,
+  type LifecycleFailureState,
 } from "./user-revocation-lifecycle";
 import {
   cpClient,
@@ -235,8 +238,8 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
   const createdSpawnIds: string[] = [];
   let authsvcStopped = false;
   let cleanupToken = "";
-  let testError: unknown;
-  let restorationError: unknown;
+  let testError: LifecycleFailureState = NO_LIFECYCLE_FAILURE;
+  let restorationError: LifecycleFailureState = NO_LIFECYCLE_FAILURE;
   let cleanupErrors: unknown[] = [];
 
   try {
@@ -348,7 +351,7 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     expect(expiryClose.timestampMs).toBeGreaterThanOrEqual(signedExpiresAtMs - 2_000);
     expect(expiryClose.timestampMs).toBeLessThanOrEqual(signedExpiresAtMs + 20_000);
   } catch (error) {
-    testError = error;
+    testError = lifecycleFailure(error);
   } finally {
     if (authsvcStopped) {
       try {
@@ -361,7 +364,7 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
         cleanupToken = refreshedCleanup.accessToken;
         authsvcStopped = false;
       } catch (error) {
-        restorationError = error;
+        restorationError = lifecycleFailure(error);
       }
     }
     if (cleanupToken) {
