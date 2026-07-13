@@ -219,7 +219,10 @@ func TestRevocationsFeedSigned(t *testing.T) {
 		t.Fatalf("revocation page = %+v", page)
 	}
 	// since= filters: since=seq should return nothing for this event.
-	resp2, _ := http.Get(srv.URL + "/revocations?since=" + strconv.FormatInt(seq, 10))
+	resp2, err := http.Get(srv.URL + "/revocations?since=" + strconv.FormatInt(seq, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp2.Body.Close()
 	page = RevocationPage{}
 	if err := json.NewDecoder(resp2.Body).Decode(&page); err != nil || len(page.Entries) != 0 {

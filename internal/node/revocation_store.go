@@ -146,7 +146,7 @@ func ensureUserRevocationSchema(db *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		statements := []string{
 			`CREATE TABLE revocation_meta (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), checkpoint INTEGER NOT NULL CHECK(checkpoint >= 0))`,
 			`INSERT INTO revocation_meta(singleton, checkpoint) VALUES (1, 0)`,
@@ -338,7 +338,7 @@ func (s *UserRevocationStore) pruneAndLoad(ctx context.Context, now int64) (*use
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM revoked_tokens WHERE retain_until <= ?`, now); err != nil {
 		return nil, err
 	}
