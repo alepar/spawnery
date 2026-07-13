@@ -442,7 +442,7 @@ test("production authorization: exact node NACKs and target substitution refusal
       name: "node-class",
       substitution: { field: "targetNodeClass", value: "self-hosted" },
       webError: /target: typed node identity does not match certificate|response target class mismatch/,
-      cliError: /target_node_class .* does not match requested/,
+      cliError: /verify target: self-hosted target account .* does not match logged-in account/,
     },
     {
       name: "node-account",
