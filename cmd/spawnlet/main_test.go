@@ -119,6 +119,9 @@ func TestSpawnletConfig_Defaults(t *testing.T) {
 	if cfg.Journal.Backend != "" {
 		t.Errorf("Journal.Backend should default to empty (disabled), got %q", cfg.Journal.Backend)
 	}
+	if cfg.Node.UserRevocationState != "/var/lib/spawnlet/user-revocations/state.json" || cfg.Node.UserRevocationPollInterval != 5*time.Second {
+		t.Errorf("user revocation defaults = %q/%s", cfg.Node.UserRevocationState, cfg.Node.UserRevocationPollInterval)
+	}
 	if cfg.Journal.S3.Region != "garage" {
 		t.Errorf("Journal.S3.Region = %q, want garage", cfg.Journal.S3.Region)
 	}
@@ -135,9 +138,9 @@ func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 		"NODE_ID":                      "node-prod-1",
 		"NODE_CLASS":                   "self-hosted",
 		"NODE_SIGNER_REVOCATION_STATE": "/tmp/spawnlet-test-signer-state",
-		"MEM_LIMIT_MB":                  "2048",
-		"EGRESS_ENFORCE":                "false",
-		"CP_ADDR":                       "http://cp.example.com:8080",
+		"MEM_LIMIT_MB":                 "2048",
+		"EGRESS_ENFORCE":               "false",
+		"CP_ADDR":                      "http://cp.example.com:8080",
 	})
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -162,6 +165,7 @@ func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 func TestSpawnletConfig_SetOverride(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", nil,
 		"node.auth_mode=enforced", "node.signer_revocation_state=/tmp/spawnlet-test-state",
+		"as_url=https://as.internal", "as_server_name=as.internal",
 		"node.certificate_revocation_state=/tmp/cert-state", "node.certificate_revocation_issuers=/tmp/issuer.pem",
 		"node.certificate_revocation_crls=/tmp/issuer.crl", "cp.server_name=cp.internal", "limits.pids=512")
 	if err != nil {
@@ -246,15 +250,20 @@ func TestBuildIntentVerifierRequiresTrustInEveryTransportMode(t *testing.T) {
 
 func TestSpawnletConfig_ArtifactTrustAliasesAndRemovedRawKeys(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
-		"NODE_AUTH_ENVIRONMENT":            "prod",
-		"NODE_SIGNER_REVOCATION_STATEMENT": "/deployment/revocations",
-		"NODE_SIGNER_REVOCATION_STATE":     "/state/revocations",
+		"NODE_AUTH_ENVIRONMENT":              "prod",
+		"NODE_SIGNER_REVOCATION_STATEMENT":   "/deployment/revocations",
+		"NODE_SIGNER_REVOCATION_STATE":       "/state/revocations",
+		"NODE_USER_REVOCATION_STATE":         "/state/users",
+		"NODE_USER_REVOCATION_POLL_INTERVAL": "17s",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Node.Environment != "prod" || cfg.Node.SignerRevocationStatement != "/deployment/revocations" || cfg.Node.SignerRevocationState != "/state/revocations" {
 		t.Fatalf("artifact trust aliases not loaded: %+v", cfg.Node)
+	}
+	if cfg.Node.UserRevocationState != "/state/users" || cfg.Node.UserRevocationPollInterval != 17*time.Second {
+		t.Fatalf("user revocation aliases not loaded: %+v", cfg.Node)
 	}
 	legacyAlias := strings.Join([]string{"NODE", "AS", "PUBKEYS"}, "_")
 	if _, exists := spawnletEnvAliases[legacyAlias]; exists {

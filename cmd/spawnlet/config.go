@@ -42,6 +42,8 @@ type Spawnlet struct {
 		Environment                  string        `koanf:"environment"`
 		SignerRevocationStatement    string        `koanf:"signer_revocation_statement"`
 		SignerRevocationState        string        `koanf:"signer_revocation_state"`
+		UserRevocationState          string        `koanf:"user_revocation_state"`
+		UserRevocationPollInterval   time.Duration `koanf:"user_revocation_poll_interval"`
 		CertificateRevocationState   string        `koanf:"certificate_revocation_state"`
 		CertificateRevocationIssuers string        `koanf:"certificate_revocation_issuers"`
 		CertificateRevocationCRLs    string        `koanf:"certificate_revocation_crls"`
@@ -130,6 +132,12 @@ func (s Spawnlet) Validate() error {
 	if s.Node.AuthMode == "insecure" {
 		return nil
 	}
+	if s.ASURL == "" || s.ASServerName == "" {
+		return fmt.Errorf("as_url and as_server_name are required in enforced mode")
+	}
+	if s.Node.UserRevocationState == "" || s.Node.UserRevocationPollInterval <= 0 {
+		return fmt.Errorf("node user revocation state and positive poll interval are required in enforced mode")
+	}
 	if s.CP.ServerName == "" {
 		return fmt.Errorf("cp.server_name is required in enforced mode")
 	}
@@ -173,6 +181,8 @@ var spawnletEnvAliases = map[string]string{
 	"NODE_AUTH_ENVIRONMENT":               "node.environment",
 	"NODE_SIGNER_REVOCATION_STATEMENT":    "node.signer_revocation_statement",
 	"NODE_SIGNER_REVOCATION_STATE":        "node.signer_revocation_state",
+	"NODE_USER_REVOCATION_STATE":          "node.user_revocation_state",
+	"NODE_USER_REVOCATION_POLL_INTERVAL":  "node.user_revocation_poll_interval",
 	"NODE_CERTIFICATE_REVOCATION_STATE":   "node.certificate_revocation_state",
 	"NODE_CERTIFICATE_REVOCATION_ISSUERS": "node.certificate_revocation_issuers",
 	"NODE_CERTIFICATE_REVOCATION_CRLS":    "node.certificate_revocation_crls",

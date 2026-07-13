@@ -170,7 +170,28 @@ func main() {
 		if sk := nodeSubKeys(cfg, cfg.Node.ID); sk != nil {
 			nodeCfg.SubKeys = sk
 		}
-		nodeCfg.Verifier, err = buildIntentVerifier(cfg, artifactTrust, cfg.Node.ID, cfg.Node.Owner)
+		if cfg.Node.AuthMode == "enforced" {
+			userRevocations, openErr := node.OpenUserRevocationStore(cfg.Node.UserRevocationState)
+			if openErr != nil {
+				log.Fatalf("node: user revocation state: %v", openErr)
+			}
+			defer func() {
+				if closeErr := userRevocations.Close(); closeErr != nil {
+					log.Printf("node: user revocation close: %v", closeErr)
+				}
+			}()
+			asClient, clientErr := nodeASClient(cfg, certificateRevocations)
+			if clientErr != nil {
+				log.Fatalf("node: AS client setup: %v", clientErr)
+			}
+			consumer, consumerErr := node.NewRevocationConsumer(asClient, strings.TrimRight(cfg.ASURL, "/")+"/revocations", artifactTrust.verifier, userRevocations, cfg.Node.UserRevocationPollInterval)
+			if consumerErr != nil {
+				log.Fatalf("node: user revocation consumer setup: %v", consumerErr)
+			}
+			nodeCfg.UserRevocations = userRevocations
+			nodeCfg.RevocationConsumer = consumer
+		}
+		nodeCfg.Verifier, err = buildIntentVerifier(cfg, artifactTrust, cfg.Node.ID, cfg.Node.Owner, nodeCfg.UserRevocations)
 		if err != nil {
 			log.Fatalf("node: intent verifier setup: %v", err)
 		}
@@ -595,15 +616,24 @@ func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node
 	if asURL == "" {
 		return nil
 	}
-	if revocations == nil || revocations.state == nil {
-		log.Printf("github refresh disabled: certificate revocation state unavailable")
+	client, err := nodeASClient(cfg, revocations)
+	if err != nil {
+		log.Printf("github refresh disabled: AS client: %v", err)
 		return nil
 	}
-	dir := cfg.Node.IDDir
-	id, err := nodeid.Load(dir)
+	return authv1connect.NewAuthServiceClient(client, asURL)
+}
+
+func nodeASClient(cfg *Spawnlet, revocations *nodeCertificateRevocations) (*http.Client, error) {
+	if cfg == nil || cfg.Node.AuthMode != "enforced" || cfg.ASURL == "" || cfg.ASServerName == "" {
+		return nil, errors.New("enforced AS client configuration is required")
+	}
+	if revocations == nil || revocations.state == nil || revocations.connections == nil {
+		return nil, errors.New("certificate revocation state is required")
+	}
+	id, err := nodeid.Load(cfg.Node.IDDir)
 	if err != nil {
-		log.Printf("github refresh disabled: no identity in %s: %v", dir, err)
-		return nil
+		return nil, fmt.Errorf("load enrolled node identity: %w", err)
 	}
 	client, err := id.MTLSClient(nodeid.ClientOptions{
 		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.ASServerName,
@@ -611,10 +641,9 @@ func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node
 		ConnectionRegistry: revocations.connections,
 	})
 	if err != nil {
-		log.Printf("github refresh disabled: mTLS client: %v", err)
-		return nil
+		return nil, fmt.Errorf("build node AS mTLS client: %w", err)
 	}
-	return authv1connect.NewAuthServiceClient(client, asURL)
+	return client, nil
 }
 
 // buildIntentVerifier builds the mandatory A4 IntentVerifier. AuthMode selects only the CP transport;
@@ -625,7 +654,7 @@ func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node
 //
 // nodeOwner: if non-empty, enables the self-hosted owner check
 // (the token's account_id must equal nodeOwner).
-func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string) (*node.IntentVerifier, error) {
+func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string, revocations ...node.UserRevocationLookup) (*node.IntentVerifier, error) {
 	switch cfg.Node.AuthMode {
 	case "insecure":
 	case "enforced":
@@ -636,7 +665,7 @@ func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner 
 		return nil, fmt.Errorf("root-anchored artifact trust is required")
 	}
 	selfHosted := nodeOwner != ""
-	return node.NewIntentVerifier(trust.verifier, nodeOwner, nodeID, selfHosted, nil), nil
+	return node.NewIntentVerifier(trust.verifier, nodeOwner, nodeID, selfHosted, nil, revocations...), nil
 }
 
 type artifactTrust struct {
