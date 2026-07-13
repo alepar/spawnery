@@ -84,6 +84,13 @@ log "1/3 starting VM …"
 E2E_RUNID="$E2E_RUNID" GOLDEN_IMAGE="$GOLDEN_IMAGE" "$E2E_DIR/up.sh" --profile "$PROFILE"
 # shellcheck disable=SC1091
 source "$RD/acc.env"
+if ! getent ahosts "$E2E_VM_HOST" >/dev/null 2>&1; then
+  [ "$E2E_HOSTS_MODE" = nss ] || die "system resolver cannot resolve $E2E_VM_HOST in $E2E_HOSTS_MODE mode"
+  warn "nss-libvirt cannot resolve $E2E_VM_HOST; falling back to the concurrency-safe /etc/hosts entry"
+  export E2E_HOSTS_MODE=hosts
+  host_resolve_add "$E2E_VM_HOST" "$E2E_VM_IP"
+fi
+getent ahosts "$E2E_VM_HOST" >/dev/null || die "system resolver cannot resolve $E2E_VM_HOST"
 
 # ---- 2. copy fresh code in + wait ready ----
 log "2/3 rolling fresh code + waiting ready …"
@@ -127,6 +134,7 @@ export ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000
 [ -f "${GOLDEN_IMAGE%.qcow2}-ca.crt" ] && export NODE_EXTRA_CA_CERTS="${GOLDEN_IMAGE%.qcow2}-ca.crt"
 export ACC_SPAWNCTL_BIN="$STAGE/bin/spawnctl"     # cliDriver shells out to the fresh spawnctl
 export ACC_E2E_VM_IP="$E2E_VM_IP" ACC_E2E_SSH_KEY="$E2E_SSH_KEY" ACC_E2E_SSH_USER="$E2E_SSH_USER"
+export ACC_PRODUCTION_AUTH_MATRIX=1
 # Some hosts lack libvirt's NSS module. Resolve only this disposable VM hostname inside Node test
 # processes; the URL hostname and golden CA remain unchanged, so TLS hostname validation still runs.
 export NODE_OPTIONS="--require=$E2E_DIR/node-dns-hook.cjs${NODE_OPTIONS:+ $NODE_OPTIONS}"

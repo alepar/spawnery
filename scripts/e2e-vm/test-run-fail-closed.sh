@@ -85,5 +85,11 @@ rg -q 'sdk/ts/node_modules/.bin' "$TMP/pins.out" || {
   echo "run.sh did not make the workspace tsx available to the release scanner" >&2
   exit 1
 }
+for required in 'getent ahosts' 'E2E_HOSTS_MODE=hosts' 'ACC_PRODUCTION_AUTH_MATRIX=1'; do
+  rg -q "$required" "$ROOT/scripts/e2e-vm/run.sh" || {
+    echo "run.sh lacks required production-lane wiring: $required" >&2
+    exit 1
+  }
+done
 
 echo "e2e-vm fresh build failures are fail-closed"

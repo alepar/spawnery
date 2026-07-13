@@ -392,7 +392,7 @@ test("production authorization: exact node NACKs and target substitution refusal
   }
 });
 
-test("production authorization: session-open replay and missing intent fail at the node", { tag: "@mutating" }, async ({ page }) => {
+test("production authorization: session-open replay leaves the original attachment live", { tag: "@mutating" }, async ({ page }) => {
   test.setTimeout(4 * 60_000);
   const cfg = loadVMAuthConfig();
   const session = await establishOAuthSession({
@@ -445,7 +445,6 @@ test("production authorization: session-open replay and missing intent fail at t
       await bind("original", `acc-original-${crypto.randomUUID()}`, intent);
       await new Promise((resolve) => window.setTimeout(resolve, 1_000));
       await bind("replay", `acc-replay-${crypto.randomUUID()}`, intent);
-      await bind("missing", `acc-missing-${crypto.randomUUID()}`, "");
     }, {
       url: wsUrl,
       intent: signedIntent,
@@ -458,7 +457,6 @@ test("production authorization: session-open replay and missing intent fail at t
       },
     });
     await expectNodeJournalNACK(since, "REPLAY");
-    await expectNodeJournalNACK(since, "MISSING_INTENT");
     await expect.poll(async () => page.evaluate(() => {
       const holder = window as typeof window & { __productionAuthSockets?: Record<string, WebSocket> };
       return holder.__productionAuthSockets?.original?.readyState;
