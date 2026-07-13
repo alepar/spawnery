@@ -13,6 +13,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"spawnery/internal/agentinstall/spec"
+	"spawnery/internal/spawnlet"
 )
 
 // helperScript returns the absolute path to apply-artifacts.sh relative to this test file.
@@ -120,9 +123,13 @@ func TestApplyArtifacts_ClaudeTUIWritesConfig(t *testing.T) {
 }
 
 // TestApplyArtifacts_NoOpRunnable verifies that a runnable with no agentcaps/emitter mapping
-// (shell — a non-agent runnable, see internal/agentcaps) exits 0 and writes nothing, even with
-// a real agentinstall in PATH and a valid manifest. The no-op decision is made by
-// `agentinstall apply --runnable` in Go now (sp-mwco.2.6), not by a shell `case` here.
+// (shell — a non-agent runnable, see internal/agentcaps) exits 1 and writes an explicit
+// outcome=error report, even with a real agentinstall in PATH and a valid manifest — the CLI
+// itself exits 0 with no report when --runnable resolves to no emitter (sp-mwco.2.6); this
+// script's post-hoc guard turns that silent success into a legible failure (sp-mwco.2.10) so the
+// node does not stall out AwaitApplyReport. The no-op *decision* is still made by
+// `agentinstall apply --runnable` in Go, not by a shell `case` here — this only makes its
+// silence visible.
 //
 // NOTE: goose-tui is deliberately NOT used as the no-op example anymore — the shell `case`
 // this test used to exercise treated it (wrongly) as a no-op; goose now has a registered
@@ -148,8 +155,8 @@ func TestApplyArtifacts_NoOpRunnable(t *testing.T) {
 	}
 
 	_, code := runHelper(t, helper, "shell", env)
-	if code != 0 {
-		t.Fatalf("expected exit 0 for no-op runnable, got %d", code)
+	if code != 1 {
+		t.Fatalf("expected exit 1 for no-op runnable, got %d", code)
 	}
 
 	// No config should have been written (shell has no agentinstall emitter).
@@ -157,10 +164,83 @@ func TestApplyArtifacts_NoOpRunnable(t *testing.T) {
 	if _, err := os.Stat(claudeJSON); !os.IsNotExist(err) {
 		t.Errorf("unexpected write to ~/.claude.json for shell no-op: err=%v", err)
 	}
-	// No report either — agentinstall exits before ever running the apply.
-	report := filepath.Join(artifactsDir, "report", "apply-report.json")
-	if _, err := os.Stat(report); !os.IsNotExist(err) {
-		t.Errorf("unexpected apply-report.json for no-op runnable: err=%v", err)
+
+	// The post-hoc guard writes an explicit error report — the CLI itself exits before ever
+	// running the apply, so this script must synthesize the report for the node.
+	reportPath := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("expected apply-report.json to be written for no-op runnable: %v", err)
+	}
+	rep, err := spec.ParseApplyReport(data)
+	if err != nil {
+		t.Fatalf("parse apply-report.json: %v\ncontent: %s", err, data)
+	}
+	if rep.Outcome != spec.OutcomeError {
+		t.Errorf("outcome: got %q want %q", rep.Outcome, spec.OutcomeError)
+	}
+	if rep.Runnable != "shell" {
+		t.Errorf("runnable: got %q want shell", rep.Runnable)
+	}
+	if !strings.Contains(rep.Error, "emitter") || !strings.Contains(rep.Error, "shell") {
+		t.Errorf("expected error to mention emitter and shell, got %q", rep.Error)
+	}
+}
+
+// TestApplyArtifacts_NoEmitterBundle_FailsFastViaReport is the acceptance criterion for
+// sp-mwco.2.10: a bundle spawn on a no-emitter runnable must fail immediately with a legible
+// reason, not after the node burns out its 2-minute AwaitApplyReport timeout. It runs the real
+// script end to end, parses the report it emits, and feeds it straight through the node's own
+// verdict function to prove the node would fail fast rather than stall.
+func TestApplyArtifacts_NoEmitterBundle_FailsFastViaReport(t *testing.T) {
+	helper := helperScript(t)
+	home := t.TempDir()
+	binDir := t.TempDir()
+	buildAgentinstallToDir(t, binDir)
+
+	artifactsDir := t.TempDir()
+	skillDir := filepath.Join(artifactsDir, "payloads", "s1")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# s1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"artifacts":[{"kind":"skill","name":"s1","targets":["claude"],"bundle":"b1","skill":{"dir":"payloads/s1"}}]}`
+	if err := os.WriteFile(filepath.Join(artifactsDir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + binDir + ":/usr/bin:/bin",
+		"SPAWNERY_ARTIFACTS_DIR=" + artifactsDir,
+		"SPAWNERY_SECRETS_DIR=" + t.TempDir(),
+		"SECRET_WAIT_TIMEOUT=1s",
+	}
+
+	_, code := runHelper(t, helper, "shell", env)
+	if code != 1 {
+		t.Fatalf("expected exit 1 for no-emitter bundle runnable, got %d", code)
+	}
+
+	reportData, err := os.ReadFile(filepath.Join(artifactsDir, "report", "apply-report.json"))
+	if err != nil {
+		t.Fatalf("apply-report.json not written: %v", err)
+	}
+	rep, err := spec.ParseApplyReport(reportData)
+	if err != nil {
+		t.Fatalf("parse apply-report.json: %v\ncontent: %s", err, reportData)
+	}
+
+	m, err := spec.LoadManifest(artifactsDir)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+
+	verdictErr, _ := spawnlet.EvaluateApplyReport(m, rep)
+	if verdictErr == nil {
+		t.Fatal("expected EvaluateApplyReport to return a fatal error for a bundle spawn with an error-outcome report, got nil")
 	}
 }
 
@@ -257,8 +337,11 @@ func TestApplyArtifacts_HermesAcpReachesAgentinstall(t *testing.T) {
 	}
 }
 
-// TestApplyArtifacts_OldImageGuard verifies that when agentinstall is absent from PATH,
-// the helper exits 0 and prints a diagnostic to stderr.
+// TestApplyArtifacts_OldImageGuard verifies that when agentinstall is absent from PATH, the
+// helper exits 1, prints a diagnostic to stderr, and — since a report was staged for a
+// bundle-carrying manifest and the node will be waiting for one — writes an explicit
+// outcome=error report itself, so the node fails fast instead of stalling out the 2-minute
+// AwaitApplyReport timeout (sp-mwco.2.10).
 func TestApplyArtifacts_OldImageGuard(t *testing.T) {
 	helper := helperScript(t)
 	home := t.TempDir()
@@ -279,8 +362,8 @@ func TestApplyArtifacts_OldImageGuard(t *testing.T) {
 	}
 
 	out, code := runHelper(t, helper, "claude-tui", env)
-	if code != 0 {
-		t.Fatalf("expected exit 0 for old-image guard, got %d\noutput:\n%s", code, out)
+	if code != 1 {
+		t.Fatalf("expected exit 1 for old-image guard, got %d\noutput:\n%s", code, out)
 	}
 	// Diagnostic message should mention agentinstall or old image.
 	if !strings.Contains(out, "agentinstall") {
@@ -291,10 +374,29 @@ func TestApplyArtifacts_OldImageGuard(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".claude.json")); !os.IsNotExist(err) {
 		t.Errorf("unexpected write to ~/.claude.json when guard fired: err=%v", err)
 	}
-	// No report either — agentinstall was never invoked.
-	report := filepath.Join(artifactsDir, "report", "apply-report.json")
-	if _, err := os.Stat(report); !os.IsNotExist(err) {
-		t.Errorf("unexpected apply-report.json when guard fired: err=%v", err)
+
+	// The script itself now writes an explicit error report — the node must not stall waiting
+	// for one that will never come from a CLI that was never invoked.
+	reportPath := filepath.Join(artifactsDir, "report", "apply-report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("expected apply-report.json to be written by the old-image guard: %v", err)
+	}
+	rep, err := spec.ParseApplyReport(data)
+	if err != nil {
+		t.Fatalf("parse apply-report.json: %v\ncontent: %s", err, data)
+	}
+	if rep.Schema != 1 {
+		t.Errorf("schema: got %d want 1", rep.Schema)
+	}
+	if rep.Outcome != spec.OutcomeError {
+		t.Errorf("outcome: got %q want %q", rep.Outcome, spec.OutcomeError)
+	}
+	if rep.Runnable != "claude-tui" {
+		t.Errorf("runnable: got %q want claude-tui", rep.Runnable)
+	}
+	if !strings.Contains(rep.Error, "agentinstall") {
+		t.Errorf("expected error to mention agentinstall, got %q", rep.Error)
 	}
 }
 
