@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +78,10 @@ func TestAwaitApplyReport_CtxCancelReturnsError(t *testing.T) {
 	}
 }
 
-func TestAwaitApplyReport_MalformedJSONTreatedAsAbsent(t *testing.T) {
+// TestAwaitApplyReport_MalformedJSONIsTerminal: a report that IS there but does not parse is a
+// permanent condition — waiting cannot fix it. It must fail immediately with the parse error, not
+// be re-polled until the budget expires and then reported as "never written" (sp-rwkk).
+func TestAwaitApplyReport_MalformedJSONIsTerminal(t *testing.T) {
 	st := ArtifactStager{Root: t.TempDir()}
 	dir := st.ReportDirFor("sp1")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -86,12 +90,76 @@ func TestAwaitApplyReport_MalformedJSONTreatedAsAbsent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "apply-report.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env, err := st.AwaitApplyReport(context.Background(), "sp1", 100*time.Millisecond, nil)
-	if err != nil {
-		t.Fatalf("expected nil error (timeout, not ctx error), got %v", err)
+	start := time.Now()
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 60*time.Second, nil)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrReportUnreadable) {
+		t.Fatalf("expected ErrReportUnreadable for malformed JSON, got err=%v env=%+v", err, env)
 	}
 	if env != nil {
 		t.Fatalf("expected nil env for malformed JSON, got %+v", env)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("took %v to reject a malformed report, want immediate (budget was 60s)", elapsed)
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Errorf("error %q should name the parse failure", err)
+	}
+}
+
+// TestAwaitApplyReport_UnreadableReportIsTerminal is the sp-rwkk regression: apply-report.json
+// exists but the poller cannot read it (here chmod 0000; in production, 0600 written by
+// container-root, which a userns-remapping docker daemon maps to a host uid the node is not).
+// Before the fix, EACCES was indistinguishable from "not written yet": the node polled out its
+// entire ApplyReportBudget and then declared the report MISSING — for a file that had been
+// written, correctly, in under 5 seconds. It must now fail FAST, and say what is actually wrong.
+func TestAwaitApplyReport_UnreadableReportIsTerminal(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Fatal("this test must not run as root: root bypasses the mode bits it depends on")
+	}
+	st := ArtifactStager{Root: t.TempDir()}
+	dir := st.ReportDirFor("sp1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "apply-report.json")
+	if err := os.WriteFile(path, []byte(`{"schema":1,"outcome":"ok"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 60*time.Second, nil)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrReportUnreadable) {
+		t.Fatalf("expected ErrReportUnreadable, got err=%v env=%+v", err, env)
+	}
+	if env != nil {
+		t.Fatalf("expected nil env, got %+v", env)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("took %v to report an unreadable file, want seconds — NOT the 60s budget", elapsed)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "mode 0") || !strings.Contains(msg, "uid ") {
+		t.Errorf("error %q must name the file's mode and uid — that is the whole diagnosis", msg)
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("error %q should wrap a permission error", msg)
+	}
+}
+
+// TestAwaitApplyReport_MissingReportStillTimesOut pins the other half of the invariant: a plain
+// timeout must still mean, and only mean, "nothing was written".
+func TestAwaitApplyReport_MissingReportStillTimesOut(t *testing.T) {
+	st := ArtifactStager{Root: t.TempDir()}
+	env, err := st.AwaitApplyReport(context.Background(), "sp1", 50*time.Millisecond, nil)
+	if err != nil || env != nil {
+		t.Fatalf("absent report must still be a plain timeout (nil, nil), got env=%+v err=%v", env, err)
 	}
 }
 

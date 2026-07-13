@@ -58,6 +58,10 @@ write_error_report() {
     rm -f "$tmp" 2>/dev/null
     return 1
   fi
+  # World-readable, like the CLI's own report (agentinstall.ApplyReportMode): this file is
+  # written by container-root but read back by the node on the HOST, which is a different uid
+  # under userns-remap. A umask-dependent 0600 here would be unreadable to the poller (sp-rwkk).
+  chmod 0644 "$tmp" 2>/dev/null || true
   if ! mv -f "$tmp" "$REPORT_FILE" 2>/dev/null; then
     printf 'SPAWNERY-APPLY-FATAL: could not write apply-report.json (mv into place failed)\n' >&2
     rm -f "$tmp" 2>/dev/null

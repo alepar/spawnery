@@ -162,9 +162,22 @@ func ExitCodeFor(outcome spec.Outcome) int {
 	}
 }
 
+// ApplyReportMode is the mode apply-report.json is written with: world-readable (0644), NOT
+// os.CreateTemp's default 0600. The report is a non-sensitive status document (per-skill install
+// outcomes; no secrets), and it is written by container-root INSIDE the agent container while it
+// is read back by the node process on the HOST, which is a different uid whenever the container
+// runtime remaps user namespaces (the dev docker daemon runs userns-remap base 100000, so
+// container-root lands as host uid 100000 and the node polls as its own uid). A 0600 file across
+// that boundary is unreadable to the poller — the failure sp-rwkk was filed for. The file must
+// therefore follow the same readable-across-userns rule as the directory it lives in, whose
+// EPERM->0777 fallback (spawnlet's prepareReportDir) exists for exactly this reason.
+const ApplyReportMode = 0o644
+
 // WriteApplyReportAtomic writes env as JSON to path via a same-dir tmp file + rename, so a
 // concurrent reader (spawnlet's AwaitApplyReport poll) never observes a partial write — the
-// file's presence at path IS the completion signal.
+// file's presence at path IS the completion signal. The file lands at ApplyReportMode: chmod is
+// explicit (not umask-masked) and applied to the tmp file BEFORE the rename, so the report is
+// never briefly visible at its final path with the wrong mode.
 func WriteApplyReportAtomic(path string, env *spec.ApplyReport) error {
 	data, err := json.Marshal(env)
 	if err != nil {
@@ -187,6 +200,10 @@ func WriteApplyReportAtomic(path string, env *spec.ApplyReport) error {
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("apply-report: close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, ApplyReportMode); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("apply-report: chmod temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)

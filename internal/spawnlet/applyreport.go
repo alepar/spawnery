@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"spawnery/internal/agentinstall/spec"
@@ -65,11 +66,26 @@ type AliveFunc func(ctx context.Context) (bool, error)
 // caller can propagate, rather than a caller having to infer "probably broken" from a deadline.
 var ErrAgentGone = errors.New("agent container exited before writing apply-report.json")
 
+// ErrReportUnreadable is returned by AwaitApplyReport when apply-report.json EXISTS but cannot be
+// used: unreadable (EACCES/EPERM — e.g. written 0600 by container-root, which a userns-remapping
+// runtime maps to a host uid the node is not), malformed/schema-rejected JSON, or any other I/O
+// error that is not "not there yet". It is TERMINAL — the wait ends immediately with the real
+// reason rather than polling out the budget and reporting a missing report for a file that is
+// sitting right there. sp-mwco.2.12's invariant, stated negatively: a timeout must only ever mean
+// "nothing was written".
+var ErrReportUnreadable = errors.New("apply-report.json exists but could not be read")
+
 // AwaitApplyReport polls ReportDirFor(spawnID)/apply-report.json until it appears (returned
-// parsed), the agent is confirmed gone (see alive), ctx is cancelled, or timeout elapses. A
-// malformed or schema-rejected file is treated as not-yet-arrived (the CLI's tmp+rename makes a
-// torn read effectively impossible, but a defensive re-poll costs nothing and is safer than
-// misclassifying "not written yet" as permanently absent). timeout<=0 applies ApplyReportBudget.
+// parsed), the agent is confirmed gone (see alive), the report turns out to be present-but-
+// unusable (ErrReportUnreadable), ctx is cancelled, or timeout elapses. timeout<=0 applies
+// ApplyReportBudget.
+//
+// ONLY os.IsNotExist keeps the poll running: a file that is not there yet is the sole legitimate
+// reason to wait. Everything else about an existing file — a permission error, a malformed or
+// schema-rejected body, any other errno — is a permanent condition that waiting cannot fix, and
+// is returned immediately wrapped in ErrReportUnreadable (with the file's uid/mode when the OS
+// let us stat it). The CLI's tmp+rename write makes a torn read of a half-written report
+// impossible, so "malformed" can only mean genuinely broken, not in-flight.
 //
 // alive, if non-nil, is polled roughly every agentAlivePollEvery report-poll ticks (~1s at
 // applyReportPollInterval=250ms). The report always wins ties: on each tick the report is read
@@ -82,10 +98,11 @@ var ErrAgentGone = errors.New("agent container exited before writing apply-repor
 // over an inability to ask the question. On ErrAgentGone, one final report read is attempted
 // first (the report may have landed in the same instant the agent exited) and returned if present.
 //
-// Returns (env, nil) on arrival; (nil, ErrAgentGone) if alive confirms the agent is gone with no
-// report; (nil, ctx.Err()) if the context is cancelled/deadline-exceeded while waiting; (nil, nil)
-// on a plain timeout (the caller decides fatal-vs-warn from the manifest, since a missing report
-// is only fatal when a bundle is in play).
+// Returns (env, nil) on arrival; (nil, ErrReportUnreadable-wrapped) if the report is present but
+// unusable; (nil, ErrAgentGone) if alive confirms the agent is gone with no report; (nil,
+// ctx.Err()) if the context is cancelled/deadline-exceeded while waiting; (nil, nil) on a plain
+// timeout — which now means, and only means, that nothing was ever written (the caller decides
+// fatal-vs-warn from the manifest, since an absent report is only fatal when a bundle is in play).
 func (a ArtifactStager) AwaitApplyReport(ctx context.Context, spawnID string, timeout time.Duration, alive AliveFunc) (*spec.ApplyReport, error) {
 	if timeout <= 0 {
 		timeout = ApplyReportBudget()
@@ -99,7 +116,11 @@ func (a ArtifactStager) AwaitApplyReport(ctx context.Context, spawnID string, ti
 	consecutiveDead := 0
 	tick := 0
 	for {
-		if env, ok := readApplyReport(path); ok {
+		env, err := readApplyReport(path)
+		if err != nil {
+			return nil, err // present but unusable — terminal, do not wait out the budget
+		}
+		if env != nil {
 			return env, nil
 		}
 		select {
@@ -125,7 +146,14 @@ func (a ArtifactStager) AwaitApplyReport(ctx context.Context, spawnID string, ti
 			if consecutiveDead < 2 {
 				continue
 			}
-			if env, ok := readApplyReport(path); ok { // final read: the report may have just landed
+			// Final read: the report may have landed in the instant the agent exited. A
+			// present-but-unusable report still beats a generic "agent gone" — it names the
+			// actual problem.
+			env, err := readApplyReport(path)
+			if err != nil {
+				return nil, err
+			}
+			if env != nil {
 				return env, nil
 			}
 			return nil, ErrAgentGone
@@ -133,19 +161,47 @@ func (a ArtifactStager) AwaitApplyReport(ctx context.Context, spawnID string, ti
 	}
 }
 
-// readApplyReport reads and parses path, returning ok=false on any error (missing file, torn/
-// malformed JSON, or a schema newer than this build understands) — all treated identically as
-// "not yet arrived" by AwaitApplyReport's poll loop.
-func readApplyReport(path string) (*spec.ApplyReport, bool) {
+// readApplyReport reads and parses path, returning:
+//
+//	(env, nil)  — a valid report
+//	(nil, nil)  — the file does not exist yet: the ONLY "keep polling" case
+//	(nil, err)  — the file exists but is unusable (ErrReportUnreadable-wrapped): TERMINAL
+//
+// The terminal cases are what stop a permission error (EACCES on a 0600 report written by
+// container-root under a userns-remapping runtime) or a malformed body from masquerading as "not
+// written yet" and burning the caller's whole wait budget — see ErrReportUnreadable.
+func readApplyReport(path string) (*spec.ApplyReport, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil // genuinely not written yet — poll again
+		}
+		// Two %w verbs: callers match ErrReportUnreadable for the class, and the wrapped errno is
+		// still reachable (errors.Is(err, os.ErrPermission)) for anyone who wants the specific
+		// cause without string-matching.
+		return nil, fmt.Errorf("%w (%s): %w", ErrReportUnreadable, describeReportFile(path), err)
 	}
 	env, err := spec.ParseApplyReport(data)
 	if err != nil {
-		return nil, false
+		return nil, fmt.Errorf("%w (%s): parse: %v", ErrReportUnreadable, describeReportFile(path), err)
 	}
-	return env, true
+	return env, nil
+}
+
+// describeReportFile renders the ownership/mode facts a reader needs to diagnose an unreadable
+// report — the shape of the sp-rwkk failure is "written 0600 by a uid you are not" — plus the
+// uid the poller itself is running as, since the whole question is whether those two match.
+// Best-effort: a stat that itself fails degrades to just the path.
+func describeReportFile(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return path
+	}
+	desc := fmt.Sprintf("%s mode %#o", path, fi.Mode().Perm())
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		desc += fmt.Sprintf(" uid %d gid %d", st.Uid, st.Gid)
+	}
+	return desc + fmt.Sprintf("; reader uid %d — userns-remap?", os.Getuid())
 }
 
 // InstallEntry is the spawnlet-side per-skill install status, threaded into the node's

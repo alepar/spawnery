@@ -957,10 +957,11 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		var fatalErr error
 		var entries []spawnlet.InstallEntry
 		switch {
-		case errors.Is(awaitErr, spawnlet.ErrAgentGone):
-			// The agent container is confirmed gone — no report is ever coming. Surface a
-			// terminal failure with the real reason instead of falling through to a generic
-			// "skill install report" wrapper (which would read like a plain missing-report
+		case errors.Is(awaitErr, spawnlet.ErrAgentGone), errors.Is(awaitErr, spawnlet.ErrReportUnreadable):
+			// Terminal: the agent container is confirmed gone (no report is ever coming), or the
+			// report is sitting right there but cannot be read/parsed. Either way the wait ended
+			// EARLY with a real reason — surface that reason instead of falling through to a
+			// generic "skill install report" wrapper (which would read like a plain missing-report
 			// timeout). Force outcome=ERROR on the wire: skillInstallOutcomeProto(nil) would
 			// otherwise yield UNSPECIFIED, and a terminal failure must never leave the CP with
 			// "unspecified" — that is exactly the ambiguity this task exists to close.
@@ -968,7 +969,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			entries = spawnlet.SyntheticUnknownEntries(manifest, awaitErr.Error())
 			env = &spec.ApplyReport{Schema: 1, Outcome: spec.OutcomeError, Error: awaitErr.Error()}
 		case awaitErr != nil:
-			fatalErr = fmt.Errorf("skill install report: %w", awaitErr)
+			fatalErr = fmt.Errorf("skill install report: %w", awaitErr) // ctx cancelled/expired
 		default:
 			fatalErr, entries = spawnlet.EvaluateApplyReport(manifest, env)
 		}
