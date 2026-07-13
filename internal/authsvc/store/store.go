@@ -80,7 +80,9 @@ type DeviceGrantRepo interface {
 type RevocationRepo interface {
 	// Append inserts an event and returns its assigned monotonically increasing seq.
 	Append(ctx context.Context, ev RevocationEvent) (int64, error)
-	Since(ctx context.Context, seq int64) ([]RevocationEvent, error)
+	// PageAfter prunes expired feed state and returns at most limit events above seq. Sequence
+	// gaps are expected because pruning never renumbers the AUTOINCREMENT high-water mark.
+	PageAfter(ctx context.Context, seq int64, limit int, now int64) ([]RevocationEvent, bool, error)
 }
 
 // DeviceSetRepo is the AS-side device-set registry.  The AS stores entries and

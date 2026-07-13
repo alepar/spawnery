@@ -260,7 +260,7 @@ func TestRefreshReuseOutsideGrace(t *testing.T) {
 	if err != nil || !successor.Revoked {
 		t.Fatalf("successor was not durably revoked: row=%+v err=%v", successor, err)
 	}
-	events, err := st.Revocations().Since(context.Background(), 0)
+	events, _, err := st.Revocations().PageAfter(context.Background(), 0, 256, staleTime.Unix())
 	if err != nil || len(events) != 1 {
 		t.Fatalf("reuse revocation events = %+v, err=%v", events, err)
 	}

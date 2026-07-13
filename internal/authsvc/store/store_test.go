@@ -478,9 +478,9 @@ func TestRevocationFeed(t *testing.T) {
 	if s2 <= s1 {
 		t.Fatalf("seq not monotonic: %d %d", s1, s2)
 	}
-	evs, err := st.Revocations().Since(ctxT(), s1)
-	if err != nil || len(evs) != 1 || evs[0].FamilyID != "f2" {
-		t.Fatalf("since: %+v %v", evs, err)
+	evs, hasMore, err := st.Revocations().PageAfter(ctxT(), s1, 256, 2)
+	if err != nil || hasMore || len(evs) != 1 || evs[0].FamilyID != "f2" {
+		t.Fatalf("page after: %+v has_more=%v %v", evs, hasMore, err)
 	}
 }
 

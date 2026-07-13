@@ -87,7 +87,6 @@ type RevocationEvent struct {
 	RevokedAt                int64          `bun:"revoked_at,notnull"`
 	RevokeTokensIssuedBefore int64          `bun:"revoke_tokens_issued_before,notnull"`
 	RevokedTokens            []RevokedToken `bun:"-"`
-	TokenIDs                 string         `bun:"-"` // removed schema-7 compatibility; delete after callers migrate
 }
 
 type RevokedToken struct {
