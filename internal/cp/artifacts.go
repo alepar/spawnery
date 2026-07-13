@@ -204,10 +204,84 @@ func storeToNodeArtifacts(in []store.Artifact, plainTarCap int64) []*nodev1.Arti
 	return out
 }
 
+// denylistGate is the real-revocation kill switch (sp-mwco.3.2 §4.2): delete removes only the
+// customization_catalog row, never the Garage object, and an already-bound spawn replays from
+// its own persisted spawn_artifacts row (object_key + sha) at resume/fork WITHOUT re-consulting
+// the catalog — so a deleted skill would otherwise stay fetchable by every spawn that ever bound
+// it. This gate closes that gap: it is called as the FIRST statement of presignNodeArtifacts
+// (before the nil-skillStore check), so a denial is reported even when Garage is unconfigured,
+// and it is NEVER cached/memoized — unlike s.skillPresent's positive-only presence memo, a
+// denylist memo would reintroduce exactly the revocation gap this closes.
+//
+// Fails closed (D4): a DB error on the lookup returns CodeUnavailable, never a silent pass.
+// A denied sha returns CodeFailedPrecondition naming the object key and recorded reason (D5) —
+// never a presigned URL or signature (sp-mwco.4.2's leak rule). Skipped, with no store query at
+// all, when specs has no by-ref entries.
+func (s *Server) denylistGate(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	type shaInfo struct {
+		key        string
+		artifactID string
+	}
+	byRefShas := make(map[string]shaInfo)
+	var order []string
+	for _, spec := range specs {
+		if spec.Objectref == nil {
+			continue
+		}
+		sha := spec.Objectref.Sha256
+		if _, seen := byRefShas[sha]; !seen {
+			byRefShas[sha] = shaInfo{key: spec.Objectref.ObjectKey, artifactID: spec.Id}
+			order = append(order, sha)
+		}
+	}
+	if len(byRefShas) == 0 {
+		return nil
+	}
+
+	shas := make([]string, 0, len(byRefShas))
+	for sha := range byRefShas {
+		shas = append(shas, sha)
+	}
+	denied, err := s.st.SkillDenylist().Denied(ctx, shas)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("skill denylist unavailable: %w", err))
+	}
+	if len(denied) == 0 {
+		return nil
+	}
+
+	// Deterministic "first" pick: earliest sha in spec order that is denied.
+	var firstSha string
+	for _, sha := range order {
+		if _, ok := denied[sha]; ok {
+			firstSha = sha
+			break
+		}
+	}
+	info := byRefShas[firstSha]
+	reason := denied[firstSha].Reason
+	slog.Warn("denylistGate: skill object revoked",
+		"sha256", firstSha, "artifact", info.artifactID, "denied_count", len(denied))
+	if len(denied) > 1 {
+		return connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("skill object revoked: %s (reason: %s) (and %d more)", info.key, reason, len(denied)-1))
+	}
+	return connect.NewError(connect.CodeFailedPrecondition,
+		fmt.Errorf("skill object revoked: %s (reason: %s)", info.key, reason))
+}
+
 // presignNodeArtifacts fills PresignedUrl on every by-ref spec in specs. Called by
 // nodeArtifactsForStart AFTER statSkillObjects, so by the time this runs every by-ref sha has
 // already been confirmed present (or memoized present from an earlier gate pass) — a presign
 // failure here is therefore a live Garage/config fault, not a missing-object condition.
+//
+// The FIRST statement is the denylist gate (sp-mwco.3.2 §4.2, see denylistGate): unconditional,
+// never cached, and run before the nil-skillStore check so a revoked sha is reported even when
+// Garage is unconfigured. Because every start path (create/resume/fork/recreate/migrate) and the
+// sp-mwco.4.3 re-presign handler all funnel through this one function, revocation cannot be
+// forgotten on a new start path.
+//
 // Returns CodeFailedPrecondition if any by-ref spec is present but skillStore is nil
 // (Garage not configured). Returns CodeUnavailable if PresignedGet fails (signs an HMAC
 // offline, so this indicates a config error rather than a live Garage connection failure).
@@ -217,6 +291,9 @@ func storeToNodeArtifacts(in []store.Artifact, plainTarCap int64) []*nodev1.Arti
 // (resume/fork skip it when journal snapshot captures skill files). Until then, this is called
 // on every start unconditionally.
 func (s *Server) presignNodeArtifacts(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	if err := s.denylistGate(ctx, specs); err != nil {
+		return err
+	}
 	for _, spec := range specs {
 		if spec.Objectref == nil {
 			continue

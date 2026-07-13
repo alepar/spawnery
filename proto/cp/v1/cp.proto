@@ -126,6 +126,25 @@ service SpawnService {
   // overrides are rebased onto the new member set (a dropped override for a removed member and an
   // auto-resolved name collision are both reported as warnings, never a hard failure).
   rpc RepinProfileBundle(RepinProfileBundleRequest) returns (RepinProfileBundleResponse);
+  // Real revocation (sp-mwco.3.2 §4.2): a sha256 kill switch consulted by presignNodeArtifacts on
+  // EVERY start path (create/resume/fork/recreate/migrate) and by the sp-mwco.4.3 re-presign
+  // handler. Delete removes only the customization_catalog row — the Garage object is never
+  // removed, and an already-bound spawn replays from its own persisted spawn_artifacts row
+  // (object_key + sha) at resume/fork WITHOUT re-consulting the catalog, so a deleted skill would
+  // otherwise stay fetchable by every spawn that ever bound it. Denying does NOT terminate
+  // already-running spawns (that is the separate kill-switch/terminate path, spec §4.4); its
+  // contract is exactly that the object cannot be re-materialized on any subsequent start.
+  // Admin-only (requireAdmin), keyed by sha256 (content identity), not catalog_id — the same
+  // object can be reachable from many catalog rows / bundle members / owners.
+  rpc DenySkillObject(DenySkillObjectRequest) returns (DenySkillObjectResponse);
+  // AllowSkillObject un-denies a sha (e.g. an admin typo) — without it a mis-typed sha
+  // permanently bricks a legitimate skill for every spawn. NotFound when the sha is not
+  // currently denied. Admin-only.
+  rpc AllowSkillObject(AllowSkillObjectRequest) returns (AllowSkillObjectResponse);
+  // ListSkillObjectDenials surfaces the recorded reason for every denial (§4.2's "reason
+  // recorded and surfaced"), ordered created_at DESC. Admin-only; backs the spawnctl CLI
+  // (sp-q2qm) and the §4.9 admin UI read path.
+  rpc ListSkillObjectDenials(ListSkillObjectDenialsRequest) returns (ListSkillObjectDenialsResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -1024,4 +1043,28 @@ message RepinProfileBundleRequest {
 message RepinProfileBundleResponse {
   uint64 version           = 1;
   repeated string warnings = 2;
+}
+
+// DenySkillObjectRequest.sha256 is normalized (lowercased, trimmed) server-side and must match
+// ^[0-9a-f]{64}$ after normalization; reason is required — an unexplained kill switch is
+// unauditable. Deny is an upsert: re-denying an already-denied sha updates reason/denied_by/
+// created_at, no error.
+message DenySkillObjectRequest  { string sha256 = 1; string reason = 2; }
+message DenySkillObjectResponse {}
+
+// AllowSkillObjectRequest.sha256 is normalized the same way as DenySkillObjectRequest.
+message AllowSkillObjectRequest  { string sha256 = 1; }
+message AllowSkillObjectResponse {}
+
+message ListSkillObjectDenialsRequest {}
+// SkillObjectDenial mirrors store.SkillObjectDenial: one recorded kill-switch row.
+message SkillObjectDenial {
+  string sha256     = 1;
+  string reason     = 2;
+  string denied_by  = 3;
+  int64  created_at = 4;
+}
+// ListSkillObjectDenialsResponse.denials is ordered created_at DESC (newest first).
+message ListSkillObjectDenialsResponse {
+  repeated SkillObjectDenial denials = 1;
 }

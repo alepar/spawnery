@@ -208,6 +208,15 @@ const (
 	// SpawnServiceRepinProfileBundleProcedure is the fully-qualified name of the SpawnService's
 	// RepinProfileBundle RPC.
 	SpawnServiceRepinProfileBundleProcedure = "/cp.v1.SpawnService/RepinProfileBundle"
+	// SpawnServiceDenySkillObjectProcedure is the fully-qualified name of the SpawnService's
+	// DenySkillObject RPC.
+	SpawnServiceDenySkillObjectProcedure = "/cp.v1.SpawnService/DenySkillObject"
+	// SpawnServiceAllowSkillObjectProcedure is the fully-qualified name of the SpawnService's
+	// AllowSkillObject RPC.
+	SpawnServiceAllowSkillObjectProcedure = "/cp.v1.SpawnService/AllowSkillObject"
+	// SpawnServiceListSkillObjectDenialsProcedure is the fully-qualified name of the SpawnService's
+	// ListSkillObjectDenials RPC.
+	SpawnServiceListSkillObjectDenialsProcedure = "/cp.v1.SpawnService/ListSkillObjectDenials"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -333,6 +342,25 @@ type SpawnServiceClient interface {
 	// overrides are rebased onto the new member set (a dropped override for a removed member and an
 	// auto-resolved name collision are both reported as warnings, never a hard failure).
 	RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error)
+	// Real revocation (sp-mwco.3.2 §4.2): a sha256 kill switch consulted by presignNodeArtifacts on
+	// EVERY start path (create/resume/fork/recreate/migrate) and by the sp-mwco.4.3 re-presign
+	// handler. Delete removes only the customization_catalog row — the Garage object is never
+	// removed, and an already-bound spawn replays from its own persisted spawn_artifacts row
+	// (object_key + sha) at resume/fork WITHOUT re-consulting the catalog, so a deleted skill would
+	// otherwise stay fetchable by every spawn that ever bound it. Denying does NOT terminate
+	// already-running spawns (that is the separate kill-switch/terminate path, spec §4.4); its
+	// contract is exactly that the object cannot be re-materialized on any subsequent start.
+	// Admin-only (requireAdmin), keyed by sha256 (content identity), not catalog_id — the same
+	// object can be reachable from many catalog rows / bundle members / owners.
+	DenySkillObject(context.Context, *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error)
+	// AllowSkillObject un-denies a sha (e.g. an admin typo) — without it a mis-typed sha
+	// permanently bricks a legitimate skill for every spawn. NotFound when the sha is not
+	// currently denied. Admin-only.
+	AllowSkillObject(context.Context, *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error)
+	// ListSkillObjectDenials surfaces the recorded reason for every denial (§4.2's "reason
+	// recorded and surfaced"), ordered created_at DESC. Admin-only; backs the spawnctl CLI
+	// (sp-q2qm) and the §4.9 admin UI read path.
+	ListSkillObjectDenials(context.Context, *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -718,6 +746,24 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("RepinProfileBundle")),
 			connect.WithClientOptions(opts...),
 		),
+		denySkillObject: connect.NewClient[v1.DenySkillObjectRequest, v1.DenySkillObjectResponse](
+			httpClient,
+			baseURL+SpawnServiceDenySkillObjectProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DenySkillObject")),
+			connect.WithClientOptions(opts...),
+		),
+		allowSkillObject: connect.NewClient[v1.AllowSkillObjectRequest, v1.AllowSkillObjectResponse](
+			httpClient,
+			baseURL+SpawnServiceAllowSkillObjectProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("AllowSkillObject")),
+			connect.WithClientOptions(opts...),
+		),
+		listSkillObjectDenials: connect.NewClient[v1.ListSkillObjectDenialsRequest, v1.ListSkillObjectDenialsResponse](
+			httpClient,
+			baseURL+SpawnServiceListSkillObjectDenialsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListSkillObjectDenials")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -785,6 +831,9 @@ type spawnServiceClient struct {
 	getBundle                *connect.Client[v1.GetBundleRequest, v1.GetBundleResponse]
 	getBundleDiff            *connect.Client[v1.GetBundleDiffRequest, v1.GetBundleDiffResponse]
 	repinProfileBundle       *connect.Client[v1.RepinProfileBundleRequest, v1.RepinProfileBundleResponse]
+	denySkillObject          *connect.Client[v1.DenySkillObjectRequest, v1.DenySkillObjectResponse]
+	allowSkillObject         *connect.Client[v1.AllowSkillObjectRequest, v1.AllowSkillObjectResponse]
+	listSkillObjectDenials   *connect.Client[v1.ListSkillObjectDenialsRequest, v1.ListSkillObjectDenialsResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -1097,6 +1146,21 @@ func (c *spawnServiceClient) RepinProfileBundle(ctx context.Context, req *connec
 	return c.repinProfileBundle.CallUnary(ctx, req)
 }
 
+// DenySkillObject calls cp.v1.SpawnService.DenySkillObject.
+func (c *spawnServiceClient) DenySkillObject(ctx context.Context, req *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error) {
+	return c.denySkillObject.CallUnary(ctx, req)
+}
+
+// AllowSkillObject calls cp.v1.SpawnService.AllowSkillObject.
+func (c *spawnServiceClient) AllowSkillObject(ctx context.Context, req *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error) {
+	return c.allowSkillObject.CallUnary(ctx, req)
+}
+
+// ListSkillObjectDenials calls cp.v1.SpawnService.ListSkillObjectDenials.
+func (c *spawnServiceClient) ListSkillObjectDenials(ctx context.Context, req *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error) {
+	return c.listSkillObjectDenials.CallUnary(ctx, req)
+}
+
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
 type SpawnServiceHandler interface {
 	CreateSpawn(context.Context, *connect.Request[v1.CreateSpawnRequest]) (*connect.Response[v1.CreateSpawnResponse], error)
@@ -1220,6 +1284,25 @@ type SpawnServiceHandler interface {
 	// overrides are rebased onto the new member set (a dropped override for a removed member and an
 	// auto-resolved name collision are both reported as warnings, never a hard failure).
 	RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error)
+	// Real revocation (sp-mwco.3.2 §4.2): a sha256 kill switch consulted by presignNodeArtifacts on
+	// EVERY start path (create/resume/fork/recreate/migrate) and by the sp-mwco.4.3 re-presign
+	// handler. Delete removes only the customization_catalog row — the Garage object is never
+	// removed, and an already-bound spawn replays from its own persisted spawn_artifacts row
+	// (object_key + sha) at resume/fork WITHOUT re-consulting the catalog, so a deleted skill would
+	// otherwise stay fetchable by every spawn that ever bound it. Denying does NOT terminate
+	// already-running spawns (that is the separate kill-switch/terminate path, spec §4.4); its
+	// contract is exactly that the object cannot be re-materialized on any subsequent start.
+	// Admin-only (requireAdmin), keyed by sha256 (content identity), not catalog_id — the same
+	// object can be reachable from many catalog rows / bundle members / owners.
+	DenySkillObject(context.Context, *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error)
+	// AllowSkillObject un-denies a sha (e.g. an admin typo) — without it a mis-typed sha
+	// permanently bricks a legitimate skill for every spawn. NotFound when the sha is not
+	// currently denied. Admin-only.
+	AllowSkillObject(context.Context, *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error)
+	// ListSkillObjectDenials surfaces the recorded reason for every denial (§4.2's "reason
+	// recorded and surfaced"), ordered created_at DESC. Admin-only; backs the spawnctl CLI
+	// (sp-q2qm) and the §4.9 admin UI read path.
+	ListSkillObjectDenials(context.Context, *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1601,6 +1684,24 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("RepinProfileBundle")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceDenySkillObjectHandler := connect.NewUnaryHandler(
+		SpawnServiceDenySkillObjectProcedure,
+		svc.DenySkillObject,
+		connect.WithSchema(spawnServiceMethods.ByName("DenySkillObject")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceAllowSkillObjectHandler := connect.NewUnaryHandler(
+		SpawnServiceAllowSkillObjectProcedure,
+		svc.AllowSkillObject,
+		connect.WithSchema(spawnServiceMethods.ByName("AllowSkillObject")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListSkillObjectDenialsHandler := connect.NewUnaryHandler(
+		SpawnServiceListSkillObjectDenialsProcedure,
+		svc.ListSkillObjectDenials,
+		connect.WithSchema(spawnServiceMethods.ByName("ListSkillObjectDenials")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SpawnServiceCreateSpawnProcedure:
@@ -1727,6 +1828,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceGetBundleDiffHandler.ServeHTTP(w, r)
 		case SpawnServiceRepinProfileBundleProcedure:
 			spawnServiceRepinProfileBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceDenySkillObjectProcedure:
+			spawnServiceDenySkillObjectHandler.ServeHTTP(w, r)
+		case SpawnServiceAllowSkillObjectProcedure:
+			spawnServiceAllowSkillObjectHandler.ServeHTTP(w, r)
+		case SpawnServiceListSkillObjectDenialsProcedure:
+			spawnServiceListSkillObjectDenialsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1982,4 +2089,16 @@ func (UnimplementedSpawnServiceHandler) GetBundleDiff(context.Context, *connect.
 
 func (UnimplementedSpawnServiceHandler) RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RepinProfileBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DenySkillObject(context.Context, *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DenySkillObject is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) AllowSkillObject(context.Context, *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.AllowSkillObject is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListSkillObjectDenials(context.Context, *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListSkillObjectDenials is not implemented"))
 }
