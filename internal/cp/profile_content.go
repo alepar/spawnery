@@ -66,12 +66,21 @@ func validateCustomContent(kind store.ProfileEntryKind, name string, inline []by
 	return nil
 }
 
-// enforceProfileEntryCap returns a CodeInvalidArgument error when the current entry count
-// would exceed maxArtifactsPerSpawn (64). existing is the count before adding the new entry.
-func enforceProfileEntryCap(existing int) error {
-	if existing >= maxArtifactsPerSpawn {
+// enforceProfileArtifactCap returns a CodeInvalidArgument error when existingExpanded+adding
+// would exceed maxArtifactsPerSpawn-1 (63; the manifest takes the 64th slot — sp-mwco.1.8/1.12
+// §4.4). existingExpanded is the profile's current EXPANDED artifact count (1 per catalog_ref/
+// custom entry, member-count-minus-excludes per bundle_ref entry); adding is the new entry's own
+// expanded member count (1 for catalog_ref/custom, the post-exclude member count for bundle_ref).
+// EVERY entry source is accounted the same way, so no combination of attaches can build a profile
+// past what assembly (validateAndMergeArtifacts) will accept. Assembly stays the authoritative
+// enforcement point; this is attach-time UX so an over-budget profile is rejected immediately
+// instead of at CreateSpawn.
+func enforceProfileArtifactCap(existingExpanded, adding int) error {
+	budget := maxArtifactsPerSpawn - 1
+	if existingExpanded+adding > budget {
 		return connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("profile entry count %d would exceed maximum %d", existing+1, maxArtifactsPerSpawn))
+			fmt.Errorf("profile would hold %d skill artifacts (adding %d), exceeding the maximum %d per spawn (manifest.json takes the remaining slot)",
+				existingExpanded+adding, adding, budget))
 	}
 	return nil
 }

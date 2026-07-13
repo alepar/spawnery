@@ -1,6 +1,8 @@
 // Command agentinstall is a standalone CLI for installing agent artifacts
 // (skills, MCP servers, config) into per-agent native config files.
-// It has zero spawnery-internal imports and is go-install-able.
+// It imports spawnery/internal/agentinstall (the go-install-able leaf package that does the
+// actual work) and spawnery/internal/agentcaps (a stdlib-only leaf) to resolve --runnable; it
+// has no other spawnery-internal imports.
 package main
 
 import (
@@ -13,6 +15,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"spawnery/internal/agentcaps"
 	"spawnery/internal/agentinstall"
 )
 
@@ -99,6 +102,10 @@ func applyCmd() *cli.Command {
 				Name:  "agent",
 				Usage: "Apply only artifacts targeting this agent (claude|codex|opencode|hermes|goose); if omitted, applies to all targets",
 			},
+			&cli.StringFlag{
+				Name:  "runnable",
+				Usage: "Resolve --agent from a runnable ID (e.g. claude-tui, goose-acp, hermes-acp) via the agentcaps registry; mutually exclusive with --agent",
+			},
 			&cli.DurationFlag{
 				Name:  "secret-wait-timeout",
 				Usage: "Maximum duration to wait for async-delivered secret files before declaring them missing (0 disables the wait)",
@@ -111,19 +118,62 @@ func applyCmd() *cli.Command {
 				Name:  "profile-version",
 				Usage: "Profile version to stamp into managed.json provenance entries",
 			},
+			&cli.StringFlag{
+				Name: "report",
+				Usage: "Write a structured apply-report envelope (schema 1) to this path, atomically, and " +
+					"exit non-zero on a warn/bundle_failed/error verdict (0=ok, 2=warn, 3=bundle_failed, 1=error). " +
+					"Omitted: behavior is unchanged (always exits 0)",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			artifactsDir := cmd.String("artifacts")
 			secretsDir := cmd.String("secrets")
 			agentFilter := cmd.String("agent")
+			runnable := cmd.String("runnable")
+			reportPath := cmd.String("report")
 
-			m, err := agentinstall.LoadManifest(artifactsDir)
-			if err != nil {
-				return fmt.Errorf("load manifest: %w", err)
+			if runnable != "" && agentFilter != "" {
+				return fmt.Errorf("--runnable and --agent are mutually exclusive")
 			}
 
 			env := osEnviron()
 			reg := agentinstall.NewRegistry(env)
+
+			if runnable != "" {
+				emitter, ok := agentcaps.EmitterForRunnable(runnable)
+				if !ok {
+					// No-op runnable (shell, stub-acp, an unknown/typo'd ID): nothing to
+					// install. Byte-for-byte the behavior the deleted apply-artifacts.sh
+					// shell `case` gave these runnables — exit 0, write no report.
+					fmt.Fprintf(os.Stderr, "agentinstall: runnable %q has no agentinstall emitter — nothing to apply\n", runnable)
+					return nil
+				}
+				if _, ok := reg.Lookup(emitter); !ok {
+					// Generic guard: agentcaps maps this runnable to an emitter that
+					// agentinstall.NewRegistry doesn't (yet) register — e.g. a future
+					// agentcaps binary landing ahead of its agentinstall emitter. Not a
+					// regression: today's shell `case` is equally a no-op for these.
+					// emitter_test.go's binary-coverage invariant plus the reconcile
+					// forward test (internal/agentcaps/reconcile_test.go) make this
+					// branch unreachable for every emitter agentcaps currently maps.
+					fmt.Fprintf(os.Stderr, "agentinstall: runnable %q maps to emitter %q, which is not yet registered — nothing to apply\n", runnable, emitter)
+					return nil
+				}
+				agentFilter = emitter
+			}
+
+			m, err := agentinstall.LoadManifest(artifactsDir)
+			if err != nil {
+				loadErr := fmt.Errorf("load manifest: %w", err)
+				if reportPath != "" {
+					repEnv := agentinstall.NewErrorApplyReport(agentFilter, loadErr.Error())
+					if werr := agentinstall.WriteApplyReportAtomic(reportPath, repEnv); werr != nil {
+						return fmt.Errorf("%w (additionally failed to write --report %s: %v)", loadErr, reportPath, werr)
+					}
+				}
+				return loadErr
+			}
+
 			opts := agentinstall.Options{
 				HomeDir:           env.Home(),
 				SecretsDir:        secretsDir,
@@ -141,7 +191,18 @@ func applyCmd() *cli.Command {
 				return fmt.Errorf("marshal result: %w", err)
 			}
 			fmt.Println(string(data))
-			return nil
+
+			if reportPath == "" {
+				return nil
+			}
+			repEnv, code := agentinstall.BuildApplyReport(m, result, agentFilter)
+			if werr := agentinstall.WriteApplyReportAtomic(reportPath, repEnv); werr != nil {
+				return fmt.Errorf("write --report %s: %w", reportPath, werr)
+			}
+			if code == 0 {
+				return nil
+			}
+			return cli.Exit(fmt.Sprintf("apply outcome=%s (see %s)", repEnv.Outcome, reportPath), code)
 		},
 	}
 }

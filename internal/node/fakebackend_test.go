@@ -4,6 +4,7 @@ package node
 // hand-forwarded ad-hoc pod-backend fake that used to live in attach_lifecycle_test.go (sp-2tx8.1.4).
 
 import (
+	"strings"
 	"testing"
 
 	"spawnery/internal/runtime/fakepod"
@@ -25,4 +26,15 @@ func lastOf(s []string) string {
 		return ""
 	}
 	return s[len(s)-1]
+}
+
+// podWasStopped reports whether Stop was called on the backend, read from fakepod's ops log.
+// (Replaces the old scriptedPodBackend.wasStopped(), removed when tests moved onto fakepod.)
+func podWasStopped(b *fakepod.Backend) bool {
+	for _, op := range b.Ops() {
+		if strings.HasPrefix(op, "stop:") {
+			return true
+		}
+	}
+	return false
 }

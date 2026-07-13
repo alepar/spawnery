@@ -149,6 +149,51 @@ func TestCustomizationCatalog_ListByCreator(t *testing.T) {
 	}
 }
 
+func TestCustomizationCatalog_ListVisibleTo(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	aliceListed := makeEntry("cat-al", "alice", "alice-listed")
+	aliceListed.Listed = true
+	aliceUnlisted := makeEntry("cat-au", "alice", "alice-unlisted")
+	aliceUnlisted.Listed = false
+	bobListed := makeEntry("cat-bl", "bob", "bob-listed")
+	bobListed.Listed = true
+	bobUnlisted := makeEntry("cat-bu", "bob", "bob-unlisted")
+	bobUnlisted.Listed = false
+
+	for _, e := range []store.CustomizationCatalogEntry{aliceListed, aliceUnlisted, bobListed, bobUnlisted} {
+		if err := st.CustomizationCatalog().Create(ctx, e); err != nil {
+			t.Fatalf("Create %s: %v", e.CatalogID, err)
+		}
+	}
+
+	// Alice sees: her own listed + unlisted entries, plus bob's listed entry — NOT bob's unlisted.
+	got, err := st.CustomizationCatalog().ListVisibleTo(ctx, "alice")
+	if err != nil {
+		t.Fatalf("ListVisibleTo: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 visible entries, got %d: %+v", len(got), got)
+	}
+	wantIDs := map[string]bool{"cat-al": true, "cat-au": true, "cat-bl": true}
+	for _, e := range got {
+		if !wantIDs[e.CatalogID] {
+			t.Errorf("unexpected entry visible to alice: %s", e.CatalogID)
+		}
+		delete(wantIDs, e.CatalogID)
+	}
+	if len(wantIDs) != 0 {
+		t.Errorf("missing expected entries: %v", wantIDs)
+	}
+	// Ordered by name ASC, no duplicates.
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Name > got[i].Name {
+			t.Errorf("not ordered by name ASC: %q before %q", got[i-1].Name, got[i].Name)
+		}
+	}
+}
+
 func TestCustomizationCatalog_Update(t *testing.T) {
 	st := store.NewTestStore(t)
 	ctx := context.Background()

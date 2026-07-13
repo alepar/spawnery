@@ -73,7 +73,7 @@ func TestMaterialize_BytesWritesFileAtMode(t *testing.T) {
 	st, sec := newStagerPair(t)
 	if err := st.Materialize(context.Background(), "sp1", []Artifact{{
 		ID: "a", Inline: []byte("hello"), ContentType: ArtifactBytes, DestPath: "manifest.json", Mode: 0o640,
-	}}, sec); err != nil {
+	}}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	p := filepath.Join(st.DirFor("sp1"), "manifest.json")
@@ -88,7 +88,7 @@ func TestMaterialize_BytesWritesFileAtMode(t *testing.T) {
 
 func TestMaterialize_BytesDefaultModeWhenZero(t *testing.T) {
 	st, sec := newStagerPair(t)
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: "f", Mode: 0}}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: "f", Mode: 0}}, sec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(filepath.Join(st.DirFor("sp1"), "f"))
@@ -106,7 +106,7 @@ func TestMaterialize_TarUnpacksPreservingPerFileModes(t *testing.T) {
 		"SKILL.md":   {0o644, "# skill"},
 		"bin/run.sh": {0o755, "#!/bin/sh"},
 	})
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "skill", Inline: blob, ContentType: ArtifactTar, DestPath: "payloads/skill"}}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "skill", Inline: blob, ContentType: ArtifactTar, DestPath: "payloads/skill"}}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize tar: %v", err)
 	}
 	base := filepath.Join(st.DirFor("sp1"), "payloads", "skill")
@@ -123,7 +123,7 @@ func TestMaterialize_SensitiveRoutesToSecretsNotStaging(t *testing.T) {
 	st, sec := newStagerPair(t)
 	if err := st.Materialize(context.Background(), "sp1", []Artifact{{
 		ID: "tok", Inline: []byte("s3cr3t"), ContentType: ArtifactBytes, Sensitive: true, EnvVarName: "GH_TOKEN", DestPath: "ignored",
-	}}, sec); err != nil {
+	}}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	// Lands in secrets root @0600, keyed by env var name.
@@ -144,7 +144,7 @@ func TestMaterialize_SensitiveRoutesToSecretsNotStaging(t *testing.T) {
 func TestMaterialize_SensitiveEmptyInlineSkipped(t *testing.T) {
 	st, sec := newStagerPair(t)
 	// Async-delivered secret (no inline in StartSpawn): no-op, no error.
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "tok", Sensitive: true, EnvVarName: "GH_TOKEN"}}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "tok", Sensitive: true, EnvVarName: "GH_TOKEN"}}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sec.DirFor("sp1"), "GH_TOKEN")); !os.IsNotExist(err) {
@@ -152,9 +152,108 @@ func TestMaterialize_SensitiveEmptyInlineSkipped(t *testing.T) {
 	}
 }
 
+// TestMaterialize_ReportDirCreatedWritable verifies Materialize always provisions a report/
+// subdir under the staging dir (agent-writable channel for apply-report.json), even when the
+// spawn has zero artifacts.
+func TestMaterialize_ReportDirCreatedWritable(t *testing.T) {
+	st, sec := newStagerPair(t)
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	reportDir := st.ReportDirFor("sp1")
+	fi, err := os.Stat(reportDir)
+	if err != nil {
+		t.Fatalf("report dir not created: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("report dir is not a directory: %v", fi.Mode())
+	}
+	// AgentUID unset (zero value 0) -> chown(0) fails EPERM under an unprivileged test process ->
+	// degrades to world-writable, mirroring storage.Scratch.Prepare's fallback.
+	if fi.Mode().Perm() != 0o777 {
+		t.Errorf("report dir perm: got %o, want 0777 (degraded fallback)", fi.Mode().Perm())
+	}
+	if reportDir != filepath.Join(st.DirFor("sp1"), "report") {
+		t.Errorf("ReportDirFor: got %q", reportDir)
+	}
+}
+
+// TestMaterialize_ReportDirChownedToAgentUID verifies AgentUID (when the chown seam succeeds,
+// simulated here) is threaded into the report dir's ownership rather than always falling back.
+func TestMaterialize_ReportDirChownedToAgentUID(t *testing.T) {
+	st, sec := newStagerPair(t)
+	st.AgentUID = 100000
+	var chownedTo int
+	orig := artifactsChown
+	artifactsChown = func(path string, uid, gid int) error {
+		chownedTo = uid
+		return nil // simulate a privileged spawnlet process where chown succeeds
+	}
+	defer func() { artifactsChown = orig }()
+
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	if chownedTo != 100000 {
+		t.Errorf("chown uid: got %d, want 100000", chownedTo)
+	}
+	fi, err := os.Stat(st.ReportDirFor("sp1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o755 {
+		t.Errorf("report dir perm: got %o, want 0755 (non-degraded)", fi.Mode().Perm())
+	}
+}
+
+// TestMaterialize_ReportDirSurvivesResumeWipe verifies the report/ subdir is present again
+// (freshly re-provisioned, not left absent) after a second Materialize call — resume re-threads
+// the whole staging dir, and the report channel must survive that re-thread just like the rest
+// of the artifact tree.
+func TestMaterialize_ReportDirSurvivesResumeWipe(t *testing.T) {
+	st, sec := newStagerPair(t)
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
+		t.Fatalf("Materialize (create): %v", err)
+	}
+	// Simulate the agent having written a report during the prior episode.
+	stale := filepath.Join(st.ReportDirFor("sp1"), "apply-report.json")
+	if err := os.WriteFile(stale, []byte(`{"schema":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
+		t.Fatalf("Materialize (resume): %v", err)
+	}
+	if _, err := os.Stat(st.ReportDirFor("sp1")); err != nil {
+		t.Fatalf("report dir absent after resume re-thread: %v", err)
+	}
+	// The stale prior-episode report must NOT survive — a fresh episode's report is a distinct
+	// completion signal, not an accumulation.
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale apply-report.json survived the staging wipe: err=%v", err)
+	}
+}
+
+// TestMaterialize_RejectsDestPathUnderReportPrefix verifies an artifact whose confined DestPath
+// resolves under the reserved report/ prefix is rejected (defence in depth: CP-authored
+// DestPaths are "manifest.json" and "payloads/<id>" today, never "report/...").
+func TestMaterialize_RejectsDestPathUnderReportPrefix(t *testing.T) {
+	st, sec := newStagerPair(t)
+	for _, destPath := range []string{"report", "report/apply-report.json", "report/nested/x"} {
+		destPath := destPath
+		t.Run(destPath, func(t *testing.T) {
+			err := st.Materialize(context.Background(), "sp1", []Artifact{
+				{ID: "evil", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: destPath},
+			}, sec, nil, nil)
+			if err == nil {
+				t.Fatalf("expected rejection for dest_path %q", destPath)
+			}
+		})
+	}
+}
+
 func TestMaterialize_RejectsDestPathTraversal(t *testing.T) {
 	st, sec := newStagerPair(t)
-	err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "evil", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: "../escape"}}, sec)
+	err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "evil", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: "../escape"}}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected traversal rejection for dest_path '../escape'")
 	}
@@ -166,14 +265,14 @@ func TestMaterialize_RejectsTarEntryTraversal(t *testing.T) {
 		mode os.FileMode
 		body string
 	}{"../escape": {0o644, "x"}})
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "evil", Inline: blob, ContentType: ArtifactTar, DestPath: "payloads/skill"}}, sec); err == nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "evil", Inline: blob, ContentType: ArtifactTar, DestPath: "payloads/skill"}}, sec, nil, nil); err == nil {
 		t.Fatal("expected traversal rejection for tar entry '../escape'")
 	}
 }
 
 func TestMaterialize_AbsoluteDestTreatedAsMountRelative(t *testing.T) {
 	st, sec := newStagerPair(t)
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: "/etc/passwd"}}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("x"), ContentType: ArtifactBytes, DestPath: "/etc/passwd"}}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	// "/etc/passwd" is confined under the staging dir, not the host root.
@@ -184,7 +283,7 @@ func TestMaterialize_AbsoluteDestTreatedAsMountRelative(t *testing.T) {
 
 func TestMaterialize_IdempotentReapplyWipesStaging(t *testing.T) {
 	st, sec := newStagerPair(t)
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("v1"), ContentType: ArtifactBytes, DestPath: "f"}}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("v1"), ContentType: ArtifactBytes, DestPath: "f"}}, sec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Stale file from a prior apply must not survive re-threading on resume.
@@ -192,7 +291,7 @@ func TestMaterialize_IdempotentReapplyWipesStaging(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("v2"), ContentType: ArtifactBytes, DestPath: "f"}}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{{ID: "a", Inline: []byte("v2"), ContentType: ArtifactBytes, DestPath: "f"}}, sec, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -206,7 +305,7 @@ func TestMaterialize_IdempotentReapplyWipesStaging(t *testing.T) {
 
 func TestMaterialize_EmptyListNoop(t *testing.T) {
 	st, sec := newStagerPair(t)
-	if err := st.Materialize(context.Background(), "sp1", nil, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", nil, sec, nil, nil); err != nil {
 		t.Fatalf("empty Materialize: %v", err)
 	}
 }
@@ -220,8 +319,8 @@ func newByRefStager(t *testing.T, handler http.HandlerFunc) (ArtifactStager, *ht
 	srv := httptest.NewServer(handler)
 	st := ArtifactStager{
 		Root: t.TempDir(),
-		fetcher: func(ctx context.Context, url string) ([]byte, error) {
-			return defaultFetcher(ctx, url)
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
 		},
 	}
 	return st, srv
@@ -252,7 +351,7 @@ func TestByRef_Success(t *testing.T) {
 		PresignedURL: srv.URL + "/obj",
 		Sha256:       hexSum,
 	}
-	if err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec); err != nil {
+	if err := st.Materialize(context.Background(), "sp1", []Artifact{art}, sec, nil, nil); err != nil {
 		t.Fatalf("Materialize by-ref: %v", err)
 	}
 	base := filepath.Join(st.DirFor("sp1"), "payloads", "myskill")
@@ -286,7 +385,7 @@ func TestByRef_ShaMismatch(t *testing.T) {
 		DestPath:     "payloads/skill",
 		PresignedURL: srv.URL + "/obj",
 		Sha256:       "0000000000000000000000000000000000000000000000000000000000000000",
-	}}, sec)
+	}}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected sha256 mismatch error")
 	}
@@ -297,10 +396,13 @@ func TestByRef_ShaMismatch(t *testing.T) {
 	if !fe.Terminal {
 		t.Fatalf("sha256 mismatch should be Terminal, got Terminal=false")
 	}
-	// Staging dir should be empty — no files unpacked after mismatch.
+	// Staging dir should have nothing but the always-provisioned report/ subdir — no payload
+	// files unpacked after mismatch.
 	entries, _ := os.ReadDir(st.DirFor("sp1"))
-	if len(entries) != 0 {
-		t.Fatalf("staging dir not empty after mismatch: %v", entries)
+	for _, e := range entries {
+		if e.Name() != reportSubdir {
+			t.Fatalf("staging dir not empty after mismatch: %v", entries)
+		}
 	}
 }
 
@@ -318,7 +420,7 @@ func TestByRef_HTTP404(t *testing.T) {
 		DestPath:     "payloads/skill",
 		PresignedURL: srv.URL + "/obj",
 		Sha256:       "ignored",
-	}}, sec)
+	}}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected 404 error")
 	}
@@ -339,8 +441,10 @@ func TestByRef_ConnectionError(t *testing.T) {
 	srv.Close()
 
 	st := ArtifactStager{
-		Root:    t.TempDir(),
-		fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	err := st.Materialize(context.Background(), "sp1", []Artifact{{
@@ -349,7 +453,7 @@ func TestByRef_ConnectionError(t *testing.T) {
 		DestPath:     "payloads/skill",
 		PresignedURL: deadURL,
 		Sha256:       "ignored",
-	}}, sec)
+	}}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected connection error")
 	}
@@ -408,7 +512,7 @@ func TestByRef_OversizeBomb(t *testing.T) {
 		DestPath:     "payloads/skill",
 		PresignedURL: srv.URL + "/obj",
 		Sha256:       hexSum,
-	}}, sec)
+	}}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected oversize error")
 	}
@@ -430,8 +534,10 @@ func TestByRef_MalformedZstd(t *testing.T) {
 	defer srv.Close()
 
 	st := ArtifactStager{
-		Root:    t.TempDir(),
-		fetcher: func(ctx context.Context, url string) ([]byte, error) { return defaultFetcher(ctx, url) },
+		Root: t.TempDir(),
+		fetcher: func(ctx context.Context, url string, capBytes int64) ([]byte, error) {
+			return defaultFetcher(ctx, url, capBytes)
+		},
 	}
 	sec := SecretInjector{Root: t.TempDir()}
 	err := st.Materialize(context.Background(), "sp1", []Artifact{{
@@ -440,7 +546,7 @@ func TestByRef_MalformedZstd(t *testing.T) {
 		DestPath:     "payloads/skill",
 		PresignedURL: srv.URL + "/obj",
 		Sha256:       "ignored",
-	}}, sec)
+	}}, sec, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for malformed zstd")
 	}

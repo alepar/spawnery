@@ -14,7 +14,7 @@ import (
 )
 
 // allAgents is the canonical set of registered emitters exercised by the matrix.
-var allAgents = []string{"claude", "codex", "opencode", "hermes", "goose"}
+var allAgents = []string{"claude", "codex", "opencode", "hermes", "goose", "pi"}
 
 // allKinds is the set of artifact kinds the conformance matrix exercises.
 var allKinds = []agentinstall.Kind{
@@ -29,9 +29,21 @@ var allKinds = []agentinstall.Kind{
 var expectApplied = map[string]map[agentinstall.Kind]bool{
 	"claude":   {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
 	"codex":    {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
-	"opencode": {agentinstall.KindSkill: false, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
-	"hermes":   {agentinstall.KindSkill: false, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
-	"goose":    {agentinstall.KindSkill: false, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
+	"opencode": {agentinstall.KindSkill: true, agentinstall.KindMCP: true, agentinstall.KindConfig: true, agentinstall.KindPlugin: true},
+	"hermes":   {agentinstall.KindSkill: true, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
+	"goose":    {agentinstall.KindSkill: true, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
+	"pi":       {agentinstall.KindSkill: true, agentinstall.KindMCP: false, agentinstall.KindConfig: false, agentinstall.KindPlugin: false},
+}
+
+// skillDestDirs returns every directory a skill install is expected to land in for
+// agent's layout under home: always the canonical dir, plus layout.SkillPath when the
+// agent also gets a real native copy (claude, codex).
+func skillDestDirs(home string, layout agentinstall.AgentLayout) []string {
+	dirs := []string{agentinstall.CanonicalSkillsDir(home)}
+	if layout.SkillPath != "" {
+		dirs = append(dirs, layout.SkillPath)
+	}
+	return dirs
 }
 
 const confName = "ctx7"
@@ -196,9 +208,11 @@ func TestConformance_PathFormatPresence(t *testing.T) {
 				layout := confLayout(t, home, agent)
 				switch kind {
 				case agentinstall.KindSkill:
-					dest := filepath.Join(layout.SkillPath, confName)
-					if _, err := os.Stat(filepath.Join(dest, "SKILL.md")); err != nil {
-						t.Fatalf("skill SKILL.md not at %s: %v", dest, err)
+					for _, dir := range skillDestDirs(home, layout) {
+						dest := filepath.Join(dir, confName)
+						if _, err := os.Stat(filepath.Join(dest, "SKILL.md")); err != nil {
+							t.Fatalf("skill SKILL.md not at %s: %v", dest, err)
+						}
 					}
 				case agentinstall.KindMCP:
 					root := parseBack(t, layout.MCPFormat, layout.MCPPath)
@@ -268,15 +282,17 @@ func TestConformance_Idempotency(t *testing.T) {
 					if r := confApply(t, home, artifactsDir, a); r.Status != agentinstall.StatusApplied {
 						t.Fatalf("second apply: got %q want applied (reason %q)", r.Status, r.Reason)
 					}
-					entries, err := os.ReadDir(layout.SkillPath)
-					if err != nil {
-						t.Fatalf("read skills dir: %v", err)
-					}
-					if len(entries) != 1 || entries[0].Name() != confName {
-						t.Fatalf("skills dir: got %v want exactly [%s]", names(entries), confName)
-					}
-					if _, err := os.Stat(filepath.Join(layout.SkillPath, confName, "SKILL.md")); err != nil {
-						t.Fatalf("SKILL.md missing after re-apply: %v", err)
+					for _, dir := range skillDestDirs(home, layout) {
+						entries, err := os.ReadDir(dir)
+						if err != nil {
+							t.Fatalf("read skills dir %s: %v", dir, err)
+						}
+						if len(entries) != 1 || entries[0].Name() != confName {
+							t.Fatalf("skills dir %s: got %v want exactly [%s]", dir, names(entries), confName)
+						}
+						if _, err := os.Stat(filepath.Join(dir, confName, "SKILL.md")); err != nil {
+							t.Fatalf("SKILL.md missing after re-apply in %s: %v", dir, err)
+						}
 					}
 					return
 				}
@@ -328,7 +344,8 @@ func TestConformance_LauncherClobberSurvival(t *testing.T) {
 	cells := []cell{
 		{"claude", agentinstall.KindSkill}, {"claude", agentinstall.KindMCP}, {"claude", agentinstall.KindConfig},
 		{"codex", agentinstall.KindSkill}, {"codex", agentinstall.KindMCP}, {"codex", agentinstall.KindConfig},
-		{"opencode", agentinstall.KindMCP}, {"opencode", agentinstall.KindConfig},
+		{"opencode", agentinstall.KindSkill}, {"opencode", agentinstall.KindMCP}, {"opencode", agentinstall.KindConfig},
+		{"hermes", agentinstall.KindSkill}, {"goose", agentinstall.KindSkill}, {"pi", agentinstall.KindSkill},
 		{"claude", agentinstall.KindPlugin}, {"codex", agentinstall.KindPlugin}, {"opencode", agentinstall.KindPlugin},
 	}
 	for _, c := range cells {
@@ -337,30 +354,32 @@ func TestConformance_LauncherClobberSurvival(t *testing.T) {
 			home := t.TempDir()
 			artifactsDir := t.TempDir()
 			layout := confLayout(t, home, c.agent)
-			seedClobberBase(t, layout, c.agent, c.kind)
+			seedClobberBase(t, home, layout, c.agent, c.kind)
 			if c.kind == agentinstall.KindSkill {
 				stageSkillTree(t, artifactsDir, "skillsrc")
 			}
 			if r := confApply(t, home, artifactsDir, confArtifact(c.kind, c.agent)); r.Status != agentinstall.StatusApplied {
 				t.Fatalf("status: got %q want applied (reason %q)", r.Status, r.Reason)
 			}
-			assertClobberSurvival(t, layout, c.agent, c.kind)
+			assertClobberSurvival(t, home, layout, c.agent, c.kind)
 		})
 	}
 }
 
 // seedClobberBase writes a format-appropriate base file (with a launcher-managed
 // sentinel) or a sibling skill before the artifact is applied.
-func seedClobberBase(t *testing.T, layout agentinstall.AgentLayout, agent string, kind agentinstall.Kind) {
+func seedClobberBase(t *testing.T, home string, layout agentinstall.AgentLayout, agent string, kind agentinstall.Kind) {
 	t.Helper()
 	switch kind {
 	case agentinstall.KindSkill:
-		other := filepath.Join(layout.SkillPath, "other")
-		if err := os.MkdirAll(other, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(other, "SKILL.md"), []byte("# other\n"), 0o644); err != nil {
-			t.Fatal(err)
+		for _, dir := range skillDestDirs(home, layout) {
+			other := filepath.Join(dir, "other")
+			if err := os.MkdirAll(other, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(other, "SKILL.md"), []byte("# other\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	case agentinstall.KindMCP:
 		writeBaseFile(t, layout.MCPPath, layout.MCPFormat)
@@ -395,15 +414,17 @@ func writeBaseFile(t *testing.T, path string, format agentinstall.Format) {
 }
 
 // assertClobberSurvival verifies the base content + the new artifact coexist.
-func assertClobberSurvival(t *testing.T, layout agentinstall.AgentLayout, agent string, kind agentinstall.Kind) {
+func assertClobberSurvival(t *testing.T, home string, layout agentinstall.AgentLayout, agent string, kind agentinstall.Kind) {
 	t.Helper()
 	switch kind {
 	case agentinstall.KindSkill:
-		if _, err := os.Stat(filepath.Join(layout.SkillPath, "other", "SKILL.md")); err != nil {
-			t.Fatalf("sibling skill 'other' was clobbered: %v", err)
-		}
-		if _, err := os.Stat(filepath.Join(layout.SkillPath, confName, "SKILL.md")); err != nil {
-			t.Fatalf("new skill %q not installed: %v", confName, err)
+		for _, dir := range skillDestDirs(home, layout) {
+			if _, err := os.Stat(filepath.Join(dir, "other", "SKILL.md")); err != nil {
+				t.Fatalf("sibling skill 'other' was clobbered in %s: %v", dir, err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, confName, "SKILL.md")); err != nil {
+				t.Fatalf("new skill %q not installed in %s: %v", confName, dir, err)
+			}
 		}
 	case agentinstall.KindMCP:
 		root := parseBack(t, layout.MCPFormat, layout.MCPPath)

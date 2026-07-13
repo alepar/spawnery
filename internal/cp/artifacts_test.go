@@ -2,8 +2,10 @@ package cp
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/registry"
+	"spawnery/internal/cp/skillfetch"
 	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 )
@@ -283,7 +286,7 @@ func TestStoreToNodeArtifacts_ByRef(t *testing.T) {
 			ObjectKey: "skills/" + sha + ".tar.zst", ObjectSHA256: sha},
 		{ArtifactID: "inline1", Inline: []byte("hi"), ContentType: 1, TargetContainer: 1, DestPath: "skills/x"},
 	}
-	out := storeToNodeArtifacts(arts)
+	out := storeToNodeArtifacts(arts, skillfetch.DefaultPlainTarCapBytes)
 	if len(out) != 2 {
 		t.Fatalf("want 2, got %d", len(out))
 	}
@@ -302,6 +305,46 @@ func TestStoreToNodeArtifacts_ByRef(t *testing.T) {
 	}
 	if out[1].Objectref != nil {
 		t.Error("inline artifact must not have Objectref")
+	}
+}
+
+// TestNodeArtifactsCarryPlainTarCap pins sp-mwco.4.6: nodeArtifactsForStart stamps the Server's
+// effective skill plain-tar cap onto every by-ref ObjectRef.MaxPlainTarBytes, and leaves inline
+// specs' Objectref nil (no cap to carry — there is no by-ref fetch to bound).
+func TestNodeArtifactsCarryPlainTarCap(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	s.skillPlainTarCap = 12345
+
+	sha := strings.Repeat("a", 64)
+	arts := []store.Artifact{
+		{ArtifactID: "br1", ContentType: 2, TargetContainer: 1, DestPath: "payloads/e1",
+			ObjectKey: "skills/" + sha + ".tar.zst", ObjectSHA256: sha},
+		{ArtifactID: "inline1", Inline: []byte("hi"), ContentType: 1, TargetContainer: 1, DestPath: "skills/x"},
+	}
+	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
+	if out[0].Objectref == nil || out[0].Objectref.MaxPlainTarBytes != 12345 {
+		t.Fatalf("by-ref MaxPlainTarBytes = %+v, want 12345", out[0].Objectref)
+	}
+	if out[1].Objectref != nil {
+		t.Fatal("inline artifact must not have Objectref")
+	}
+}
+
+// TestNodeArtifactsCapDefaultsWhenUnset: the seam unset (SetSkillIngest never called, or called
+// with 0) must still stamp a non-zero cap — skillfetch.DefaultPlainTarCapBytes — never 0. A live
+// CP always states its cap explicitly on the wire.
+func TestNodeArtifactsCapDefaultsWhenUnset(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	// s.skillPlainTarCap left at its zero value.
+
+	sha := strings.Repeat("b", 64)
+	arts := []store.Artifact{
+		{ArtifactID: "br1", ContentType: 2, TargetContainer: 1, DestPath: "payloads/e1",
+			ObjectKey: "skills/" + sha + ".tar.zst", ObjectSHA256: sha},
+	}
+	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
+	if out[0].Objectref == nil || out[0].Objectref.MaxPlainTarBytes != skillfetch.DefaultPlainTarCapBytes {
+		t.Fatalf("by-ref MaxPlainTarBytes = %+v, want default %d", out[0].Objectref, skillfetch.DefaultPlainTarCapBytes)
 	}
 }
 
@@ -333,7 +376,7 @@ func TestPresignNodeArtifacts_FillsURL(t *testing.T) {
 	}
 	// Verify the fake store was called with a presign call.
 	var presignCalls []string
-	for _, c := range fake.Calls {
+	for _, c := range fake.Calls() {
 		if strings.HasPrefix(c, "presign:") {
 			presignCalls = append(presignCalls, c)
 		}
@@ -439,15 +482,272 @@ func TestCreateSpawnByRef_PresignsOnStart(t *testing.T) {
 		t.Error("PresignedUrl must be filled after presign")
 	}
 	// Verify the fake was called for presign.
+	calls := fake.Calls()
 	var found bool
-	for _, c := range fake.Calls {
+	for _, c := range calls {
 		if c == "presign:"+sha {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("presign:%s not in fake.Calls %v", sha, fake.Calls)
+		t.Errorf("presign:%s not in fake.Calls() %v", sha, calls)
+	}
+}
+
+// --- statSkillObjects (HEAD-before-presign gate, sp-mwco.4.4) ----------------------------
+
+// byRefStoreArt returns a by-ref store.Artifact row (bypassing validateAndMergeArtifacts,
+// which is the CP-internal wire form these gate tests exercise directly).
+func byRefStoreArt(id, dest, sha256hex string) store.Artifact {
+	return store.Artifact{
+		ArtifactID:      id,
+		ContentType:     int32(cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR),
+		TargetContainer: int32(cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT),
+		DestPath:        dest,
+		ObjectKey:       "skills/" + sha256hex + ".tar.zst",
+		ObjectSHA256:    sha256hex,
+	}
+}
+
+// TestStatSkillObjects_MissingObjectFailsStart is the acceptance case: a 20-member bundle with
+// one absent object fails the whole start with FailedPrecondition naming the missing key, and
+// the gate short-circuits before any presign call is issued.
+func TestStatSkillObjects_MissingObjectFailsStart(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+
+	const n = 20
+	const missingIdx = 7
+	var arts []store.Artifact
+	var missingKey string
+	for i := 0; i < n; i++ {
+		sha := fmt.Sprintf("%064x", i+1)
+		arts = append(arts, byRefStoreArt(fmt.Sprintf("br%d", i), fmt.Sprintf("payloads/e%d", i), sha))
+		if i == missingIdx {
+			missingKey = "skills/" + sha + ".tar.zst"
+			continue
+		}
+		if err := fake.PutIfAbsent(context.Background(), sha, []byte("x"), nil); err != nil {
+			t.Fatalf("PutIfAbsent: %v", err)
+		}
+	}
+
+	_, err := s.nodeArtifactsForStart(context.Background(), arts)
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("want FailedPrecondition, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "skill object missing") {
+		t.Errorf("error %v does not mention 'skill object missing'", err)
+	}
+	if !strings.Contains(err.Error(), missingKey) {
+		t.Errorf("error %v does not name the missing key %q", err, missingKey)
+	}
+	for _, c := range fake.Calls() {
+		if strings.HasPrefix(c, "presign:") {
+			t.Errorf("gate must short-circuit before presign, got call %q", c)
+		}
+	}
+}
+
+// TestStatSkillObjects_BrownoutReportsUnavailable verifies a transport fault on every stat
+// reports Unavailable, never "skill object missing".
+func TestStatSkillObjects_BrownoutReportsUnavailable(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+	fake.StatHook = func(_ context.Context, _ string) error {
+		return fmt.Errorf("dial tcp: connection refused")
+	}
+
+	arts := []store.Artifact{
+		byRefStoreArt("br1", "payloads/e1", strings.Repeat("1", 64)),
+		byRefStoreArt("br2", "payloads/e2", strings.Repeat("2", 64)),
+	}
+	_, err := s.nodeArtifactsForStart(context.Background(), arts)
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("want Unavailable, got %v", err)
+	}
+	if strings.Contains(err.Error(), "skill object missing") {
+		t.Errorf("brownout must not report 'skill object missing': %v", err)
+	}
+}
+
+// TestStatSkillObjects_TransportWinsOverMissing verifies the precedence rule: when some shas
+// are genuinely absent AND others fail with a transport error, the whole gate reports
+// Unavailable, not FailedPrecondition — a brownout must never mass-report "missing".
+func TestStatSkillObjects_TransportWinsOverMissing(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+	transportSha := strings.Repeat("3", 64)
+	missingSha := strings.Repeat("4", 64) // never put — genuinely absent
+	fake.StatHook = func(_ context.Context, sha string) error {
+		if sha == transportSha {
+			return fmt.Errorf("dial tcp: connection refused")
+		}
+		return nil
+	}
+
+	arts := []store.Artifact{
+		byRefStoreArt("br1", "payloads/e1", transportSha),
+		byRefStoreArt("br2", "payloads/e2", missingSha),
+	}
+	_, err := s.nodeArtifactsForStart(context.Background(), arts)
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("want Unavailable (transport wins over missing), got %v", err)
+	}
+	if strings.Contains(err.Error(), "skill object missing") {
+		t.Errorf("transport-wins error must not mention 'skill object missing': %v", err)
+	}
+}
+
+// TestStatSkillObjects_ParallelAndDistinct verifies the gate HEADs distinct shas only, and does
+// so in parallel (bounded by skillStatParallelism), not serially.
+func TestStatSkillObjects_ParallelAndDistinct(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	fake.StatHook = func(_ context.Context, _ string) error {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return nil
+	}
+
+	const total, distinct = 12, 6
+	var arts []store.Artifact
+	for i := 0; i < total; i++ {
+		sha := strings.Repeat(fmt.Sprintf("%x", i%distinct), 64)
+		if i < distinct {
+			if err := fake.PutIfAbsent(context.Background(), sha, []byte("x"), nil); err != nil {
+				t.Fatalf("PutIfAbsent: %v", err)
+			}
+		}
+		arts = append(arts, byRefStoreArt(fmt.Sprintf("br%d", i), fmt.Sprintf("payloads/e%d", i), sha))
+	}
+	if _, err := s.nodeArtifactsForStart(context.Background(), arts); err != nil {
+		t.Fatalf("nodeArtifactsForStart: %v", err)
+	}
+
+	var statCalls int
+	for _, c := range fake.Calls() {
+		if strings.HasPrefix(c, "stat:") {
+			statCalls++
+		}
+	}
+	if statCalls != distinct {
+		t.Errorf("stat calls = %d, want %d (distinct shas only)", statCalls, distinct)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInFlight <= 1 {
+		t.Errorf("maxInFlight = %d, want > 1 (HEADs must run in parallel)", maxInFlight)
+	}
+	if maxInFlight > skillStatParallelism {
+		t.Errorf("maxInFlight = %d, want <= skillStatParallelism (%d)", maxInFlight, skillStatParallelism)
+	}
+}
+
+// TestStatSkillObjects_MemoizesKnownPresent verifies a confirmed-present sha is not re-HEAD'd
+// on a second start, while presign (URLs expire) always runs.
+func TestStatSkillObjects_MemoizesKnownPresent(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+	sha := strings.Repeat("5", 64)
+	if err := fake.PutIfAbsent(context.Background(), sha, []byte("x"), nil); err != nil {
+		t.Fatalf("PutIfAbsent: %v", err)
+	}
+	arts := []store.Artifact{byRefStoreArt("br1", "payloads/e1", sha)}
+
+	if _, err := s.nodeArtifactsForStart(context.Background(), arts); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if _, err := s.nodeArtifactsForStart(context.Background(), arts); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+
+	var statCount, presignCount int
+	for _, c := range fake.Calls() {
+		switch c {
+		case "stat:" + sha:
+			statCount++
+		case "presign:" + sha:
+			presignCount++
+		}
+	}
+	if statCount != 1 {
+		t.Errorf("stat calls = %d, want 1 (memoized after the first pass)", statCount)
+	}
+	if presignCount != 2 {
+		t.Errorf("presign calls = %d, want 2 (presign is never memoized)", presignCount)
+	}
+}
+
+// TestStatSkillObjects_DoesNotNegativeCacheMissing verifies a missing sha is NOT cached: once
+// the object is later put, a subsequent start succeeds without a stale "missing" verdict.
+func TestStatSkillObjects_DoesNotNegativeCacheMissing(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+	sha := strings.Repeat("6", 64)
+	arts := []store.Artifact{byRefStoreArt("br1", "payloads/e1", sha)}
+
+	_, err := s.nodeArtifactsForStart(context.Background(), arts)
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("first start (missing): want FailedPrecondition, got %v", err)
+	}
+
+	if err := fake.PutIfAbsent(context.Background(), sha, []byte("x"), nil); err != nil {
+		t.Fatalf("PutIfAbsent: %v", err)
+	}
+
+	if _, err := s.nodeArtifactsForStart(context.Background(), arts); err != nil {
+		t.Fatalf("second start (now present): want success, got %v", err)
+	}
+}
+
+// TestStatSkillObjects_TimeoutIsUnavailable verifies the gate's own aggregate timeout fires
+// Unavailable and returns promptly, rather than hanging on a stuck StatObject call.
+func TestStatSkillObjects_TimeoutIsUnavailable(t *testing.T) {
+	orig := skillStatTimeout
+	skillStatTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { skillStatTimeout = orig })
+
+	s, _, _ := newTestServer(t)
+	fake := skillstore.NewFakeSkillStore()
+	s.skillStore = fake
+	fake.StatHook = func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	arts := []store.Artifact{byRefStoreArt("br1", "payloads/e1", strings.Repeat("7", 64))}
+
+	start := time.Now()
+	_, err := s.nodeArtifactsForStart(context.Background(), arts)
+	elapsed := time.Since(start)
+
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("want Unavailable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "deadline") && !strings.Contains(err.Error(), "context") {
+		t.Errorf("error should name a timeout, got %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("gate took %v, want well under the real 10s production timeout", elapsed)
 	}
 }
 

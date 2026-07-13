@@ -113,6 +113,58 @@ Details the earlier draft omitted:
 - The node-side seam is a real cross-layer callback + response demux (the package holds no stream
   handle today), not a one-line hook at a comment.
 
+**Implementation status (sp-mwco.4.3):** implemented — `proto/node/v1/node.proto`
+(`RepresignArtifactsRequest`/`Response`, `PresignedObject`), `internal/cp/represign.go`
+(`Server.handleRepresign`, dispatched from `runNode` via `safego.Go` so it never blocks the receive
+loop), `internal/node/represign.go` (`attacher.represignFunc` + `represignPending`), wired into
+`internal/cp/server.go`'s `NodeMessage` switch and `internal/node/attach.go`'s `AgentSelection` /
+`CPMessage` switch.
+
+- **Ownership resolution cannot use the live container row alone (a false assumption in the
+  original plan).** `Spawns().SetActive` — which sets the live container row's `node_id` — only
+  runs *after* `scheduler.Provision` returns ACTIVE, but by-ref artifact staging (the *only* window
+  a re-presign can be requested) happens on the node strictly *before* ACTIVE, inside `startSpawn`.
+  So `LiveContainer(spawnID).NodeID == nodeID` is false exactly when the check needs to succeed. The
+  fix: `Scheduler` now exposes its in-flight placement (`InFlightStart(spawnID) (InFlightStart, bool)`
+  — `{NodeID, Gen}`, written right after `PickFor` in `Provision` and deleted in the same `defer` that
+  clears `pending`, so it is populated for exactly the window between "node picked" and "ACTIVE/error/
+  timeout"). `resolveRepresignOwner` checks `InFlightStart` **first** and falls back to the bound live
+  container (the post-ACTIVE case — a running spawn re-fetching an artifact whose original presign
+  expired). Any other outcome (store error, no row, wrong node, generation mismatch) refuses without
+  distinguishing *why*, so a refusal never leaks whether the spawn exists.
+- **Key-scoping** funnels the matched artifact rows through the *existing* `presignNodeArtifacts`
+  choke point (`internal/cp/artifacts.go`) rather than calling `skillStore.PresignedGet` directly, so
+  the `sp-mwco.3.2` sha denylist gate runs for free and cannot be forgotten on this new start-adjacent
+  path. `statSkillObjects` (the HEAD-before-presign gate) deliberately does **not** run here — it
+  already ran at `StartSpawn`; a since-deleted object surfaces as a node-side 404 Terminal, not a
+  CP-side refusal.
+- **Reconnect mid-fetch** is handled entirely by connection scoping, no explicit reconnect logic on
+  either side: `internal/node/attach.go`'s `represignPending` map lives on one `attacher`, created
+  fresh per CP connection in `runOnce` and drained (`failAll`, unblocking every in-flight waiter
+  immediately instead of burning the full 30s `represignTimeout`) by `runOnce`'s `defer` on
+  disconnect. A `startSpawn` goroutine begun on a since-dropped connection keeps referencing the old,
+  now-dead attacher: a re-presign issued after the drop fails on `send` immediately; one already in
+  flight is unblocked by `failAll`. Either way `spawnlet.RepresignFunc` returns an error, `fetchWithRetry`
+  converts it to Terminal, and `startSpawn` fails that artifact's staging. A `RepresignArtifactsResponse`
+  with an unrecognized `request_id` — including a stale reply arriving on any connection other than the
+  one that sent the request — is dropped (`represignPending.resolve`), never causes a panic, and never
+  resolves an unrelated waiter. The CP side needs no reconnect logic of its own: a `Send` to a dead
+  stream is a no-op there, and the scheduler's in-flight entry is cleaned up by `Provision`'s own
+  `defer` regardless of how `Provision` itself ends.
+- Rate limiting (`represignLimiter`, 8 requests/spawn/minute, fixed window) and a `maxRepresignKeys`
+  bound (64, matching `maxArtifactsPerSpawn`) guard against a compromised/buggy node turning this
+  into a presign-minting oracle.
+
+Tests: `internal/cp/scheduler/inflight_test.go` (in-flight placement lifecycle);
+`internal/cp/represign_test.go` (key-scoping refusal names the offending key and issues zero
+presigns; wrong generation / wrong node / denylisted sha refused; the post-ACTIVE bound-live-
+container path; `>64` keys and the 9th-request-in-window both refused; no refusal ever contains a
+URL or signature); `internal/node/represign_test.go` (request carries spawn/gen/keys; concurrent
+requests resolve out of order; an unknown `request_id` is dropped without disturbing the real
+waiter; CP refusal / spawn_id mismatch surfaces as an error; `failAll` unblocks a waiter immediately
+regardless of the configured timeout; the timeout path itself, using a per-attacher override so
+tests never race package state).
+
 ### 4.4 CP-side HEAD before presign
 
 `StatObject` per **distinct** object key at StartSpawn, failing early with `FailedPrecondition
@@ -127,15 +179,17 @@ Details the earlier draft omitted:
   §4.2's node-side contract. (The spec keeps it, parallel + memoized.)
 - It gets its **own timeout** and a **transport-vs-missing** error split — a Garage brownout must
   report `Unavailable`, not mass-report "skill object missing".
-- **Interaction with §4.5:** the gate is skipped exactly when re-materialize is skipped.
+- **Interaction with §4.5:** §4.5's resume-gating spike was answered KILLED — re-materialize is
+  never skipped, on resume or otherwise, so this gate applies uniformly on every start including
+  resume.
 
-### 4.5 Resume gating (`sp-nrzf.3.14.8`) — spike-gated, not chosen
+### 4.5 Resume gating (`sp-nrzf.3.14.8`) — SPIKE ANSWERED: KILLED, not implemented
 
 The earlier draft *chose* to skip by-ref re-materialize on a delta-image resume. Demoted to
-**spike-gated**, because it rests on an unrun assumption and, if implemented naively, **breaks every
-resume**:
+spike-gated (below), because it rested on an unrun assumption and, if implemented naively, **breaks
+every resume**:
 
-- The premise "a resume's delta image contains the agent home" comes from parent-spec spike **S4,
+- The premise "a resume's delta image contains the agent home" came from parent-spec spike **S4,
   which was never run** — and `sp-mwco.2` simultaneously moves the install target to
   `~/.agents/skills`, which may not be in the delta at all.
 - Naive gating breaks the staging/manifest contract: `Materialize` wipes and recreates staging every
@@ -144,12 +198,55 @@ resume**:
   payload dirs that were never fetched → `StatusFailed` ("skill source directory does not exist") for
   **every skill, on every resume**. Worse, `installSkillTree`'s unconditional `RemoveAll(dest)` would
   **delete the delta-image copy** it was supposed to reuse.
-- Therefore, if the spike says gating is viable, it must suppress **the manifest artifact and the
-  apply phase together** (or skip the staging wipe), state whether the decision is CP- or node-side,
-  and reconcile stale skill trees already baked into existing delta images.
-- **Spike:** create → suspend → **stop Garage** → resume → `ls` the install path + read
-  `apply-report.json`. Kill criterion: skill absent, or home not in the delta → gating is unsound;
-  by-ref materialize stays on every start and re-presign (§4.3) becomes load-bearing.
+- Therefore, if the spike said gating was viable, it would have needed to suppress **the manifest
+  artifact and the apply phase together** (or skip the staging wipe), state whether the decision is
+  CP- or node-side, and reconcile stale skill trees already baked into existing delta images.
+
+**The spike ran (sp-mwco.2.2) and the kill criterion fired.** Two probes, both at the real
+same-node-resume mechanism (`Manager.Suspend` + same-spawn-ID `CreateWithSelection`, `EnsureImage`
+preferring `DeltaTag(id)` — a strictly stronger probe than the CP+Garage variant originally sketched,
+since it needs no CP/Garage at all):
+
+| Probe | Outcome |
+|---|---|
+| D1 image-level (`CaptureDeltaAs`, the fork primitive — does not stop the source) | both `~/.claude/skills` and `~/.agents/skills` captured intact in the delta image, mode 0700, content byte-identical |
+| D2 lifecycle, `DeltaCapture=true` | BOTH trees survive the suspend+relaunch cycle |
+| D2 lifecycle, `DeltaCapture=false` (**verified production default**) | **NEITHER tree survives** |
+
+`DeltaCapture=false` is the production default: `cmd/spawnlet/config.go` registers **no default** for
+`delta.capture` (only the `DELTA_CAPTURE` env binding), nothing under `deploy/` sets it, and only
+`Justfile:59` / `Justfile:223` (dev recipes) opt in. `internal/spawnlet/manager.go:1606` / `:2108` gate
+capture on `m.cfg.DeltaCapture`.
+
+**Conclusion: gating is unsound on the arm production actually runs, per the kill criterion this
+section already specified. No gating code was written.** By-ref `Materialize` runs on **every** start
+— first-create and resume alike, unconditionally, exactly as it does today (`internal/spawnlet/
+artifacts.go:341`/`:1261` in `manager.go`). §4.3's re-presign is load-bearing, as predicted. What
+*does* make a same-node resume survive a Garage brownout is **not** gating but §4.1's node-local
+sha-keyed cache (`ArtifactStager.CacheDir`, wired at `manager.go:348`, node-local and per-spawn-
+independent, so it survives suspend/resume and a spawnlet restart): `stageByRef` tries `cacheLoad`
+first and skips the GET entirely on a hit. The residual Garage dependency on resume therefore moved
+**CP-side** — `statSkillObjects` (§4.4) re-stats and re-presigns on every start; only a sha already
+memoized in `s.skillPresent` from an earlier stat on a warm CP tolerates a transport failure. It did
+not vanish.
+
+Tests: `internal/spawnlet/artifacts_resume_test.go` (`TestMaterialize_ResumeReStagesEveryByRefArtifact`
+pins the anti-gating invariant — verified to go red under a scratch naive gate;
+`TestMaterialize_ResumeServedFromShaCacheWhenFetchFails` pins the cache-not-gating survival property)
+and `internal/cp/artifacts_resume_test.go` (`TestNodeArtifactsForStart_StatsAndPresignsOnEveryCall`,
+`TestStatSkillObjects_MemoizedShaSurvivesTransportFailure`).
+
+If a node ever opts into `DeltaCapture=true`, gating becomes conditionally viable again, but would
+still need to separately close the three items above (manifest-as-inline-artifact, `installSkillTree`'s
+unconditional `RemoveAll`, the staging-dir wipe) — none of which this bead touched, since the premise
+for needing them (gating being live) did not hold. Do not treat `DeltaCapture=true` as the target
+state to design for; nothing under `deploy/` sets it today.
+
+**Original spike (recorded here for history):** create → suspend → **stop Garage** → resume → `ls`
+the install path + read `apply-report.json`. Kill criterion: skill absent, or home not in the delta →
+gating is unsound; by-ref materialize stays on every start and re-presign (§4.3) becomes load-bearing.
+This is exactly the result the sp-mwco.2.2 D1/D2 probes above produced on the production
+(`DeltaCapture=false`) arm.
 
 ### 4.6 Config surface for caps
 
@@ -186,6 +283,19 @@ an N-member bundle, cold image cache"**, run it in the VM e2e lane, record the n
 assert TTL headroom against *that*. §4.1's parallel fetch shrinks it; §4.3's re-presign is the
 backstop.
 
+**Implementation status (sp-mwco.4.6):** the node now emits the exact StartSpawn → last-GET
+duration as `slog.Info("artifacts: by-ref staging complete", "count", N, "elapsed", d)` from
+`materializeByRef` (`internal/spawnlet/artifacts.go`), and
+`acceptance/tests/customization/skill-staging-s5.spec.ts` measures the create → ACTIVE upper bound
+(an upper bound on StartSpawn → last-GET: ACTIVE also waits out post-staging agent-install/health
+work) over R=5 iterations on a configurable K-member bundle, asserting `max < PresignTTL/3`. **The
+VM-lane run itself has not been executed** — it needs a provisioned e2e VM with real GitHub egress
+(see `docs/e2e-vm-testing.md`) plus a curated set of small public GitHub skill repos
+(`ACC_SKILL_SOURCE_REPOS`), neither of which was available in this implementation session. **This
+gap — no measured number in this section — is tracked as bd `sp-mwco.4.6.1`** (run the VM lane, or
+its `just dev` + `just garage` fallback per the plan's Step 8, and record the number here); it is
+not fabricated in its absence.
+
 ### 4.9 Testing
 
 Hermetic: taxonomy consumption (retryable exhaust / expired-code → re-presign → success /
@@ -206,6 +316,28 @@ hosts; a general log-scrubbing middleware (§4.2 fixes the specific leak that re
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
 
+### Changes vs. original design (2026-07-13, as implemented)
+
+- **The retry/timeout budget was wrong by ~60x** (it ignored the 5-min per-attempt HTTP timeout, a
+  serial `Materialize`, and emitted no progress events, so the CP's 30 s stall timer never reset).
+  Shipped with an aggregate deadline, per-artifact progress heartbeats, parallel fetch, and a
+  node-local sha-keyed cache.
+- **Re-presign triggered on HTTP 403, but Garage returns 400/`InvalidRequest` for an expired presign** —
+  the mechanism was dead on the exact failure it existed to fix. Now keyed on the parsed S3 error
+  `Code`; `AccessDenied`/`SignatureDoesNotMatch` are terminal (a config fault, not a transient).
+- **Re-presign was a cross-tenant presign oracle.** The CP now intersects requested `object_keys` with
+  the spawn's own persisted artifact rows; keys are guessable content hashes, so without this any node
+  with one live spawn could mint bearer GETs for arbitrary skill objects.
+- **The CP start deadline is now PROGRESS-DRIVEN**, not a fixed 60 s wall clock (user decision): a
+  spawn is killed when the node goes quiet, not because the work is slow. The old 60 s deadline was
+  *shorter* than the node's own install budget, so even a healthy bundle install could never reach ACTIVE.
+- **Resume-gating (`sp-nrzf.3.14.8`) was KILLED by its spike**, not deferred: naive gating would have
+  broken every resume (the manifest is inline and still delivered; `installSkillTree`'s `RemoveAll`
+  would have deleted the delta-image copy it was meant to reuse).
+- **A missing signal is no longer a valid state** (`sp-mwco.2.12`): `readApplyReport` treated EACCES
+  identically to "not yet written", so an unreadable report looked like a slow one and only surfaced as
+  a timeout. Only `os.IsNotExist` may poll again; every other error is terminal in seconds.
+
 - **2026-07-12 — roasted (BLOCK) and revised.** Blockers: the retry/timeout math was wrong by ~60×
   and emits no progress events, so bundles break the **happy path** (§4.1); re-presign triggered on
   403 while Garage returns **400/`InvalidRequest`** for an expired presign — dead on arrival (§4.2).
@@ -219,3 +351,65 @@ used.*
   demoted to spike-gated (§4.5); the config allowlist is inert and a security downgrade — dropped
   (§4.6); S5 measured the first GET instead of the last (§4.8); node-side content-addressed cache
   added (§4.1).
+
+- **2026-07-12 — sp-mwco.4.2 Phase 0 spike results** (live dev Garage, `internal/cp/skillstore/presign_expiry_spike_test.go`,
+  build tag `garage_e2e`). Confirms expiry is cleanly distinguishable from a signature/config fault by
+  the parsed S3 error `Code`+`Message` (never the bare HTTP status):
+
+  | Case | HTTP | Code | Message |
+  |---|---|---|---|
+  | Expired presign (1s TTL, slept 2s) | 400 | `InvalidRequest` | `Bad request: Date is too old` |
+  | Tampered `X-Amz-Signature` (fresh presign) | 403 | `AccessDenied` | `Forbidden: Invalid signature` |
+  | Nonexistent key (fresh presign) | 404 | `NoSuchKey` | `Key not found` |
+
+  Note Garage's `AccessDenied` message for a bad signature carries no "expired"/"too old" wording —
+  the classifier's expiry markers (`InvalidRequest`+"too old", or `AccessDenied`+"expired") do not
+  collide with the tampered-signature case. `classifyS3Error` (artifacts.go) implements this table.
+- **2026-07-12 — sp-mwco.4.6 implemented §4.6/§4.7/§4.8.** (a) `WireCapBytes`/`DecompressedCapBytes`/
+  `PlainTarCapBytes`/`FileCountCap`/`HTTPTimeout` moved from `skillfetch` package consts to
+  `skills.*` config (koanf + `SKILLS_*` env aliases), defaults unchanged. `defaultFetcher` (the
+  actual §2.4 roast finding) now takes an explicit `capBytes` parameter instead of closing over the
+  hardcoded const. The effective plain-tar cap is carried on the wire via a new
+  `node.v1.ObjectRef.max_plain_tar_bytes` field, stamped by the CP at `nodeArtifactsForStart` time
+  (`Server.effectiveSkillPlainTarCap`) and consumed verbatim by the node (`ArtifactStager.capFor`) —
+  no local min() against the node's own default, so a CP-side raise takes effect without a node
+  redeploy. (b) Confirmed and pinned: the host allowlist (`fetch.go`'s `allowedHosts`) stays a code
+  constant; `TestConfigCannotAddFetchOriginatingHost` (skillfetch/caps_test.go) asserts origination
+  is fixed by `ParseRepoURL`/`tarballURL`, not by anything in `Config`. (c) `ingestQuota.allow` now
+  returns the remaining window; the rejection message reads `retry after ~Nm`. (d) Node
+  instrumentation for the corrected S5 metric landed (`materializeByRef`'s
+  `"artifacts: by-ref staging complete"` slog line, elapsed since the first by-ref fetch dispatched
+  — i.e. since StartSpawn began staging) plus an acceptance spec
+  (`skill-staging-s5.spec.ts`) that measures create → ACTIVE (an upper bound) over 5 iterations on a
+  configurable K-member bundle and asserts headroom against `PresignTTL/3`. **The VM-lane run was
+  NOT executed in this implementation session** (no provisioned e2e VM + real GitHub egress + curated
+  skill-repo fixture list available); §4.8's "record the number here" is therefore still open —
+  running `GOLDEN_IMAGE=… scripts/e2e-vm/run.sh --profile fake` (or the local dev-stack fallback) and
+  recording the observed max is filed as **bd `sp-mwco.4.6.1`**, a child of this bead, so it isn't
+  silently lost.
+- **2026-07-12 — sp-mwco.4.5: resume gating spike-answered, KILLED, no gating code shipped.** The
+  sp-mwco.2.2 fork/suspend delta spike (D1 image-level + D2 lifecycle-level, same-node-resume
+  mechanism) hit §4.5's own kill criterion on the production (`DeltaCapture=false`) arm — neither
+  `~/.claude/skills` nor `~/.agents/skills` survives a suspend+relaunch without delta capture, and
+  nothing in `deploy/` turns delta capture on. §4.5 was rewritten in place to record the D1/D2 result
+  table and the conclusion (by-ref `Materialize` runs on every start; §4.1's node sha-cache, not
+  gating, is what lets a same-node resume survive a Garage brownout; the residual Garage dependency on
+  resume moved CP-side to `statSkillObjects`); §4.4's now-dangling "interaction with §4.5" bullet was
+  reconciled to match. `internal/cp/lifecycle.go` and `internal/spawnlet/manager.go` are **untouched**
+  — there was no gating code to add. Regression guards for the invariants naive gating would have
+  broken landed as new tests: `internal/spawnlet/artifacts_resume_test.go`
+  (`TestMaterialize_ResumeReStagesEveryByRefArtifact`, verified to go red under a scratch
+  early-return-on-existing-staging-dir gate before being reverted;
+  `TestMaterialize_ResumeServedFromShaCacheWhenFetchFails`) and `internal/cp/artifacts_resume_test.go`
+  (`TestNodeArtifactsForStart_StatsAndPresignsOnEveryCall`,
+  `TestStatSkillObjects_MemoizedShaSurvivesTransportFailure`).
+
+  Two follow-ups surfaced by this work, **not filed as beads here** (the coordinator files them):
+  (a) `DeltaCapture` has no registered default anywhere under `deploy/` — worth an explicit decision
+  on whether silently discarding all agent-home state (not just skills) across every suspend/resume on
+  every production node is intentional, or whether `deploy/` should set `delta.capture=true` and pay
+  the resulting capture-time/storage cost; (b) resume-with-Garage-down is still blocked CP-side by
+  `statSkillObjects` on a COLD CP (nothing memoized yet) even when every node already has the objects
+  cached locally — worth considering persisting the present-sha set across CP restarts, or downgrading
+  a transport-only stat failure to a warning on the resume path specifically, given the node's 404
+  backstop (§4.4's own fallback reasoning) already exists as a second line of defense.

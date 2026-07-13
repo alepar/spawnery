@@ -15,7 +15,7 @@ func newOpencodeEmitter(xdgConfigHome string) opencodeEmitter {
 			layout: AgentLayout{
 				Name:                "opencode",
 				ConfigRoot:          configRoot,
-				SkillPath:           "", // no-op: skills layout unconfirmed (S6)
+				SkillPath:           "", // canonical-only: opencode reads ~/.agents/skills with no glue (sp-mwco.2.2 spike)
 				MCPPath:             configFile,
 				MCPFormat:           FormatJSONC,
 				ConfigPath:          configFile,
@@ -28,21 +28,19 @@ func newOpencodeEmitter(xdgConfigHome string) opencodeEmitter {
 	}
 }
 
-// InstallSkill is a permanent no-op — opencode skills layout unconfirmed (S6).
-func (e opencodeEmitter) InstallSkill(a Artifact, _ Options) Report {
-	return Report{
-		Agent:  e.layout.Name,
-		Kind:   KindSkill,
-		Name:   a.Name,
-		Status: StatusSkipped,
-		Reason: "opencode skills layout unconfirmed (S6)",
-	}
+// InstallSkill installs a skill into the canonical ~/.agents/skills/<name>/ dir only —
+// opencode needs no per-agent glue beyond the canonical phase (sp-mwco.2.2 spike,
+// 2026-07-12: file-level and behavioral read confirmed with zero extra config).
+func (e opencodeEmitter) InstallSkill(a Artifact, opts Options) Report {
+	return installSkill(e.layout, a, opts)
 }
 
-// Capabilities returns the support matrix for opencode: skill=no-op, mcp+config+instructions=supported, plugin=best-effort.
+// Capabilities returns the support matrix for opencode: skill=supported (native,
+// file-level AND behavioral read confirmed with zero extra config — sp-mwco.2.2 spike),
+// mcp+config+instructions=supported, plugin=best-effort.
 func (e opencodeEmitter) Capabilities() map[Kind]CapabilityStatus {
 	return map[Kind]CapabilityStatus{
-		KindSkill:            CapStatusNoOp,
+		KindSkill:            CapStatusSupported,
 		KindMCP:              CapStatusSupported,
 		KindConfig:           CapStatusSupported,
 		KindPlugin:           CapStatusBestEffort,

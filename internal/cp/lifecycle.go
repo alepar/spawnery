@@ -800,6 +800,11 @@ func (s *Server) resumeLocked(ctx context.Context, owner, id string, ov placemen
 		return "", connect.NewError(connect.CodeInternal, err)
 	}
 	defer s.provisioning.clear(id)
+	// A fresh provisioning attempt starts here: drop any skill-install report from a prior
+	// episode NOW (not deferred — unlike provisioning, skillInstalls stays visible past ACTIVE,
+	// so clearing it at function-return would wipe the new episode's own report right after the
+	// node sends it) so a spawn resumed without artifacts doesn't keep showing a stale one.
+	s.skillInstalls.clear(id)
 
 	// Transition Starting→Resuming under the held claim (lease+seq+gen fenced). Sweepers now read
 	// Resuming and skip this spawn during the provision round-trip.
@@ -1237,6 +1242,9 @@ func (s *Server) RecreateSpawn(ctx context.Context, req *connect.Request[cpv1.Re
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	defer s.provisioning.clear(req.Msg.SpawnId)
+	// See resumeLocked's comment: eager (not deferred) so it doesn't wipe this episode's own
+	// report right after the node sends it.
+	s.skillInstalls.clear(req.Msg.SpawnId)
 	placement.Image = sp.Image
 
 	// A4 two-phase sign-after-resolve [AC1]: pick node → register pending intent → await client.
@@ -1396,6 +1404,7 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			TransitionPhase: transPhase, TransitionDetail: transDetail,
 			ProvisionStep: provStep, ProvisionTotal: provTotal, ProvisionStepLabel: provLabel,
 			ErrorStep: sp.ErrorStep, ErrorDetail: sp.ErrorDetail,
+			SkillInstalls: skillInstallsToProto(s.skillInstalls, sp.ID),
 		}
 		if sp.ParentSpawnID != nil {
 			out[i].ParentSpawnId = *sp.ParentSpawnID

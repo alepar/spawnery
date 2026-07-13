@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
@@ -71,7 +70,7 @@ func main() {
 
 	reg := registry.New()
 	rt := router.New()
-	sched := scheduler.New(reg, rt, 60*time.Second)
+	sched := scheduler.New(reg, rt, scheduler.DefaultStartStallWindow)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -172,6 +171,7 @@ func main() {
 
 	srv := cp.NewServer(reg, rt, sched, st, tel)
 	srv.SetMaxSpawnsPerOwner(cfg.MaxSpawnsPerOwner)
+	srv.SetAdminOwners(splitTrim(cfg.AdminOwners, ","))
 	srv.SetSessionRegistry(sessions)
 	srv.SetVerify(verifier.Verify)
 	srv.SetDevMode(devMode)
@@ -260,10 +260,15 @@ func main() {
 			log.Fatalf("cp: build skill store: %v", err)
 		}
 		fetcher := skillfetch.New(skillfetch.Config{
-			GitHubToken: string(cfg.Skills.GitHubToken),
-			ZstdLevel:   cfg.Skills.ZstdLevel,
+			GitHubToken:          string(cfg.Skills.GitHubToken),
+			ZstdLevel:            cfg.Skills.ZstdLevel,
+			WireCapBytes:         cfg.Skills.WireCapBytes,
+			DecompressedCapBytes: cfg.Skills.DecompressedCapBytes,
+			PlainTarCapBytes:     cfg.Skills.PlainTarCapBytes,
+			FileCountCap:         cfg.Skills.FileCountCap,
+			HTTPTimeout:          cfg.Skills.HTTPTimeout,
 		})
-		srv.SetSkillIngest(fetcher, ss)
+		srv.SetSkillIngest(fetcher, ss, cfg.Skills.PlainTarCapBytes)
 		log.Printf("cp: skill ingest wired (endpoint=%s bucket=%s)", ep, ssCfg.Bucket)
 	}
 

@@ -11,7 +11,7 @@ func TestRegistryNames(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": "/home/test"}
 	reg := agentinstall.NewRegistry(env)
 	names := reg.Names()
-	want := []string{"claude", "codex", "opencode", "hermes", "goose"}
+	want := []string{"claude", "codex", "opencode", "hermes", "goose", "pi"}
 	if len(names) != len(want) {
 		t.Fatalf("Names() = %v, want %v", names, want)
 	}
@@ -26,7 +26,7 @@ func TestRegistryLookup(t *testing.T) {
 	env := agentinstall.MapEnviron{"HOME": "/home/test"}
 	reg := agentinstall.NewRegistry(env)
 
-	for _, name := range []string{"claude", "codex", "opencode", "hermes", "goose"} {
+	for _, name := range []string{"claude", "codex", "opencode", "hermes", "goose", "pi"} {
 		e, ok := reg.Lookup(name)
 		if !ok {
 			t.Errorf("Lookup(%q) not found", name)
@@ -49,8 +49,8 @@ func TestRegistryLayouts(t *testing.T) {
 	reg := agentinstall.NewRegistry(env)
 	layouts := reg.Layouts()
 
-	if len(layouts) != 5 {
-		t.Fatalf("expected 5 layouts, got %d", len(layouts))
+	if len(layouts) != 6 {
+		t.Fatalf("expected 6 layouts, got %d", len(layouts))
 	}
 
 	// Build a map for easier lookup.
@@ -83,6 +83,8 @@ func TestRegistryLayouts(t *testing.T) {
 	t.Run("opencode", func(t *testing.T) {
 		l := lm["opencode"]
 		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".config", "opencode"))
+		// Canonical-only: opencode has no native skill copy (sp-mwco.2.2 spike).
+		assertPath(t, "SkillPath", l.SkillPath, "")
 		assertPath(t, "MCPPath", l.MCPPath, filepath.Join(home, ".config", "opencode", "opencode.json"))
 		assertFormat(t, "MCPFormat", l.MCPFormat, agentinstall.FormatJSONC)
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".config", "opencode", "opencode.json"))
@@ -92,7 +94,10 @@ func TestRegistryLayouts(t *testing.T) {
 	t.Run("hermes", func(t *testing.T) {
 		l := lm["hermes"]
 		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".hermes"))
-		assertPath(t, "SkillPath", l.SkillPath, filepath.Join(home, ".agents", "skills"))
+		// Canonical-only: ~/.agents/skills is the implicit canonical dir, not a
+		// hermes-specific native copy; hermes reads it via a config.yaml upsert
+		// (sp-mwco.2.5), not a second copy.
+		assertPath(t, "SkillPath", l.SkillPath, "")
 		assertPath(t, "MCPPath", l.MCPPath, filepath.Join(home, ".hermes", "config.yaml"))
 		assertFormat(t, "MCPFormat", l.MCPFormat, agentinstall.FormatYAML)
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".hermes", "config.yaml"))
@@ -102,11 +107,48 @@ func TestRegistryLayouts(t *testing.T) {
 	t.Run("goose", func(t *testing.T) {
 		l := lm["goose"]
 		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".config", "goose"))
+		// Canonical-only: goose has no native skill copy (sp-mwco.2.2 spike).
+		assertPath(t, "SkillPath", l.SkillPath, "")
 		assertPath(t, "MCPPath", l.MCPPath, filepath.Join(home, ".config", "goose", "config.yaml"))
 		assertFormat(t, "MCPFormat", l.MCPFormat, agentinstall.FormatYAML)
 		assertPath(t, "ConfigPath", l.ConfigPath, filepath.Join(home, ".config", "goose", "config.yaml"))
 		assertFormat(t, "ConfigFormat", l.ConfigFormat, agentinstall.FormatYAML)
 	})
+
+	t.Run("pi", func(t *testing.T) {
+		l := lm["pi"]
+		assertPath(t, "ConfigRoot", l.ConfigRoot, filepath.Join(home, ".pi"))
+		// Canonical-only, and vestigial paths stay blank (no false trails, §4.3):
+		// pi reads ~/.agents/skills natively with no glue (sp-mwco.2.2 spike).
+		assertPath(t, "SkillPath", l.SkillPath, "")
+		assertPath(t, "MCPPath", l.MCPPath, "")
+		assertPath(t, "ConfigPath", l.ConfigPath, "")
+	})
+}
+
+// TestRegistrySkillPathCanonicalVsNativeCopy locks D1's semantics: claude/codex keep a
+// real native-copy SkillPath (in addition to the canonical dir), opencode/hermes/goose
+// stay canonical-only (SkillPath == "").
+func TestRegistrySkillPathCanonicalVsNativeCopy(t *testing.T) {
+	home := "/home/testuser"
+	env := agentinstall.MapEnviron{"HOME": home}
+	reg := agentinstall.NewRegistry(env)
+	lm := make(map[string]agentinstall.AgentLayout)
+	for _, l := range reg.Layouts() {
+		lm[l.Name] = l
+	}
+
+	for _, name := range []string{"claude", "codex"} {
+		if lm[name].SkillPath == "" {
+			t.Errorf("%s: SkillPath should be non-empty (native copy target)", name)
+		}
+	}
+
+	for _, name := range []string{"opencode", "hermes", "goose", "pi"} {
+		if lm[name].SkillPath != "" {
+			t.Errorf("%s: SkillPath should be empty (canonical-only), got %q", name, lm[name].SkillPath)
+		}
+	}
 }
 
 func TestRegistryLayoutsWithCodexHome(t *testing.T) {

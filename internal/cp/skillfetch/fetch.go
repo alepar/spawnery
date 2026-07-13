@@ -15,6 +15,14 @@ import (
 
 // allowedHosts is the set of hostnames permitted for fetching GitHub tarballs.
 // Each redirect hop must have its target host in this set (§4.9).
+//
+// This is a CODE CONSTANT, deliberately not config-surfaced (§4.6(b)). It cannot widen where a
+// fetch may *originate* — that is pinned by ParseRepoURL (rejects any host != github.com) and
+// tarballURL (hardcodes https://api.github.com/...) — so as a config knob it would be inert for
+// its only plausible purpose ("let me ingest from host X") while being a pure security downgrade
+// for its actual scope: the set of hosts a GitHub redirect chain is permitted to leave GitHub for.
+// Here, ADDITION is the risk, not omission — an append-only config knob defends the wrong failure
+// mode. See caps_test.go TestConfigCannotAddFetchOriginatingHost.
 var allowedHosts = map[string]bool{
 	"github.com":          true,
 	"api.github.com":      true,
@@ -47,13 +55,18 @@ func (e *ErrUpstreamFailed) Unwrap() error { return e.Cause }
 
 // secureClient is an HTTP client with per-hop host allowlisting and IP-range blocking.
 type secureClient struct {
-	client *http.Client
+	client    *http.Client
+	wireCap   int64 // max compressed body size; see Config.WireCapBytes
+	decompCap int64 // max decompressed size; see Config.DecompressedCapBytes
+	fileCap   int   // max tar entry count; see Config.FileCountCap
 }
 
 // newSecureClient creates a secure HTTP client that:
 //   - validates each redirect hop's host against the allowlist
 //   - resolves the target host and rejects private/loopback/link-local/metadata IPs
-func newSecureClient() *secureClient {
+//
+// cfg's caps and timeout are assumed already defaulted (New fills zeros before calling this).
+func newSecureClient(cfg Config) *secureClient {
 	transport := &http.Transport{
 		DialContext:           blockedDialContext(),
 		TLSHandshakeTimeout:   30 * time.Second,
@@ -62,7 +75,7 @@ func newSecureClient() *secureClient {
 	}
 	c := &http.Client{
 		Transport: transport,
-		Timeout:   HTTPTimeout,
+		Timeout:   cfg.HTTPTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
 				return fmt.Errorf("too many redirects (max %d)", maxRedirects)
@@ -74,7 +87,12 @@ func newSecureClient() *secureClient {
 			return nil
 		},
 	}
-	return &secureClient{client: c}
+	return &secureClient{
+		client:    c,
+		wireCap:   cfg.WireCapBytes,
+		decompCap: cfg.DecompressedCapBytes,
+		fileCap:   cfg.FileCountCap,
+	}
 }
 
 // blockedDialContext returns a DialContext that resolves the target address and rejects
@@ -134,18 +152,101 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
+// skippedEntry records a non-regular tar entry (symlink, hardlink, device, fifo) that was
+// skipped rather than unpacked. path is wrapper-stripped and subdir-relative, in the same
+// coordinate system as tarEntry.path.
+type skippedEntry struct {
+	path string
+	kind string
+}
+
+// unpackResult is the outcome of fetchAndUnpack: the in-memory entries, any skipped non-regular
+// entries, and the source commit recovered from the GitHub wrapper dir (§4.9 commit pinning).
+type unpackResult struct {
+	entries      []tarEntry
+	skipped      []skippedEntry
+	sourceCommit string
+	// etag is the response ETag header from a 200 (§4.8 conditional refetch); "" if absent or on
+	// an unconditional fetch. Never set on a notModified result.
+	etag string
+	// notModified is true iff the request carried an If-None-Match etag and the server replied
+	// HTTP 304: entries/skipped/sourceCommit/etag are all zero, no body was read. Callers MUST
+	// check this before interpreting a zero-value unpackResult as an empty tree.
+	notModified bool
+}
+
+// sourceCommitFromWrapper extracts the commit sha from a GitHub tarball wrapper dir name
+// (e.g. "owner-repo-abc1234" -> "abc1234"). GitHub always wraps a tarball in
+// "<owner>-<repo>-<sha>/"; the sha is the last '-'-separated segment. Returns "" (not an error)
+// when the wrapper isn't GitHub-shaped — e.g. a synthetic test fixture, or a repo/owner name
+// itself containing no trailing sha-shaped segment — since an unknown commit must not fail the
+// fetch.
+func sourceCommitFromWrapper(wrapperPrefix string) string {
+	dir := strings.TrimSuffix(wrapperPrefix, "/")
+	idx := strings.LastIndex(dir, "-")
+	if idx < 0 {
+		return ""
+	}
+	sha := dir[idx+1:]
+	if len(sha) < 7 {
+		return ""
+	}
+	for _, c := range sha {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return ""
+		}
+	}
+	return sha
+}
+
+// nonRegularKind classifies a tar typeflag that is neither a regular file/dir nor a PAX header.
+// ok is false when the typeflag doesn't match a known kind; callers should render an "unknown"
+// kind (including the raw typeflag) in that case.
+func nonRegularKind(typeflag byte) (kind string, ok bool) {
+	switch typeflag {
+	case tar.TypeSymlink:
+		return "symlink", true
+	case tar.TypeLink:
+		return "hardlink", true
+	case tar.TypeChar:
+		return "chardev", true
+	case tar.TypeBlock:
+		return "blockdev", true
+	case tar.TypeFifo:
+		return "fifo", true
+	default:
+		return "", false
+	}
+}
+
 // fetchAndUnpack downloads the tarball from rawURL, gunzips, strips the GitHub wrapper dir,
-// descends into subdir if given, and returns the in-memory entries.
+// descends into subdir if given, and returns the in-memory entries plus any non-regular entries
+// (symlink, hardlink, device, fifo) that were skipped rather than unpacked, plus the source commit
+// recovered from the wrapper dir.
 // It enforces streaming bounds before any buffering.
-func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir string) ([]tarEntry, error) {
+//
+// This is the unconditional fetch: it never sends If-None-Match and its result never has
+// notModified=true. See fetchAndUnpackConditional for the etag-aware variant (§4.8).
+func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir string) (unpackResult, error) {
+	return s.fetchAndUnpackConditional(ctx, rawURL, token, subdir, "")
+}
+
+// fetchAndUnpackConditional is fetchAndUnpack plus §4.8 conditional-refetch support: when etag is
+// non-empty it is sent as If-None-Match, and a 304 response short-circuits to
+// unpackResult{notModified: true} — no body read, no gzip/tar parse. etag == "" behaves exactly
+// like fetchAndUnpack (no conditional header sent; a 304 is impossible without one).
+func (s *secureClient) fetchAndUnpackConditional(ctx context.Context, rawURL, token, subdir, etag string) (unpackResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return unpackResult{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
 	}
 
 	resp, err := s.client.Do(req)
@@ -155,36 +256,41 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		if ue, ok := err.(*url.Error); ok {
 			inner = ue.Err
 		}
-		return nil, &ErrUpstreamFailed{Cause: fmt.Errorf("fetch %s: %w", redactURL(rawURL), inner)}
+		return unpackResult{}, &ErrUpstreamFailed{Cause: fmt.Errorf("fetch %s: %w", redactURL(rawURL), inner)}
 	}
 	defer resp.Body.Close()
 
+	respETag := ""
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// continue
+		respETag = resp.Header.Get("ETag")
+	case http.StatusNotModified:
+		// §4.8: upstream confirms no change since etag. No body to read (or an empty one — GitHub
+		// sends none on a 304), no repack, no Garage put, no DB write.
+		return unpackResult{notModified: true}, nil
 	case http.StatusTooManyRequests:
 		retryAfter := resp.Header.Get("Retry-After")
-		return nil, &ErrRateLimit{RetryAfter: retryAfter}
+		return unpackResult{}, &ErrRateLimit{RetryAfter: retryAfter}
 	default:
 		if resp.StatusCode >= 500 {
 			// GitHub server-side error — transient upstream failure, not bad client input.
-			return nil, &ErrUpstreamFailed{Cause: fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))}
+			return unpackResult{}, &ErrUpstreamFailed{Cause: fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))}
 		}
-		return nil, fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))
+		return unpackResult{}, fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, redactURL(rawURL))
 	}
 
 	// Wire cap on compressed body
-	wireReader := &io.LimitedReader{R: resp.Body, N: WireCapBytes + 1}
+	wireReader := &io.LimitedReader{R: resp.Body, N: s.wireCap + 1}
 
 	// gzip decode
 	gz, err := gzip.NewReader(wireReader)
 	if err != nil {
-		return nil, fmt.Errorf("gzip init: %w", err)
+		return unpackResult{}, fmt.Errorf("gzip init: %w", err)
 	}
 	defer gz.Close()
 
 	// Decompressed size cap (enforced streaming, before any parse)
-	decompReader := &io.LimitedReader{R: gz, N: DecompressedCapBytes + 1}
+	decompReader := &io.LimitedReader{R: gz, N: s.decompCap + 1}
 
 	tr := tar.NewReader(decompReader)
 
@@ -192,6 +298,7 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 	wrapperPrefix := ""
 	fileCount := 0
 	var entries []tarEntry
+	var skipped []skippedEntry
 
 	for {
 		hdr, err := tr.Next()
@@ -199,30 +306,37 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("tar read: %w", err)
+			return unpackResult{}, fmt.Errorf("tar read: %w", err)
 		}
 
 		// Check decompressed cap
 		if decompReader.N <= 0 {
-			return nil, fmt.Errorf("decompressed tarball exceeds cap (%d bytes)", DecompressedCapBytes)
+			return unpackResult{}, fmt.Errorf("decompressed tarball exceeds cap (%d bytes)", s.decompCap)
 		}
 		// Check wire cap
 		if wireReader.N <= 0 {
-			return nil, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", WireCapBytes)
+			return unpackResult{}, fmt.Errorf("compressed tarball exceeds wire cap (%d bytes)", s.wireCap)
 		}
 
-		// Reject non-regular entries; silently skip PAX metadata headers.
+		// Classify the entry type. Non-regular entries (symlink, hardlink, device, fifo, and
+		// anything else unrecognized) are NOT rejected here — they are carried through
+		// wrapper-strip, subdir filtering, and safeRelPath below (so an attack path in a
+		// symlink's NAME still hard-rejects the fetch), then recorded as skipped and never
+		// unpacked. hdr.Linkname is never read and no link is ever written.
+		skipKind := ""
 		switch hdr.Typeflag {
 		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
 			// allowed
 		case tar.TypeXHeader, tar.TypeXGlobalHeader:
-			// PAX extended headers — metadata only, no data; skip silently.
+			// PAX extended headers — metadata only, no data; skip silently (never reported).
 			// GitHub tarballs routinely include a pax_global_header entry.
 			continue
-		case tar.TypeSymlink, tar.TypeLink:
-			return nil, fmt.Errorf("symlink/hardlink entries are not allowed (entry %q)", hdr.Name)
 		default:
-			return nil, fmt.Errorf("non-regular tar entry type %d rejected (entry %q)", hdr.Typeflag, hdr.Name)
+			kind, ok := nonRegularKind(hdr.Typeflag)
+			if !ok {
+				kind = fmt.Sprintf("unknown(%d)", hdr.Typeflag)
+			}
+			skipKind = kind
 		}
 
 		// Strip wrapper prefix (first entry gives us the wrapper dir)
@@ -256,16 +370,25 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 			continue
 		}
 
-		// Validate path safety
+		// Validate path safety. This still applies to skipped entries — an absolute or ".."
+		// path in a symlink/hardlink header is an attack, not repo hygiene, and hard-rejects.
 		cleaned, err := safeRelPath(entryName)
 		if err != nil {
-			return nil, err
+			return unpackResult{}, err
 		}
 		entryName = cleaned
 
 		fileCount++
-		if fileCount > FileCountCap {
-			return nil, fmt.Errorf("too many files in tarball (max %d)", FileCountCap)
+		if fileCount > s.fileCap {
+			return unpackResult{}, fmt.Errorf(
+				"too many files in tarball: exceeds the %d-entry file-count cap (this is the binding "+
+					"cap for multi-skill repos — it is hit long before the size caps); scope the ingest "+
+					"to a skills directory with subdir", s.fileCap)
+		}
+
+		if skipKind != "" {
+			skipped = append(skipped, skippedEntry{path: entryName, kind: skipKind})
+			continue
 		}
 
 		if hdr.Typeflag == tar.TypeDir {
@@ -278,9 +401,9 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		}
 
 		// Read file content with per-file cap (same decompressed budget)
-		content, err := io.ReadAll(io.LimitReader(tr, DecompressedCapBytes))
+		content, err := io.ReadAll(io.LimitReader(tr, s.decompCap))
 		if err != nil {
-			return nil, fmt.Errorf("read entry %q: %w", hdr.Name, err)
+			return unpackResult{}, fmt.Errorf("read entry %q: %w", hdr.Name, err)
 		}
 
 		entries = append(entries, tarEntry{
@@ -291,7 +414,12 @@ func (s *secureClient) fetchAndUnpack(ctx context.Context, rawURL, token, subdir
 		})
 	}
 
-	return entries, nil
+	return unpackResult{
+		entries:      entries,
+		skipped:      skipped,
+		sourceCommit: sourceCommitFromWrapper(wrapperPrefix),
+		etag:         respETag,
+	}, nil
 }
 
 // redactURL strips the path from a URL for safe logging (avoids leaking tokens in query strings).

@@ -350,6 +350,15 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 	if len(cfg.DeltaScrubPaths) == 0 {
 		cfg.DeltaScrubPaths = []string{"/var/cache/apt", "/var/lib/apt/lists", "/tmp"}
 	}
+	// agentUID mirrors (*Manager).agentRootUID(), computed here since Manager doesn't exist yet:
+	// the ArtifactStager needs it at construction to chown its report/ subdir (sp-mwco.2.7).
+	agentUID := -1
+	switch cfg.UsernsMode {
+	case "remap":
+		agentUID = int(cfg.UsernsRemapBase)
+	case "native":
+		agentUID = 0
+	}
 	m := &Manager{
 		pod:             pod,
 		cfg:             cfg,
@@ -357,7 +366,7 @@ func NewManagerWithBackend(pod runtime.PodBackend, fw firewall.Applier, cfg Mana
 		backendResolver: storage.NewSchemeResolverWithGitHub(cfg.DataRoot, nil),
 		fw:              fw,
 		secrets:         SecretInjector{Root: cfg.SecretsRoot},
-		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot},
+		artifacts:       ArtifactStager{Root: cfg.ArtifactsRoot, CacheDir: filepath.Join(cfg.DataRoot, "artifact-cache"), AgentUID: agentUID},
 		gitEnv:          GitEnv{Root: cfg.GitEnvRoot},
 		githubCreds:     GitHubCredentialStore{Root: cfg.GitHubCredentialsRoot},
 		deltaState:      &deltaStateStore{dir: filepath.Join(cfg.DataRoot, "delta-state")},
@@ -690,6 +699,38 @@ func (m *Manager) TmuxHasSession(ctx context.Context, agentID, session string) (
 	return false, fmt.Errorf("tmux has-session: %w", err)
 }
 
+// AgentRunning reports whether spawnID's agent container is still running, by running a trivial
+// no-op (`true`) non-interactively inside it — used by the node's AwaitApplyReport liveness probe
+// (sp-mwco.2.12 ITEM D) to end the wait as soon as the agent is confirmed gone, instead of sitting
+// out a timeout that a dead container was never going to satisfy. Returns (true, nil) on exit 0,
+// (false, nil) when the exec runs but the container is gone (docker/crictl exec exits non-zero —
+// same convention as TmuxHasSession), and (false, err) when the exec itself could not even be
+// launched (daemon unreachable, binary missing, unknown spawn) — an "unknown" result the caller
+// must not treat as death.
+//
+// RATIONALE: this reuses the existing exec seam (same as TmuxHasSession) rather than growing
+// PodBackend a new AgentRunning method across the Docker + CRI backends and every test fake. Cost:
+// a docker/crictl-daemon outage looks identical to "container gone" — but a dead daemon means the
+// spawn is doomed anyway, and AwaitApplyReport's two-consecutive-false rule plus the injectable
+// probe on the attacher (internal/node) make a later swap to a proper backend inspect a
+// contained, one-seam change if that ambiguity ever needs resolving.
+func (m *Manager) AgentRunning(ctx context.Context, spawnID string) (bool, error) {
+	sp, ok := m.store.Get(spawnID)
+	if !ok || sp.AgentID == "" {
+		return false, fmt.Errorf("spawn %s has no agent container", spawnID)
+	}
+	argv := execArgv(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime), sp.AgentID, []string{"true"})
+	err := exec.CommandContext(ctx, argv[0], argv[1:]...).Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return false, nil // exec ran but the container/exec target is gone
+	}
+	return false, fmt.Errorf("agent running probe: %w", err)
+}
+
 // TmuxAttachArgvFor resolves spawnID's agent container and returns the argv to `exec -it <container>
 // tmux attach -t <session>` — the per-(spawn,session) mosh relay attach for an additional session
 // (sp-npxq.3). Like TmuxAttachArgv but spawn-id keyed (the node holds the spawn id, not the Spawn).
@@ -914,6 +955,10 @@ type AgentSelection struct {
 	// resume). Non-sensitive artifacts are materialized into the staging tmpfs at ArtifactsMountPath;
 	// sensitive+inline artifacts are routed to the secrets tmpfs. Converted from proto by the node.
 	Artifacts []Artifact
+	// RepresignFunc mints a fresh presigned URL for a by-ref artifact whose GET failed because the
+	// presign expired (sp-mwco.4.2; set by internal/node over the Attach stream — sp-mwco.4.3).
+	// nil ⇒ an expired presign is Terminal instead of recovered.
+	RepresignFunc RepresignFunc
 	// BeforeStartAgent runs after the sidecar pod and pre-agent prep complete, immediately before the
 	// untrusted agent starts. It can stage spawn-local secrets before the spawn is visible in the store.
 	BeforeStartAgent func(context.Context, PreAgentContext) error
@@ -1274,10 +1319,14 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	// ArtifactsRoot, bind-mounted at ArtifactsMountPath. Re-applied idempotently on every create/resume
 	// (artifacts are create-time-declared but durable across the spawn's life). Sensitive artifacts are
 	// routed to the secrets tmpfs (0600) by Materialize, never landed here.
-	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets); err != nil {
+	if err := m.artifacts.Materialize(ctx, id, sel.Artifacts, m.secrets, sel.ProgressFunc, sel.RepresignFunc); err != nil {
 		finalizeAll()
 		cleanupSpawnDirs()
-		return nil, fmt.Errorf("prepare artifacts: %w", err)
+		// %s of the SAFE message, not %w of the raw chain: err may wrap a *FetchError whose cause is
+		// a *url.Error carrying the presigned URL's X-Amz-Signature query. This return value is what
+		// internal/node's attach.go stringifies into SpawnStatus.Detail, which the CP persists to the
+		// DB and renders in the web UI (sp-mwco.4.2) — it must never carry the presigned URL.
+		return nil, fmt.Errorf("prepare artifacts: %s", SafeErrorMessage(err))
 	}
 	mounts = append(mounts, runtime.Mount{HostPath: m.artifacts.DirFor(id), ContainerPath: ArtifactsMountPath, SELinuxRelabelShared: true})
 
@@ -1610,6 +1659,11 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			"GIT_CONFIG_NOSYSTEM=1",
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_ASKPASS=/bin/false",
+			// SECRET_WAIT_TIMEOUT: keeps apply-artifacts.sh's --secret-wait-timeout in lockstep with
+			// ApplyReportBudget (sp-mwco.2.12 ITEM A) — the shell default (apply-artifacts.sh's own
+			// SECRET_WAIT_TIMEOUT="${SECRET_WAIT_TIMEOUT:-30s}") stays as a fallback for a hand-run
+			// container, but the node always sets it explicitly so the two constants can't drift.
+			"SECRET_WAIT_TIMEOUT=" + SecretWaitTimeout.String(),
 		}, gitProxyEnv...),
 		Mounts:      mounts,
 		Resources:   res,

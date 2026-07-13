@@ -37,6 +37,7 @@ import (
 	"spawnery/internal/cp/store"
 	"spawnery/internal/cp/telemetry"
 	"spawnery/internal/intent"
+	"spawnery/internal/safego"
 )
 
 // reconcileAttempt tracks, for one spawn, when the reconciler first started trying to apply the
@@ -78,6 +79,11 @@ type Server struct {
 	// lost on CP restart. Updated by the node status handler; read by ListSpawns + provisionSpawn.
 	provisioning *provisioningProgress
 
+	// skillInstalls tracks the latest per-spawn skill-install report (sp-mwco.2.7). Ephemeral,
+	// generation-fenced; see skillInstalls doc comment for how its clearing differs from
+	// provisioning's.
+	skillInstalls *skillInstalls
+
 	// upgradeWaiters correlates UpgradeToOwnerSealed requests with SealJournalKeyToOwnerResponse
 	// messages from the node (sp-8dkp §4). Keyed by per-request request_id.
 	upgradeWaiters *upgradeWaiters
@@ -90,6 +96,12 @@ type Server struct {
 	giveUp            map[string]reconcileAttempt // spawn id -> first-attempt time for current model; reconciler-goroutine-only (no lock)
 
 	maxSpawnsPerOwner int
+
+	// adminOwners is the fail-closed allowlist of account ids permitted to publish catalog entries
+	// to the global catalog (PublishCatalogEntry/PublishBundle) and to (re)list via the legacy
+	// SetCatalogListing(listed=true) verb (sp-mwco.3.4 §4.6 D3). nil/empty means nobody is an
+	// admin — publish is simply unavailable. dev mode does NOT imply admin.
+	adminOwners map[string]struct{}
 
 	// nodeKeys caches each node's published HPKE sub-key + relayed cert chain (sp-2ckv.4), refreshed on
 	// Register/Heartbeat. GetSpawnNodeKey serves it to owner clients; the CP relays — never unseals.
@@ -146,6 +158,38 @@ type Server struct {
 	// cmd/spawnery_cp wires these via SetSkillIngest when Garage is configured.
 	skillFetcher skillfetch.Fetcher
 	skillStore   skillstore.SkillStore
+	// skillPlainTarCap is the CP-enforced effective decoded-tar cap for skill artifacts
+	// (sp-mwco.4.6), stamped onto every by-ref ObjectRef's MaxPlainTarBytes at StartSpawn so the
+	// node obeys the SAME cap the CP enforced at ingest. 0 (unset; SetSkillIngest not called, or
+	// called with 0) falls back to skillfetch.DefaultPlainTarCapBytes — a live CP always states
+	// its cap on the wire, never 0.
+	skillPlainTarCap int64
+
+	// represigns rate-limits RepresignArtifactsRequest per spawn (sp-mwco.4.3): the CP re-presign
+	// choke point for a node whose by-ref artifact GET failed with an expired URL.
+	represigns *represignLimiter
+
+	// skillPresent memoizes shas the HEAD-before-presign gate (sp-mwco.4.4, artifacts.go
+	// statSkillObjects) has confirmed present in the skill store: sha256hex -> struct{}.
+	// POSITIVE ONLY — objects are immutable and content-addressed, so "present" is forever
+	// true, but a missing object may become present later (a later ingest), so a miss must
+	// NEVER be cached. Zero-value sync.Map is ready to use; no constructor wiring needed.
+	skillPresent sync.Map
+
+	// reingestBudget is the CP-wide (NOT per-owner) rolling-window counter on ReingestBundle's
+	// upstream refetch (sp-mwco.1.7 §4.8): GitHub's ~60/hr rate limit is per source IP, and the CP
+	// egresses from one IP shared across every owner's ReingestBundle, so the per-owner
+	// ingestQuota alone does not bound the aggregate. Charged before the fetch, never refunded on
+	// a 304. Held as a field (not a package var) so tests can shrink it.
+	reingestBudget *refetchBudget
+
+	// bundleDiffGate is the in-memory, TTL'd registry of diff tokens, minted by ReingestBundle
+	// (unviewed) or by GetBundleDiff (viewed — the view IS the gate, sp-mwco.1.13) and consumed by
+	// assertDiffViewed (sp-mwco.1.7 §4.9 — the diff IS the supply-chain gate on re-pin;
+	// sp-mwco.1.8's re-pin RPC is assertDiffViewed's caller). Ephemeral: a CP restart invalidates
+	// every token and fails closed (no token, no re-pin) — but GetBundleDiff mints a fresh one on
+	// demand, so a stale pin is never stuck.
+	bundleDiffGate *diffGate
 
 	// ForkSpawn seams. NewServer wires the same-node materializer and an interim zero-footprint
 	// estimator (zeroForkFootprint); the estimator is fail-closed when nil because CP cannot yet
@@ -218,7 +262,9 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		suspends: newSuspendWaiters(), suspendTimeout: defaultSuspendTimeout, suspendStallWindow: defaultSuspendStallWindow,
 		resumes: newResumeWaiters(), resumeTimeout: defaultResumeTimeout, resumeStallWindow: defaultResumeStallWindow,
 		provisioning:      newProvisioningProgress(),
+		skillInstalls:     newSkillInstalls(),
 		upgradeWaiters:    newUpgradeWaiters(),
+		represigns:        newRepresignLimiter(),
 		reconcileInterval: defaultReconcileInterval, reconcileGiveUp: defaultReconcileGiveUp,
 		now: time.Now, giveUp: map[string]reconcileAttempt{}, nodeKeys: newNodeKeyCache(),
 		journalKeys: journalkeys.NewMemStore(), ownerDevices: journalkeys.NewMemDeviceRegistry(),
@@ -236,6 +282,8 @@ func NewServer(reg *registry.Registry, rt *router.Router, sched *scheduler.Sched
 		// devMode=true is the safe default: production explicitly calls SetDevMode(false) after
 		// confirming auth mode. Tests that don't call SetDevMode get dev mode (no intent enforcement).
 		devMode: true}
+	s.reingestBudget = newRefetchBudget(refetchBudgetMax, refetchBudgetWindow)
+	s.bundleDiffGate = newDiffGate()
 	s.forkMaterializer = newSameNodeForkMaterializer(s, defaultForkMaterializeTimeout)
 	// Interim zero-footprint estimator: CP cannot yet measure a source spawn's disk footprint,
 	// so headroom enforcement is disabled (see zeroForkFootprint). Without this, forking fails
@@ -591,7 +639,57 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				Phase:      m.ResumeProgress.GetPhase(),
 				Detail:     m.ResumeProgress.GetDetail(),
 			})
+			// ALSO feed the scheduler's in-flight Provision stall detector (sp-mwco.4.8): the node
+			// emits these same heartbeats on the fresh-create/StartSpawn path (attach.go's
+			// startSpawn), which resume's detector never sees. The two are independent and
+			// non-consuming; on the resume path they nest and both reset on progress, harmless —
+			// lifecycle's resumeWaiters remains the one that owns the store-side failure transition.
+			s.sched.Progress(m.ResumeProgress.GetSpawnId(), m.ResumeProgress.GetGeneration())
+		case *nodev1.NodeMessage_SkillInstallReport:
+			// Per-skill install status (sp-mwco.2.7): generation-fenced (skillInstalls.set drops
+			// a report older than the currently-recorded generation for this spawn).
+			s.skillInstalls.set(m.SkillInstallReport.GetSpawnId(), m.SkillInstallReport.GetGeneration(),
+				skillInstallEntriesFromProto(m.SkillInstallReport.GetEntries()))
+		case *nodev1.NodeMessage_RepresignArtifactsRequest:
+			// The FIRST node-initiated request/response pair on Attach (sp-mwco.4.3): dispatched on
+			// its own goroutine so the DB + presign round trip never blocks this receive loop. ctx is
+			// this connection's context (not WithoutCancel) — if the node disconnects mid-fetch there
+			// is no point finishing the DB/presign work, since the response would be sent on a dead
+			// stream and dropped either way (see the reconnect-semantics doc comment on represignFunc).
+			req := m.RepresignArtifactsRequest
+			safego.Go("cp.represign", func() { s.handleRepresign(ctx, nodeID, sender, req) })
 		}
+	}
+}
+
+// skillInstallEntriesFromProto converts the wire SkillInstallEntry slice to the CP's internal
+// representation.
+func skillInstallEntriesFromProto(in []*nodev1.SkillInstallEntry) []skillInstallEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]skillInstallEntry, 0, len(in))
+	for _, e := range in {
+		out = append(out, skillInstallEntry{
+			Agent: e.GetAgent(), Kind: e.GetKind(), Name: e.GetName(),
+			Status: skillInstallStatusFromProto(e.GetStatus()), Reason: e.GetReason(), Bundle: e.GetBundle(),
+		})
+	}
+	return out
+}
+
+// skillInstallStatusFromProto maps the wire SkillInstallStatus enum to its lowercase string form
+// (mirrors internal/agentinstall/spec.Status / spawnlet.StatusUnknown).
+func skillInstallStatusFromProto(st nodev1.SkillInstallStatus) string {
+	switch st {
+	case nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_APPLIED:
+		return "applied"
+	case nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_SKIPPED:
+		return "skipped"
+	case nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_FAILED:
+		return "failed"
+	default:
+		return "unknown"
 	}
 }
 
@@ -827,6 +925,21 @@ func lookupRunnable(bins []string, id string) (agentcaps.Runnable, bool) {
 
 // SetMaxSpawnsPerOwner sets the per-owner concurrent-spawn cap (0 = unlimited).
 func (s *Server) SetMaxSpawnsPerOwner(n int) { s.maxSpawnsPerOwner = n }
+
+// SetAdminOwners configures the allowlist of account ids permitted to publish catalog entries to
+// the global catalog (sp-mwco.3.4 §4.6 D3). Fails closed: a nil/empty slice (the default) means
+// nobody is an admin. Blank entries are ignored.
+func (s *Server) SetAdminOwners(owners []string) {
+	m := make(map[string]struct{}, len(owners))
+	for _, o := range owners {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		m[o] = struct{}{}
+	}
+	s.adminOwners = m
+}
 
 // SetEvaluatorPolicy enables CP-side metric evaluators and configures their policy thresholds.
 // When enabled, per-spawn metrics reported on every heartbeat are evaluated against the given
@@ -1345,6 +1458,10 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 	if err != nil || sp.Status != store.Starting {
 		return // stopped/deleted in the lock gap, or already advanced
 	}
+	// Eager (not deferred) — see resumeLocked's comment: skillInstalls stays visible past
+	// ACTIVE, so clearing it at function-return would wipe this episode's own report right
+	// after the node sends it.
+	s.skillInstalls.clear(spawnID)
 	placement.Image = sp.Image
 	mounts, merr := s.st.Spawns().GetMounts(ctx, spawnID)
 	if merr != nil {
@@ -1529,6 +1646,7 @@ func (s *Server) stop(ctx context.Context, owner, spawnID string) error {
 	if err := s.st.Spawns().MarkDeleted(ctx, spawnID, time.Now().Unix()); err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
+	s.skillInstalls.clear(spawnID) // sp-mwco.2.7: no map leak past a deleted/stopped spawn
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil
 }
@@ -1550,6 +1668,7 @@ func (s *Server) terminateSpawn(ctx context.Context, spawnID, reason string) err
 	if err := s.st.Spawns().MarkDeleted(ctx, spawnID, time.Now().Unix()); err != nil {
 		return fmt.Errorf("terminateSpawn %s: mark deleted: %w", spawnID, err)
 	}
+	s.skillInstalls.clear(spawnID) // sp-mwco.2.7: no map leak past a deleted/stopped spawn
 	slog.Info("kill-switch: terminated spawn", "spawn", spawnID, "owner", sp.OwnerID, "reason", reason)
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	return nil

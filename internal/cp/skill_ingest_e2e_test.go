@@ -69,9 +69,51 @@ type skillIngestStack struct {
 	ctx        context.Context
 	appID      string
 	srv        *cp.Server
+	st         store.Store // the same *store.Store wired into srv — for building synthetic bundle_ref fixtures (sp-mwco.2.9; no RPC attach for bundle_ref exists yet — sp-mwco.1.8)
 	skillStore skillstore.SkillStore
 	s3cfg      journal.S3Config // shared JOURNAL_S3_* creds, for listing bucket in S2-B
 	bucketID   string           // garage bucket id for spawnery-skills (S4 DenyKeyOnBucket)
+}
+
+// allSixAgentBinaries is the default AgentBinaries the node advertises — every binary that has a
+// registered runnable (agentcaps), so the CP can select any of the six skills-matrix runnables.
+var allSixAgentBinaries = []string{"claude-code", "codex", "opencode", "goose", "hermes", "pi"}
+
+// skillIngestStackOptions configures setupSkillIngestStack beyond the ManagerConfig knobs it
+// already exposed (sp-mwco.2.9: the placement matrix needs a different AgentBinaries set, a
+// bigger MaxSpawns, and a wider ctx budget than the original single-spawn ingest test).
+type skillIngestStackOptions struct {
+	mgrOpts       []func(*spawnlet.ManagerConfig)
+	agentBinaries []string
+	maxSpawns     uint32
+	ctxBudget     time.Duration
+}
+
+// skillIngestStackOpt mutates skillIngestStackOptions. Defaults: all six agent binaries (a
+// superset of the three TestCPSkillIngestE2E originally advertised — harmless for a claude-tui-only
+// test, and now shared with the placement matrix), MaxSpawns 2, an 8-minute ctx budget — matching
+// TestCPSkillIngestE2E's prior hardcoded values when the caller passes no stack-level opts.
+type skillIngestStackOpt func(*skillIngestStackOptions)
+
+// withManagerConfig wraps a ManagerConfig mutator (the pre-sp-mwco.2.9 opts signature) as a
+// skillIngestStackOpt, preserving existing call sites like the DeltaCapture=true variant.
+func withManagerConfig(f func(*spawnlet.ManagerConfig)) skillIngestStackOpt {
+	return func(o *skillIngestStackOptions) { o.mgrOpts = append(o.mgrOpts, f) }
+}
+
+// withAgentBinaries overrides the node's advertised AgentBinaries.
+func withAgentBinaries(bins []string) skillIngestStackOpt {
+	return func(o *skillIngestStackOptions) { o.agentBinaries = bins }
+}
+
+// withMaxSpawns overrides the node's MaxSpawns.
+func withMaxSpawns(n uint32) skillIngestStackOpt {
+	return func(o *skillIngestStackOptions) { o.maxSpawns = n }
+}
+
+// withCtxBudget overrides the stack ctx's overall timeout budget.
+func withCtxBudget(d time.Duration) skillIngestStackOpt {
+	return func(o *skillIngestStackOptions) { o.ctxBudget = d }
 }
 
 // garageAdminCredsFromEnv reads JOURNAL_GARAGE_ADMIN_ENDPOINT and JOURNAL_GARAGE_ADMIN_TOKEN
@@ -171,8 +213,17 @@ func dockerBridgeGatewayIP(t *testing.T) string {
 //
 // NodeEndpoint is set to the Docker bridge gateway (not 127.0.0.1) to make presigned GET URLs
 // routable from Docker containers — this is the S2-A faithfulness measure (§4.6).
-func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) skillIngestStack {
+func setupSkillIngestStack(t *testing.T, opts ...skillIngestStackOpt) skillIngestStack {
 	t.Helper()
+
+	cfg := skillIngestStackOptions{
+		agentBinaries: allSixAgentBinaries,
+		maxSpawns:     2,
+		ctxBudget:     8 * time.Minute,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	// --- OPENROUTER key (required for claude-tui) ---
 	key := os.Getenv("OPENROUTER_API_KEY")
@@ -246,7 +297,7 @@ func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) 
 	// --- CP ---
 	reg := registry.New()
 	rtr := router.New()
-	sched := scheduler.New(reg, rtr, 60*time.Second)
+	sched := scheduler.New(reg, rtr, scheduler.DefaultStartStallWindow)
 	tel, err := telemetry.NewJSONLSink(filepath.Join(t.TempDir(), "events.jsonl"))
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +323,7 @@ func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) 
 
 	// Wire the skill fetcher + store into the CP (the seam at ingest_skill.go:179).
 	// Without this, IngestSkillFromURL returns FailedPrecondition.
-	srv.SetSkillIngest(fetcher, ss)
+	srv.SetSkillIngest(fetcher, ss, skillfetch.DefaultPlainTarCapBytes)
 
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(srv))
@@ -291,19 +342,18 @@ func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) 
 		OpenRouterKey: key,
 		DataRoot:      t.TempDir(),
 	}
-	for _, opt := range opts {
+	for _, opt := range cfg.mgrOpts {
 		opt(&mgrCfg)
 	}
 	mgr := spawnlet.NewManager(rt, mgrCfg)
 	nodeCtx, stopNode := context.WithCancel(context.Background())
 	t.Cleanup(stopNode)
 	go node.Run(nodeCtx, mgr, h2cClient(), node.Config{
-		NodeID:    "n-skillingest",
-		CPURL:     cpSrv.URL,
-		MaxSpawns: 2,
-		AgentImage: "spawnery/agent:dev",
-		// Advertise claude-code so the CP can select claude-tui.
-		AgentBinaries: []string{"opencode", "goose", "claude-code"},
+		NodeID:        "n-skillingest",
+		CPURL:         cpSrv.URL,
+		MaxSpawns:     cfg.maxSpawns,
+		AgentImage:    "spawnery/agent:dev",
+		AgentBinaries: cfg.agentBinaries,
 	})
 
 	// Wait for node to register.
@@ -323,9 +373,10 @@ func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) 
 	cl := cpv1connect.NewSpawnServiceClient(h2cClient(), cpSrv.URL, connect.WithGRPC(),
 		connect.WithInterceptors(bearer("dev-token")))
 
-	// Context with 8-minute budget: 2 spawns × 120s boot + S4 overhead.
+	// Context budget: defaults to 8 minutes (2 spawns × 120s boot + S4 overhead), overridable via
+	// withCtxBudget for heavier stacks (e.g. the six-spawn placement matrix).
 	var cancel context.CancelFunc
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ctxBudget)
 	t.Cleanup(cancel)
 
 	return skillIngestStack{
@@ -333,6 +384,7 @@ func setupSkillIngestStack(t *testing.T, opts ...func(*spawnlet.ManagerConfig)) 
 		ctx:        ctx,
 		appID:      appID,
 		srv:        srv,
+		st:         st,
 		skillStore: ss,
 		s3cfg:      s3cfg,
 		bucketID:   bucketID,
@@ -378,6 +430,19 @@ func sha256FromSkillsBucket(t *testing.T, s3cfg journal.S3Config) string {
 	return sha256hex
 }
 
+// preflightAgentBinaries checks that spawnery/agent:dev's image contains every binary in bins
+// (via `docker run --rm --entrypoint which spawnery/agent:dev <bin>`), failing loud — not
+// skipping — on the first miss, naming the missing binary and the fix (`make images`).
+func preflightAgentBinaries(t *testing.T, bins ...string) {
+	t.Helper()
+	for _, bin := range bins {
+		if out, err := exec.Command("docker", "run", "--rm", "--entrypoint", "which",
+			"spawnery/agent:dev", bin).CombinedOutput(); err != nil {
+			t.Fatalf("spawnery/agent:dev must include %q (run `make images`): %v\n%s", bin, err, out)
+		}
+	}
+}
+
 // TestCPSkillIngestE2E is the §4.12 acceptance chain for GitHub-URL skill ingest.
 // Runs the full path: ingest → profile → spawn → SKILL.md present in agent container.
 // Also runs the S2 (presign cross-netns) and S4 (resume Garage dependency) probes.
@@ -386,10 +451,8 @@ func TestCPSkillIngestE2E(t *testing.T) {
 	if out, err := exec.Command("docker", "info").CombinedOutput(); err != nil {
 		t.Fatalf("Docker is required: %v\n%s", err, out)
 	}
-	if out, err := exec.Command("docker", "run", "--rm", "--entrypoint", "which",
-		"spawnery/agent:dev", "agentinstall").CombinedOutput(); err != nil {
-		t.Fatalf("spawnery/agent:dev must include agentinstall (run `make images`): %v\n%s", err, out)
-	}
+	preflightAgentBinaries(t, "claude", "agentinstall")
+	preflightAgentImageFresh(t)
 
 	stk := setupSkillIngestStack(t)
 	cl, ctx, appID := stk.client, stk.ctx, stk.appID
@@ -729,9 +792,9 @@ func runS4DeltaCapture(t *testing.T, parentCtx context.Context, stk skillIngestS
 	// We need a fresh spawn on a DeltaCapture-enabled stack.
 	// Create a child sub-stack with DeltaCapture=true.
 	// NOTE: this spawns a second full stack; the parent stack's context is reused.
-	deltaStk := setupSkillIngestStack(t, func(cfg *spawnlet.ManagerConfig) {
+	deltaStk := setupSkillIngestStack(t, withManagerConfig(func(cfg *spawnlet.ManagerConfig) {
 		cfg.DeltaCapture = true
-	})
+	}))
 	cl := deltaStk.client
 	ctx := deltaStk.ctx
 

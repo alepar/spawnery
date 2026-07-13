@@ -25,6 +25,7 @@ import (
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/gen/node/v1/nodev1connect"
 	"spawnery/internal/agentcaps"
+	"spawnery/internal/agentinstall/spec"
 	"spawnery/internal/safego"
 	"spawnery/internal/secrets/subkey"
 	"spawnery/internal/spawnlet"
@@ -36,6 +37,13 @@ import (
 // reports ERROR (with a useful detail) rather than the scheduler timing out. goose boots to ACP-ready
 // in ~5s; 30s is generous headroom for a slow node.
 const readyTimeout = 30 * time.Second
+
+// progressHeartbeatInterval bounds the wall-clock gap between ResumeProgress events emitted while
+// startSpawn blocks on a single long, silent wait (apply-report, tmux/acp readiness). The CP's
+// resume stall detector resets its timer only on NodeMessage_ResumeProgress (cp/server.go) and
+// times a stall out after defaultResumeStallWindow = 30s (cp/lifecycle.go); 10s gives that window a
+// comfortable 3x margin. Matches spawnlet's stagingHeartbeatInterval by design (same failure class).
+const progressHeartbeatInterval = 10 * time.Second
 
 // controlPostTimeout bounds the node's POST to the per-pod sidecar control endpoint. The sidecar is
 // reachable at the pod bridge IP (a short hop), so a few seconds is generous; bounding it keeps a wedged
@@ -143,6 +151,36 @@ type attacher struct {
 	// mgr.TmuxHasSession in runOnce; tests inject a fake to avoid docker. nil falls back to
 	// mgr.TmuxHasSession so it is safe to leave unset in simple unit-test helpers.
 	tmuxHasSessionFn func(ctx context.Context, agentID, session string) (bool, error)
+
+	// agentAliveFn checks whether a spawn's agent container is still running (sp-mwco.2.12 ITEM
+	// D). Set to mgr.AgentRunning in runOnce, mirroring tmuxHasSessionFn; nil falls back to
+	// mgr.AgentRunning so it is safe to leave unset in simple unit-test helpers — those that don't
+	// exercise the liveness probe never let AwaitApplyReport's ticker reach a probe tick before
+	// the report arrives or the (short, test-shrunk) timeout fires. Tests that DO exercise the
+	// agent-gone fast-fail path inject a fake here, same pattern as tmuxHasSessionFn.
+	agentAliveFn func(ctx context.Context, spawnID string) (bool, error)
+
+	// applyReportTimeout bounds startSpawn's wait for the agent container's apply-report envelope
+	// (sp-mwco.2.12). Zero => spawnlet.ApplyReportBudget()'s derived budget (SecretWaitTimeout +
+	// slack, the same for a bundle and a no-bundle manifest — see ApplyReportBudget's doc); tests
+	// that exercise the "report never arrives" path override this directly so they don't block for
+	// the production default.
+	applyReportTimeout time.Duration
+
+	// progressHeartbeat overrides progressHeartbeatInterval for heartbeatProgress (sp-mwco.4.7).
+	// Zero => progressHeartbeatInterval. A field, not a package var, so tests never race each other
+	// by shadowing package state. Tests shrink this to assert on many ticks within a short wait.
+	progressHeartbeat time.Duration
+
+	// represigns correlates in-flight RepresignArtifactsRequests with their CP response
+	// (sp-mwco.4.3). One per attacher/CP connection; created in runOnce, drained by runOnce's
+	// defer (failAll) on disconnect.
+	represigns *represignPending
+
+	// represignRequestTimeout overrides represignTimeout for represignFunc (sp-mwco.4.3). Zero =>
+	// represignTimeout. A field, not a package var, so tests never race each other (progressHeartbeat
+	// precedent).
+	represignRequestTimeout time.Duration
 }
 
 // pendingClient is a client attach that arrived before its session's pump/relay was registered (the
@@ -233,7 +271,12 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		githubRefresh:    githubRefresh,
 		ghControl:        ghControl,
 		tmuxHasSessionFn: mgr.TmuxHasSession,
+		agentAliveFn:     mgr.AgentRunning,
+		represigns:       newRepresignPending(),
 	}
+	// A disconnect unblocks every in-flight represignFunc waiter immediately (RECONNECT MID-FETCH,
+	// see represignFunc's doc comment) instead of making it burn the full represignTimeout.
+	defer a.represigns.failAll()
 
 	// Process shutdown (SIGTERM) — NOT a CP blip: detach from the spawns (close pumps/sessions) and leave
 	// every pod running for the next spawnlet to re-adopt (SE3 §4.1). On a plain connection drop we keep
@@ -612,6 +655,10 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 		}
 		// Async: crypto sealing must not stall the single per-connection Receive loop.
 		go a.sealJournalKey(ctx, m.SealJournalKey)
+	case *nodev1.CPMessage_RepresignArtifactsResponse:
+		// Cheap locked-map routing to the waiting represignFunc call; inline (no goroutine needed).
+		a.represigns.resolve(m.RepresignArtifactsResponse)
+
 	case *nodev1.CPMessage_ReadoptDecisions:
 		// The CP's per-spawn adopt/reap/defer answer to our managed-pods report (SE3 §4.2). Handed to the
 		// reconcile goroutine, which is waiting on it; an answer for a request we are not waiting on is
@@ -688,10 +735,62 @@ func artifactsFromProto(in []*nodev1.ArtifactSpec) []spawnlet.Artifact {
 			art.ObjectKey = ref.GetObjectKey()
 			art.Sha256 = ref.GetSha256()
 			art.PresignedURL = ref.GetPresignedUrl()
+			art.MaxPlainTarBytes = ref.GetMaxPlainTarBytes()
 		}
 		out = append(out, art)
 	}
 	return out
+}
+
+// skillInstallReportProto builds the NodeMessage payload from EvaluateApplyReport's outputs.
+// env may be nil (report never arrived / a plain timeout); entries may be empty or nil.
+func skillInstallReportProto(spawnID string, gen uint64, env *spec.ApplyReport, entries []spawnlet.InstallEntry) *nodev1.SkillInstallReport {
+	out := &nodev1.SkillInstallReport{
+		SpawnId:    spawnID,
+		Generation: gen,
+		Outcome:    skillInstallOutcomeProto(env),
+		Entries:    make([]*nodev1.SkillInstallEntry, 0, len(entries)),
+	}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, &nodev1.SkillInstallEntry{
+			Agent: e.Agent, Kind: e.Kind, Name: e.Name,
+			Status: skillInstallStatusProto(e.Status), Reason: e.Reason, Bundle: e.Bundle,
+		})
+	}
+	return out
+}
+
+func skillInstallOutcomeProto(env *spec.ApplyReport) nodev1.SkillInstallOutcome {
+	if env == nil {
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+	}
+	switch env.Outcome {
+	case spec.OutcomeOK:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK
+	case spec.OutcomeWarn:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN
+	case spec.OutcomeBundleFailed:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED
+	case spec.OutcomeError:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR
+	default:
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+	}
+}
+
+// skillInstallStatusProto maps an InstallEntry.Status string (either a spec.Status value or
+// spawnlet.StatusUnknown) to the wire enum; anything unrecognized also maps to UNKNOWN.
+func skillInstallStatusProto(status string) nodev1.SkillInstallStatus {
+	switch spec.Status(status) {
+	case spec.StatusApplied:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_APPLIED
+	case spec.StatusSkipped:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_SKIPPED
+	case spec.StatusFailed:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_FAILED
+	default:
+		return nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN
+	}
 }
 
 func startupSecretRoutesFromProto(in []*nodev1.ArtifactSpec) (map[string]startupSecretRoute, error) {
@@ -799,6 +898,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		RestoreSnapshot: len(st.GetRootfsArtifacts()) > 0 || a.mgr.HasJournalPins(st.SpawnId),
 		SetupNetwork:    a.mgr.GitHubControlEnabled() || a.mgr.EgressEnforced(),
 		AwaitReady:      true,
+		InstallSkills:   len(st.GetArtifacts()) > 0,
 	}
 	steps := spawnlet.ApplicableMilestones(flags)
 	current := spawnlet.MilestoneAuthorize
@@ -902,6 +1002,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		RootfsArtifacts:          rootfsArtifactsFromProto(st.GetRootfsArtifacts()),
 		RootfsArtifactsLocalOnly: st.GetRootfsArtifactsLocalOnly(),
 		Artifacts:                artifactsFromProto(st.GetArtifacts()),
+		RepresignFunc:            a.represignFunc(st.SpawnId, st.Generation),
 		ProgressFunc: func(phase, detail, stepKey string) {
 			a.resumeProgress(st.SpawnId, st.Generation, phase, detail)
 			if stepKey != "" {
@@ -930,6 +1031,73 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 		return
 	}
 	a.resumeProgress(st.SpawnId, st.Generation, "containers_ready", "containers created")
+
+	// Skill/artifact install observability + all-or-nothing bundle contract (sp-mwco.2.7): the
+	// agent container's launcher runs apply-artifacts.sh AFTER containers are created, so wait
+	// here (bounded) for its apply-report envelope before the spawn can reach ACTIVE. A
+	// partially-installed bundle_ref group fails the spawn outright (per bundle_ref entry); an
+	// isolated non-bundle failure only warns. The report is sent to the CP either way — in the
+	// fatal case, BEFORE the ERROR status, so the CP has the detail behind the failure. Trust
+	// note: the report is produced inside the agent container, so a compromised agent could
+	// forge "ok" — that is not a regression (a compromised agent already has the skills); the
+	// property this buys is that a MISSING or PARTIAL install can no longer look healthy.
+	//
+	// sp-mwco.2.12: the wait ends on the FIRST of {report arrives, agent container confirmed
+	// gone} rather than purely on the timeout — a broken install (agent crashed, or the launcher
+	// aborted on an unreportable failure) fails in ~1-2s with the real reason instead of silently
+	// sitting out the whole budget. Absence of a signal is a bug, not a state.
+	if flags.InstallSkills {
+		emitStep(spawnlet.MilestoneInstallSkills)
+		stager := a.mgr.Artifacts()
+		manifest, mErr := spec.LoadManifest(stager.DirFor(st.SpawnId))
+		if mErr != nil {
+			// Defensive only: the gate is InstallSkills=len(artifacts)>0, and profile assembly
+			// always includes manifest.json alongside any skill artifact. Treat as "no bundle
+			// info" rather than failing the spawn over a load error unrelated to the install.
+			manifest = spec.Manifest{}
+		}
+		timeout := a.applyReportTimeout // test override; 0 => spawnlet.ApplyReportBudget()
+		if timeout <= 0 {
+			timeout = spawnlet.ApplyReportBudget()
+		}
+		aliveFn := a.agentAliveFn
+		if aliveFn == nil {
+			aliveFn = a.mgr.AgentRunning
+		}
+		alive := func(probeCtx context.Context) (bool, error) { return aliveFn(probeCtx, st.SpawnId) }
+		stop := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "installing_skills", "awaiting skill install report")
+		env, awaitErr := stager.AwaitApplyReport(ctx, st.SpawnId, timeout, alive)
+		stop()
+		var fatalErr error
+		var entries []spawnlet.InstallEntry
+		switch {
+		case errors.Is(awaitErr, spawnlet.ErrAgentGone), errors.Is(awaitErr, spawnlet.ErrReportUnreadable):
+			// Terminal: the agent container is confirmed gone (no report is ever coming), or the
+			// report is sitting right there but cannot be read/parsed. Either way the wait ended
+			// EARLY with a real reason — surface that reason instead of falling through to a
+			// generic "skill install report" wrapper (which would read like a plain missing-report
+			// timeout). Force outcome=ERROR on the wire: skillInstallOutcomeProto(nil) would
+			// otherwise yield UNSPECIFIED, and a terminal failure must never leave the CP with
+			// "unspecified" — that is exactly the ambiguity this task exists to close.
+			fatalErr = awaitErr
+			entries = spawnlet.SyntheticUnknownEntries(manifest, awaitErr.Error())
+			env = &spec.ApplyReport{Schema: 1, Outcome: spec.OutcomeError, Error: awaitErr.Error()}
+		case awaitErr != nil:
+			fatalErr = fmt.Errorf("skill install report: %w", awaitErr) // ctx cancelled/expired
+		default:
+			fatalErr, entries = spawnlet.EvaluateApplyReport(manifest, env)
+		}
+		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SkillInstallReport{
+			SkillInstallReport: skillInstallReportProto(st.SpawnId, st.Generation, env, entries),
+		}})
+		if fatalErr != nil {
+			logErr("startSpawn "+st.SpawnId+": skill install", fatalErr)
+			_ = a.mgr.Stop(ctx, st.SpawnId)
+			emitErr(fatalErr)
+			return
+		}
+	}
+
 	// tmux-mode spawns: register a raw-PTY relay per client (no ACP handshake, no Pump).
 	// Poll `tmux has-session -t spawn` until the session exists before going ACTIVE (sp-m859.4):
 	// the launcher creates the tmux session asynchronously in the background, so without this gate
@@ -937,7 +1105,8 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	// terminal dies. Goes ACTIVE only once the session is confirmed present.
 	if st.Mode == string(agentcaps.ModeTmux) {
 		emitStep(spawnlet.MilestoneAwaitReady)
-		a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting tmux session 'spawn'")
+		stop := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "attaching", "awaiting tmux session 'spawn'")
+		defer stop()
 
 		hasSession := a.tmuxHasSessionFn
 		if hasSession == nil {
@@ -1011,8 +1180,10 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	if flags.AwaitReady {
 		emitStep(spawnlet.MilestoneAwaitReady)
 	}
-	a.resumeProgress(st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
-	if err := p.start(ctx, readyTimeout); err != nil {
+	stopACPHeartbeat := a.heartbeatProgress(ctx, st.SpawnId, st.Generation, "attaching", "awaiting agent ACP readiness")
+	err = p.start(ctx, readyTimeout)
+	stopACPHeartbeat()
+	if err != nil {
 		logErr("startSpawn "+st.SpawnId+": agent not ready", err)
 		p.stop()
 		a.mu.Lock()
@@ -1121,6 +1292,48 @@ func (a *attacher) resumeProgress(spawnID string, gen uint64, phase, detail stri
 			SpawnId: spawnID, Generation: gen, Phase: phase, Detail: detail,
 		},
 	}})
+}
+
+// heartbeatProgress emits an immediate ResumeProgress and then one every progressHeartbeat until the
+// returned stop func is called (or ctx is done) — closing the CP resume-stall gap for a long, silent
+// wait inside startSpawn (sp-mwco.4.7: the apply-report wait, and the tmux/acp readiness waits that
+// follow it, previously emitted zero progress for up to their full timeout). stop closes the
+// goroutine's done channel and JOINS it before returning: this is load-bearing, since it guarantees
+// no ResumeProgress can be sent after the caller proceeds (e.g. to send a terminal SkillInstallReport
+// or ERROR status), keeping message ordering deterministic. stop is idempotent — safe to call
+// explicitly and again via defer.
+func (a *attacher) heartbeatProgress(ctx context.Context, spawnID string, gen uint64, phase, detail string) (stop func()) {
+	a.resumeProgress(spawnID, gen, phase, detail)
+
+	interval := a.progressHeartbeat
+	if interval <= 0 {
+		interval = progressHeartbeatInterval
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				a.resumeProgress(spawnID, gen, phase, detail)
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
 }
 
 // suspendSpawn persists the spawn's mounts and tears the pod down, using a fail-closed gate->reap->finish

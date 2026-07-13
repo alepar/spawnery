@@ -303,6 +303,22 @@ missing 3 of 20 skills silently).
 from the assumptions above — append a dated note here, whether or not a formal debugging skill was
 used.*
 
+### Changes vs. original design (2026-07-13, as implemented)
+
+- **Tar policy (§4.1) proved load-bearing on the real repo.** `obra/superpowers` carries a top-level
+  `AGENTS.md` symlink; skip-with-report is what makes the flagship repo ingestable at all. The e2e
+  reports `skipped_entries=[AGENTS.md (symlink)]`.
+- **Caps (§4.2):** the "200 MiB bundle" figure was dead text (the pipeline caps the whole repo tarball
+  at 20 MiB wire / 50 MiB decompressed / 10k entries before any per-skill split). Member cap is **63**,
+  not 100 — a spawn allows 64 artifacts *including* the inline manifest.
+- **Assembly (§4.5):** one `ProfileEntry` cannot emit N `ArtifactSpec`s — `Id`/`DestPath`/`Name` all
+  derive from a single entry, and `unpackTar` does not wipe its destination, so members would have
+  silently merged. Shipped with synthetic per-member identity `<entry_id>/<catalog_id>`.
+- **Description sanitization (§4.9) moved to INSTALL time** (`agentinstall`), not repack. Sanitizing at
+  repack would change the stored tar and break the `sha(bundle member) == sha(subdir ingest)` dedup
+  invariant. The stored tar stays byte-for-byte; the agent-visible description is capped/sanitized.
+- Bundle-of-one adopted family-wide, superseding `sp-mwco.3`'s derived-lineage model.
+
 - **2026-07-12 — roasted (BLOCK, 52 confirmed findings across the family) and revised.** Blockers
   folded: the symlink hard-reject makes the flagship repo unfetchable today (§4.1); one
   `ProfileEntry` cannot emit N artifacts (§4.5); bundle members are invisible to the kill-switch
@@ -312,3 +328,51 @@ used.*
   exclude/rename overrides (§4.4); layout-change branch (§4.5); ETag + shared rate budget (§4.8);
   content threat model (§4.9); `listed=false` default with admin-only publish (§4.3). Bundle-of-one
   adopted family-wide, superseding `sp-mwco.3`'s derived-lineage model.
+
+- **2026-07-12 — sp-mwco.1.11: §4.9's frontmatter sanitization only closed the catalog row; the
+  installed SKILL.md a harness actually loads was still raw.** The whole-epic review caught that
+  `sanitizeDescription` was wired to `Result.Description` / bundle `Member.Description` only — the
+  **catalog row's** metadata. `canonicalRepack` ships every member's `SKILL.md` byte-for-byte, on
+  purpose: `sha(bundle member) == sha(subdir ingest)` (§4.2, §4.11) is the content-addressed dedup
+  identity, and rewriting `SKILL.md` at repack time would redefine that identity per-skill. So the
+  raw, unbounded, attacker-controlled `description:` (and `name:`) shipped in the stored tar was
+  exactly what every harness loaded into its system prompt at startup — the threat this section
+  describes was **not** closed by what landed.
+
+  Resolution: sanitize at **install time**, in `agentinstall`, not at repack. `installTreeAt`
+  rewrites the staged (temp-dir) copy's `SKILL.md` frontmatter — description capped/stripped via
+  the (now-shared) `spec.SanitizeDescription`, `name` pinned to the installed artifact name and
+  length-capped (`spec.MaxSkillNameBytes = 64`) — immediately before the atomic rename, so both the
+  canonical (`~/.agents/skills/<name>/`) and any native per-agent copy get the sanitized file. The
+  source staging dir, the stored tar, and its sha are never touched: the dedup invariant survives
+  by construction, pinned by `internal/cp/skillfetch/rawtar_test.go`.
+
+  Residual, stated plainly: the raw description/name **do** persist — in the stored tar (dedup
+  identity) and in the node's staging dir — but neither is ever read by a harness; only the
+  install-time-rewritten copy is. A malformed frontmatter block (unclosed `---`, or not a YAML
+  mapping) fails the install closed (`StatusFailed`, nothing written) rather than let unbounded
+  content reach a system prompt. See `internal/agentinstall/frontmatter.go` and
+  `internal/agentinstall/spec/skillmeta.go`.
+
+- **2026-07-13 — sp-mwco.1.13: §4.9's diff-token gate could dead-end a stale-pinned bundle entry
+  with no way to re-pin.** As shipped, `ReingestBundle` minted a diff token only when it detected a
+  real change in-process; `GetBundleDiff` could only mark an already-minted token as viewed, never
+  mint one itself. An entry pinned to v1 while the bundle was already at v2 — CP restart (the gate
+  is in-memory, no persistence), the 30-minute token TTL having lapsed, or another session having
+  already cut v2 — hit a dead end: "check for updates" reported `changed=false` (nothing new to
+  mint), `GetBundleDiff(v1, v2)` returned `diff_token=""`, and `RepinProfileBundle` failed
+  `FailedPrecondition` forever. The "update available" badge became a permanent, un-actionable nag.
+
+  Resolution: **the view IS the gate.** `GetBundleDiff` now mints-and-marks-viewed a token for the
+  exact `(owner, bundle, fromVersion, toVersion)` pair it actually serves (`diffGate.mintViewed`),
+  independent of whether `ReingestBundle` ever ran in this CP process. `ReingestBundle`'s mint is
+  now an optimization only (dedupe: a subsequent `GetBundleDiff` of the same pair reuses that
+  token rather than minting a second one), not the sole path to a satisfiable token. The security
+  property is unchanged and, incidentally, tightened: `assertDiffViewed` now also pins the token's
+  `fromVersionID` to the entry's **currently pinned** version — a token for a narrower pair (e.g.
+  v2→v3) no longer satisfies a re-pin from an earlier pin (v1) onto v3, closing a latent loophole
+  where the caller could skip an intermediate delta. An un-diffed re-pin still fails closed
+  (unknown/unviewed/expired/wrong-pair token). `diffGate` sweeps expired records on every mint and
+  dedupes live records per tuple, keeping the map bounded despite `GetBundleDiff` being an
+  unrate-limited read. See `internal/cp/bundles.go` (`diffGate`, `assertDiffViewed`,
+  `GetBundleDiff`) and `internal/cp/bundles_test.go`.

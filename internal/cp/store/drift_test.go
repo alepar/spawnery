@@ -42,6 +42,12 @@ func TestSchemaDriftSqlite(t *testing.T) {
 	check("spawn_mounts", "spawn_id", "name", "backend_uri", "credential_secret_id", "create_if_missing", "repository_id", "persist_marker")
 	check("spawn_artifacts", "spawn_id", "artifact_id", "inline", "content_type", "target_container", "dest_path", "mode", "sensitive", "env_var_name", "object_key", "object_sha256")
 	check("migration_transfer_sets", "id", "kind", "spawn_id", "source_spawn_id", "fork_spawn_id", "source_generation", "target_generation", "source_node_id", "target_node_id", "base_image_digest", "mount_manifest_pins", "rootfs_artifact_pins", "transfer_key_ciphertext_metadata", "transfer_key_status", "status", "created_at", "updated_at")
+	check("customization_catalog", "catalog_id", "creator_id", "kind", "name", "description", "content", "listed", "created_at", "updated_at", "source_url", "source_ref", "source_subdir", "sha256", "size", "bundle_member", "source_commit")
+	check("profile_entries", "profile_id", "entry_id", "kind", "name", "source_kind", "catalog_id", "custom_inline", "targets", "mcp_secret_refs", "bundle_id", "version_id", "bundle_overrides", "disabled")
+	check("skill_bundle", "bundle_id", "creator_id", "name", "source_url", "source_ref", "source_subdir", "etag", "created_at", "updated_at")
+	check("skill_bundle_version", "version_id", "bundle_id", "seq", "source_commit", "created_at")
+	check("skill_bundle_member", "version_id", "catalog_id", "source_subdir", "position")
+	check("skill_object_denylist", "sha256", "reason", "denied_by", "created_at")
 }
 
 func TestSchemaDriftSqliteTypes(t *testing.T) {

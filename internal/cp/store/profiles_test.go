@@ -484,3 +484,397 @@ func TestProfiles_EntriesOrderedByEntryID(t *testing.T) {
 		}
 	}
 }
+
+// TestProfileEntryBundleRefRoundTrip proves fact 4 from the sp-mwco.1.5 plan: catalog_id is
+// already NOT NULL DEFAULT ” (sp-mwco.1.3), so a bundle_ref entry that leaves CatalogID empty
+// and sets BundleID/VersionID instead round-trips cleanly with no NOT NULL violation.
+func TestProfileEntryBundleRefRoundTrip(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-br", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	entry := store.ProfileEntry{
+		ProfileID:  "pf-br",
+		EntryID:    "ent-br",
+		Kind:       store.ProfileEntrySkill,
+		Name:       "some-bundle",
+		SourceKind: store.ProfileSourceBundle,
+		BundleID:   "bnd-1",
+		VersionID:  "bndv-1",
+		Targets:    []string{"all"},
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-br", 1, entry, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-br")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.SourceKind != store.ProfileSourceBundle {
+		t.Errorf("SourceKind = %q, want %q", e.SourceKind, store.ProfileSourceBundle)
+	}
+	if e.BundleID != "bnd-1" || e.VersionID != "bndv-1" {
+		t.Errorf("BundleID/VersionID = %q/%q, want bnd-1/bndv-1", e.BundleID, e.VersionID)
+	}
+	if e.CatalogID != "" {
+		t.Errorf("CatalogID = %q, want empty for bundle_ref entry", e.CatalogID)
+	}
+}
+
+// TestProfileEntryBundleOverridesRoundTrip proves a bundle_ref entry's exclude/rename overrides
+// survive AddEntry -> Get (sp-mwco.1.8).
+func TestProfileEntryBundleOverridesRoundTrip(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-bo", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	entry := store.ProfileEntry{
+		ProfileID:      "pf-bo",
+		EntryID:        "ent-bo",
+		Kind:           store.ProfileEntrySkill,
+		Name:           "my-bundle",
+		SourceKind:     store.ProfileSourceBundle,
+		BundleID:       "bnd-1",
+		VersionID:      "bndv-1",
+		ExcludeSubdirs: []string{"skills/foo"},
+		RenameSubdirs:  map[string]string{"skills/bar": "bar-2"},
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-bo", 1, entry, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-bo")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if len(e.ExcludeSubdirs) != 1 || e.ExcludeSubdirs[0] != "skills/foo" {
+		t.Errorf("ExcludeSubdirs = %v, want [skills/foo]", e.ExcludeSubdirs)
+	}
+	if len(e.RenameSubdirs) != 1 || e.RenameSubdirs["skills/bar"] != "bar-2" {
+		t.Errorf("RenameSubdirs = %v, want {skills/bar: bar-2}", e.RenameSubdirs)
+	}
+}
+
+// TestProfileEntryBundleOverridesEmptyDecodesNil proves an entry with no overrides (empty
+// bundle_overrides column) decodes to nil/empty slices/maps, not zero-length-but-non-nil noise.
+func TestProfileEntryBundleOverridesEmptyDecodesNil(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-bo2", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	entry := store.ProfileEntry{
+		ProfileID:  "pf-bo2",
+		EntryID:    "ent-bo2",
+		Kind:       store.ProfileEntrySkill,
+		Name:       "my-bundle",
+		SourceKind: store.ProfileSourceBundle,
+		BundleID:   "bnd-1",
+		VersionID:  "bndv-1",
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-bo2", 1, entry, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-bo2")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if len(e.ExcludeSubdirs) != 0 {
+		t.Errorf("ExcludeSubdirs = %v, want empty", e.ExcludeSubdirs)
+	}
+	if len(e.RenameSubdirs) != 0 {
+		t.Errorf("RenameSubdirs = %v, want empty", e.RenameSubdirs)
+	}
+}
+
+// TestProfiles_UpdateEntryPin proves UpdateEntryPin bumps the CAS version and rewrites the
+// entry's version_id + overrides (sp-mwco.1.8 — RepinProfileBundle's store call).
+func TestProfiles_UpdateEntryPin(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-pin", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ver, err := st.Profiles().AddEntry(ctx, "pf-pin", 1, store.ProfileEntry{
+		ProfileID: "pf-pin", EntryID: "ent-pin", Kind: store.ProfileEntrySkill, Name: "my-bundle",
+		SourceKind: store.ProfileSourceBundle, BundleID: "bnd-1", VersionID: "bndv-1",
+		ExcludeSubdirs: []string{"skills/foo"},
+	}, 2000)
+	if err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	overridesJSON, err := store.EncodeBundleOverrides(nil, map[string]string{"skills/bar": "bar-2"})
+	if err != nil {
+		t.Fatalf("EncodeBundleOverrides: %v", err)
+	}
+	newVer, err := st.Profiles().UpdateEntryPin(ctx, "pf-pin", ver, "ent-pin", "bndv-2", overridesJSON, 3000)
+	if err != nil {
+		t.Fatalf("UpdateEntryPin: %v", err)
+	}
+	if newVer != ver+1 {
+		t.Errorf("newVer = %d, want %d", newVer, ver+1)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-pin")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.VersionID != "bndv-2" {
+		t.Errorf("VersionID = %q, want bndv-2", e.VersionID)
+	}
+	if len(e.ExcludeSubdirs) != 0 {
+		t.Errorf("ExcludeSubdirs = %v, want empty (overwritten by the new overrides)", e.ExcludeSubdirs)
+	}
+	if len(e.RenameSubdirs) != 1 || e.RenameSubdirs["skills/bar"] != "bar-2" {
+		t.Errorf("RenameSubdirs = %v, want {skills/bar: bar-2}", e.RenameSubdirs)
+	}
+}
+
+// TestProfiles_UpdateEntryPin_StaleVersion proves a stale expected_version is rejected with
+// ErrConflict, mirroring AddEntry/RemoveEntry's CAS behavior.
+func TestProfiles_UpdateEntryPin_StaleVersion(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-pinstale", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-pinstale", 1, store.ProfileEntry{
+		ProfileID: "pf-pinstale", EntryID: "ent-pin", Kind: store.ProfileEntrySkill, Name: "my-bundle",
+		SourceKind: store.ProfileSourceBundle, BundleID: "bnd-1", VersionID: "bndv-1",
+	}, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, err := st.Profiles().UpdateEntryPin(ctx, "pf-pinstale", 1 /* stale, now 2 */, "ent-pin", "bndv-2", "", 3000)
+	if !errors.Is(err, store.ErrConflict) {
+		t.Errorf("expected ErrConflict on stale UpdateEntryPin, got %v", err)
+	}
+}
+
+// TestProfiles_UpdateEntryPin_UnknownEntry proves repinning an entry that does not exist on an
+// otherwise-valid profile returns ErrNotFound, not a silent no-op.
+func TestProfiles_UpdateEntryPin_UnknownEntry(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-pinnf", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err := st.Profiles().UpdateEntryPin(ctx, "pf-pinnf", 1, "no-such-entry", "bndv-2", "", 2000)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for unknown entry, got %v", err)
+	}
+}
+
+// TestProfiles_UpdateEntry proves UpdateEntry changes targets AND disabled in place (same
+// entry_id), bumps the profile version, and leaves the entry's other columns
+// (kind/name/source/catalog_id) untouched (sp-mwco.2.8 §4.6).
+func TestProfiles_UpdateEntry(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-ue", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ver, err := st.Profiles().AddEntry(ctx, "pf-ue", 1, store.ProfileEntry{
+		ProfileID: "pf-ue", EntryID: "ent-ue", Kind: store.ProfileEntrySkill, Name: "my-skill",
+		SourceKind: store.ProfileSourceCatalog, CatalogID: "alice/myskill", Targets: []string{"claude"},
+	}, 2000)
+	if err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	newVer, err := st.Profiles().UpdateEntry(ctx, "pf-ue", ver, "ent-ue", []string{"claude", "goose"}, true, 3000)
+	if err != nil {
+		t.Fatalf("UpdateEntry: %v", err)
+	}
+	if newVer != ver+1 {
+		t.Errorf("newVer = %d, want %d", newVer, ver+1)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-ue")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if !e.Disabled {
+		t.Errorf("expected Disabled=true after UpdateEntry")
+	}
+	if len(e.Targets) != 2 || e.Targets[0] != "claude" || e.Targets[1] != "goose" {
+		t.Errorf("Targets = %v, want [claude goose]", e.Targets)
+	}
+	// Other columns untouched.
+	if e.Kind != store.ProfileEntrySkill || e.Name != "my-skill" ||
+		e.SourceKind != store.ProfileSourceCatalog || e.CatalogID != "alice/myskill" {
+		t.Errorf("UpdateEntry mutated a non-scoping column: %+v", e)
+	}
+}
+
+// TestProfiles_UpdateEntry_DefaultDisabledFalse proves AddEntry+Get round-trips Disabled=false
+// by default (a fresh entry is enabled).
+func TestProfiles_UpdateEntry_DefaultDisabledFalse(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-ued", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-ued", 1, store.ProfileEntry{
+		ProfileID: "pf-ued", EntryID: "ent-1", Kind: store.ProfileEntrySkill, Name: "sk",
+		SourceKind: store.ProfileSourceCatalog, CatalogID: "x/y",
+	}, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, entries, _, err := st.Profiles().Get(ctx, "pf-ued")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Disabled {
+		t.Fatalf("expected Disabled=false by default, got %+v", entries)
+	}
+}
+
+// TestProfiles_UpdateEntry_StaleVersion proves a stale expected_version is rejected with
+// ErrConflict, mirroring UpdateEntryPin's CAS behavior.
+func TestProfiles_UpdateEntry_StaleVersion(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-uestale", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := st.Profiles().AddEntry(ctx, "pf-uestale", 1, store.ProfileEntry{
+		ProfileID: "pf-uestale", EntryID: "ent-1", Kind: store.ProfileEntrySkill, Name: "sk",
+		SourceKind: store.ProfileSourceCatalog, CatalogID: "x/y",
+	}, 2000); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+
+	_, err := st.Profiles().UpdateEntry(ctx, "pf-uestale", 1 /* stale, now 2 */, "ent-1", nil, true, 3000)
+	if !errors.Is(err, store.ErrConflict) {
+		t.Errorf("expected ErrConflict on stale UpdateEntry, got %v", err)
+	}
+}
+
+// TestProfiles_UpdateEntry_UnknownEntry proves updating an entry that does not exist on an
+// otherwise-valid profile returns ErrNotFound, not a silent no-op.
+func TestProfiles_UpdateEntry_UnknownEntry(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	if err := st.Profiles().Create(ctx, store.Profile{
+		ProfileID: "pf-uenf", OwnerID: "alice", Name: "Profile", Version: 1, UpdatedAt: 1000,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err := st.Profiles().UpdateEntry(ctx, "pf-uenf", 1, "no-such-entry", nil, false, 2000)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected ErrNotFound for unknown entry, got %v", err)
+	}
+}
+
+func TestProfiles_CountRefsByCatalogRef(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	// bob has two profiles referencing cat-1; carol has one. A fourth (decoy) profile
+	// references a different catalog entry (cat-2) and must not be counted.
+	profiles := []struct {
+		id, owner, catalogRef string
+	}{
+		{"pf-1", "bob", "cat-1"},
+		{"pf-2", "bob", "cat-1"},
+		{"pf-3", "carol", "cat-1"},
+		{"pf-4", "dave", "cat-2"},
+	}
+	for _, p := range profiles {
+		if err := st.Profiles().Create(ctx, store.Profile{
+			ProfileID: p.id, OwnerID: p.owner, Name: "p", Version: 1, UpdatedAt: 1000,
+		}); err != nil {
+			t.Fatalf("Create %s: %v", p.id, err)
+		}
+		if _, err := st.Profiles().AddEntry(ctx, p.id, 1, store.ProfileEntry{
+			EntryID: "e-" + p.id, Kind: store.ProfileEntrySkill, Name: "sk",
+			SourceKind: store.ProfileSourceCatalog, CatalogID: p.catalogRef,
+		}, 2000); err != nil {
+			t.Fatalf("AddEntry %s: %v", p.id, err)
+		}
+	}
+
+	gotProfiles, gotOwners, err := st.Profiles().CountRefsByCatalogRef(ctx, "cat-1")
+	if err != nil {
+		t.Fatalf("CountRefsByCatalogRef: %v", err)
+	}
+	if gotProfiles != 3 {
+		t.Errorf("expected 3 referencing profiles, got %d", gotProfiles)
+	}
+	if gotOwners != 2 {
+		t.Errorf("expected 2 distinct owners, got %d", gotOwners)
+	}
+}
+
+func TestProfiles_CountRefsByCatalogRef_NoRefs(t *testing.T) {
+	st := store.NewTestStore(t)
+	ctx := context.Background()
+
+	gotProfiles, gotOwners, err := st.Profiles().CountRefsByCatalogRef(ctx, "no-such-catalog-id")
+	if err != nil {
+		t.Fatalf("CountRefsByCatalogRef: %v", err)
+	}
+	if gotProfiles != 0 || gotOwners != 0 {
+		t.Errorf("expected (0, 0), got (%d, %d)", gotProfiles, gotOwners)
+	}
+}

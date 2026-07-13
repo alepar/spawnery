@@ -12,7 +12,9 @@ type CapabilityEntry struct {
 var capabilityKinds = []Kind{KindSkill, KindMCP, KindConfig, KindPlugin, Kind("instructions")}
 
 // Capabilities returns the (kind,agent)->status matrix in canonical agent x kind order.
-// Agents without a Capabilities() override (hermes, goose) inherit the baseEmitter no-op default.
+// Every registered emitter (claude, codex, opencode, hermes, goose, pi) has its own
+// Capabilities() override reflecting spike-verified truth (sp-mwco.2.2/2.5); only an
+// emitter with no override at all would fall back to baseEmitter's all-no-op default.
 func Capabilities(reg Registry) []CapabilityEntry {
 	var out []CapabilityEntry
 	for _, name := range reg.Names() {

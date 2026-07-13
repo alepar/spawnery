@@ -139,6 +139,9 @@ const (
 	// SpawnServiceRemoveProfileEntryProcedure is the fully-qualified name of the SpawnService's
 	// RemoveProfileEntry RPC.
 	SpawnServiceRemoveProfileEntryProcedure = "/cp.v1.SpawnService/RemoveProfileEntry"
+	// SpawnServiceUpdateProfileEntryProcedure is the fully-qualified name of the SpawnService's
+	// UpdateProfileEntry RPC.
+	SpawnServiceUpdateProfileEntryProcedure = "/cp.v1.SpawnService/UpdateProfileEntry"
 	// SpawnServiceAddProfileSecretRefProcedure is the fully-qualified name of the SpawnService's
 	// AddProfileSecretRef RPC.
 	SpawnServiceAddProfileSecretRefProcedure = "/cp.v1.SpawnService/AddProfileSecretRef"
@@ -176,9 +179,47 @@ const (
 	// SpawnServiceSetCatalogListingProcedure is the fully-qualified name of the SpawnService's
 	// SetCatalogListing RPC.
 	SpawnServiceSetCatalogListingProcedure = "/cp.v1.SpawnService/SetCatalogListing"
+	// SpawnServicePublishCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// PublishCatalogEntry RPC.
+	SpawnServicePublishCatalogEntryProcedure = "/cp.v1.SpawnService/PublishCatalogEntry"
+	// SpawnServiceUnpublishCatalogEntryProcedure is the fully-qualified name of the SpawnService's
+	// UnpublishCatalogEntry RPC.
+	SpawnServiceUnpublishCatalogEntryProcedure = "/cp.v1.SpawnService/UnpublishCatalogEntry"
+	// SpawnServicePublishBundleProcedure is the fully-qualified name of the SpawnService's
+	// PublishBundle RPC.
+	SpawnServicePublishBundleProcedure = "/cp.v1.SpawnService/PublishBundle"
+	// SpawnServiceDeleteBundleProcedure is the fully-qualified name of the SpawnService's DeleteBundle
+	// RPC.
+	SpawnServiceDeleteBundleProcedure = "/cp.v1.SpawnService/DeleteBundle"
+	// SpawnServiceDeleteBundleVersionProcedure is the fully-qualified name of the SpawnService's
+	// DeleteBundleVersion RPC.
+	SpawnServiceDeleteBundleVersionProcedure = "/cp.v1.SpawnService/DeleteBundleVersion"
 	// SpawnServiceIngestSkillFromURLProcedure is the fully-qualified name of the SpawnService's
 	// IngestSkillFromURL RPC.
 	SpawnServiceIngestSkillFromURLProcedure = "/cp.v1.SpawnService/IngestSkillFromURL"
+	// SpawnServiceReingestBundleProcedure is the fully-qualified name of the SpawnService's
+	// ReingestBundle RPC.
+	SpawnServiceReingestBundleProcedure = "/cp.v1.SpawnService/ReingestBundle"
+	// SpawnServiceListBundlesProcedure is the fully-qualified name of the SpawnService's ListBundles
+	// RPC.
+	SpawnServiceListBundlesProcedure = "/cp.v1.SpawnService/ListBundles"
+	// SpawnServiceGetBundleProcedure is the fully-qualified name of the SpawnService's GetBundle RPC.
+	SpawnServiceGetBundleProcedure = "/cp.v1.SpawnService/GetBundle"
+	// SpawnServiceGetBundleDiffProcedure is the fully-qualified name of the SpawnService's
+	// GetBundleDiff RPC.
+	SpawnServiceGetBundleDiffProcedure = "/cp.v1.SpawnService/GetBundleDiff"
+	// SpawnServiceRepinProfileBundleProcedure is the fully-qualified name of the SpawnService's
+	// RepinProfileBundle RPC.
+	SpawnServiceRepinProfileBundleProcedure = "/cp.v1.SpawnService/RepinProfileBundle"
+	// SpawnServiceDenySkillObjectProcedure is the fully-qualified name of the SpawnService's
+	// DenySkillObject RPC.
+	SpawnServiceDenySkillObjectProcedure = "/cp.v1.SpawnService/DenySkillObject"
+	// SpawnServiceAllowSkillObjectProcedure is the fully-qualified name of the SpawnService's
+	// AllowSkillObject RPC.
+	SpawnServiceAllowSkillObjectProcedure = "/cp.v1.SpawnService/AllowSkillObject"
+	// SpawnServiceListSkillObjectDenialsProcedure is the fully-qualified name of the SpawnService's
+	// ListSkillObjectDenials RPC.
+	SpawnServiceListSkillObjectDenialsProcedure = "/cp.v1.SpawnService/ListSkillObjectDenials"
 )
 
 // SpawnServiceClient is a client for the cp.v1.SpawnService service.
@@ -239,6 +280,10 @@ type SpawnServiceClient interface {
 	DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error)
 	AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error)
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
+	// UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): targets and the
+	// disabled off-switch, in place, preserving entry_id. kind/name/source/catalog_id/bundle pin
+	// are immutable through it — not even present in the request.
+	UpdateProfileEntry(context.Context, *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
 	// User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
@@ -255,12 +300,74 @@ type SpawnServiceClient interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
+	// Admin-only catalog publish/unpublish (sp-mwco.3.4 — listing policy §4.6). New rows (both
+	// inline and URL-ingested) are created unlisted (creator-visible only); these RPCs are the
+	// sole door onto the global catalog. Unpublish shares SetCatalogListing(listed=false)'s
+	// guarded-unlist semantics (reference-count confirmation + kill-switch), gated to admins.
+	PublishCatalogEntry(context.Context, *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error)
+	UnpublishCatalogEntry(context.Context, *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error)
+	// PublishBundle lists every member of every version of a bundle — not just the latest, since a
+	// profile may pin an older version and must still be able to resolve it.
+	PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error)
+	// DeleteBundle / DeleteBundleVersion (sp-mwco.3.3 §4.3): creator-only, reference-checked delete
+	// for bundles/versions. A version or bundle referenced by a bundle_ref profile entry is
+	// rejected with FailedPrecondition (counts-only message) unless force=true. DeleteBundle
+	// cascades to its versions and their members but does NOT delete the member catalog rows
+	// (content-identity dedup — a row may be shared across bundles/versions).
+	DeleteBundle(context.Context, *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error)
+	DeleteBundleVersion(context.Context, *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error)
 	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
 	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
 	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
 	// Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
 	// Requires Garage to be configured; returns FailedPrecondition when not.
 	IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error)
+	// ReingestBundle re-fetches a bundle's upstream source, conditionally (If-None-Match on the
+	// bundle's stored etag — §4.8) and against a CP-wide refetch budget shared across all owners
+	// (GitHub's ~60/hr rate limit is per source IP, and the CP egresses from one IP). Idempotent on
+	// an unchanged upstream (changed=false, no new version); a 304 short-circuits to "up to date"
+	// (not_modified=true) without a repack/DB write. On a real change it cuts a new version and
+	// mints a diff_token that GetBundleDiff must be called with before a re-pin is permitted
+	// (§4.9 — the diff IS the supply-chain gate on re-pin). Creator-only.
+	ReingestBundle(context.Context, *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error)
+	// ListBundles lists the caller's own bundles (creator-only; bundles are unlisted by default —
+	// publishing via PublishBundle is the admin door onto the global catalog).
+	ListBundles(context.Context, *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error)
+	// GetBundle returns one bundle's provenance, every version (seq ASC), and its latest version's
+	// members. Creator-only.
+	GetBundle(context.Context, *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error)
+	// GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
+	// body diffs for added/changed members (§4.9 — an un-diffed one-click update channel is the same
+	// outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
+	// diff_token as viewed. Creator-only.
+	GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error)
+	// RepinProfileBundle re-pins a bundle_ref profile entry onto a newer version of its bundle
+	// (sp-mwco.1.8 §4.4/§4.9). Gated on diff_token: the caller must have minted a token via
+	// ReingestBundle and viewed it via GetBundleDiff for the SAME (bundle_id, pinned_version,
+	// version_id) pair — an un-diffed re-pin is rejected with FailedPrecondition. version_id's seq
+	// must be strictly greater than the entry's currently pinned seq (no rollback). Exclude/rename
+	// overrides are rebased onto the new member set (a dropped override for a removed member and an
+	// auto-resolved name collision are both reported as warnings, never a hard failure).
+	RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error)
+	// Real revocation (sp-mwco.3.2 §4.2): a sha256 kill switch consulted by presignNodeArtifacts on
+	// EVERY start path (create/resume/fork/recreate/migrate) and by the sp-mwco.4.3 re-presign
+	// handler. Delete removes only the customization_catalog row — the Garage object is never
+	// removed, and an already-bound spawn replays from its own persisted spawn_artifacts row
+	// (object_key + sha) at resume/fork WITHOUT re-consulting the catalog, so a deleted skill would
+	// otherwise stay fetchable by every spawn that ever bound it. Denying does NOT terminate
+	// already-running spawns (that is the separate kill-switch/terminate path, spec §4.4); its
+	// contract is exactly that the object cannot be re-materialized on any subsequent start.
+	// Admin-only (requireAdmin), keyed by sha256 (content identity), not catalog_id — the same
+	// object can be reachable from many catalog rows / bundle members / owners.
+	DenySkillObject(context.Context, *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error)
+	// AllowSkillObject un-denies a sha (e.g. an admin typo) — without it a mis-typed sha
+	// permanently bricks a legitimate skill for every spawn. NotFound when the sha is not
+	// currently denied. Admin-only.
+	AllowSkillObject(context.Context, *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error)
+	// ListSkillObjectDenials surfaces the recorded reason for every denial (§4.2's "reason
+	// recorded and surfaced"), ordered created_at DESC. Admin-only; backs the spawnctl CLI
+	// (sp-q2qm) and the §4.9 admin UI read path.
+	ListSkillObjectDenials(context.Context, *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error)
 }
 
 // NewSpawnServiceClient constructs a client for the cp.v1.SpawnService service. By default, it uses
@@ -502,6 +609,12 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileEntry")),
 			connect.WithClientOptions(opts...),
 		),
+		updateProfileEntry: connect.NewClient[v1.UpdateProfileEntryRequest, v1.UpdateProfileEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceUpdateProfileEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UpdateProfileEntry")),
+			connect.WithClientOptions(opts...),
+		),
 		addProfileSecretRef: connect.NewClient[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse](
 			httpClient,
 			baseURL+SpawnServiceAddProfileSecretRefProcedure,
@@ -580,10 +693,88 @@ func NewSpawnServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
 			connect.WithClientOptions(opts...),
 		),
+		publishCatalogEntry: connect.NewClient[v1.PublishCatalogEntryRequest, v1.PublishCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServicePublishCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("PublishCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		unpublishCatalogEntry: connect.NewClient[v1.UnpublishCatalogEntryRequest, v1.UnpublishCatalogEntryResponse](
+			httpClient,
+			baseURL+SpawnServiceUnpublishCatalogEntryProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("UnpublishCatalogEntry")),
+			connect.WithClientOptions(opts...),
+		),
+		publishBundle: connect.NewClient[v1.PublishBundleRequest, v1.PublishBundleResponse](
+			httpClient,
+			baseURL+SpawnServicePublishBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("PublishBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteBundle: connect.NewClient[v1.DeleteBundleRequest, v1.DeleteBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteBundleVersion: connect.NewClient[v1.DeleteBundleVersionRequest, v1.DeleteBundleVersionResponse](
+			httpClient,
+			baseURL+SpawnServiceDeleteBundleVersionProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DeleteBundleVersion")),
+			connect.WithClientOptions(opts...),
+		),
 		ingestSkillFromURL: connect.NewClient[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse](
 			httpClient,
 			baseURL+SpawnServiceIngestSkillFromURLProcedure,
 			connect.WithSchema(spawnServiceMethods.ByName("IngestSkillFromURL")),
+			connect.WithClientOptions(opts...),
+		),
+		reingestBundle: connect.NewClient[v1.ReingestBundleRequest, v1.ReingestBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceReingestBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ReingestBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		listBundles: connect.NewClient[v1.ListBundlesRequest, v1.ListBundlesResponse](
+			httpClient,
+			baseURL+SpawnServiceListBundlesProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListBundles")),
+			connect.WithClientOptions(opts...),
+		),
+		getBundle: connect.NewClient[v1.GetBundleRequest, v1.GetBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceGetBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		getBundleDiff: connect.NewClient[v1.GetBundleDiffRequest, v1.GetBundleDiffResponse](
+			httpClient,
+			baseURL+SpawnServiceGetBundleDiffProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("GetBundleDiff")),
+			connect.WithClientOptions(opts...),
+		),
+		repinProfileBundle: connect.NewClient[v1.RepinProfileBundleRequest, v1.RepinProfileBundleResponse](
+			httpClient,
+			baseURL+SpawnServiceRepinProfileBundleProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("RepinProfileBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		denySkillObject: connect.NewClient[v1.DenySkillObjectRequest, v1.DenySkillObjectResponse](
+			httpClient,
+			baseURL+SpawnServiceDenySkillObjectProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("DenySkillObject")),
+			connect.WithClientOptions(opts...),
+		),
+		allowSkillObject: connect.NewClient[v1.AllowSkillObjectRequest, v1.AllowSkillObjectResponse](
+			httpClient,
+			baseURL+SpawnServiceAllowSkillObjectProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("AllowSkillObject")),
+			connect.WithClientOptions(opts...),
+		),
+		listSkillObjectDenials: connect.NewClient[v1.ListSkillObjectDenialsRequest, v1.ListSkillObjectDenialsResponse](
+			httpClient,
+			baseURL+SpawnServiceListSkillObjectDenialsProcedure,
+			connect.WithSchema(spawnServiceMethods.ByName("ListSkillObjectDenials")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -629,6 +820,7 @@ type spawnServiceClient struct {
 	deleteProfile            *connect.Client[v1.DeleteProfileRequest, v1.DeleteProfileResponse]
 	addProfileEntry          *connect.Client[v1.AddProfileEntryRequest, v1.AddProfileEntryResponse]
 	removeProfileEntry       *connect.Client[v1.RemoveProfileEntryRequest, v1.RemoveProfileEntryResponse]
+	updateProfileEntry       *connect.Client[v1.UpdateProfileEntryRequest, v1.UpdateProfileEntryResponse]
 	addProfileSecretRef      *connect.Client[v1.AddProfileSecretRefRequest, v1.AddProfileSecretRefResponse]
 	removeProfileSecretRef   *connect.Client[v1.RemoveProfileSecretRefRequest, v1.RemoveProfileSecretRefResponse]
 	createSecret             *connect.Client[v1.CreateSecretRequest, v1.CreateSecretResponse]
@@ -642,7 +834,20 @@ type spawnServiceClient struct {
 	updateCatalogEntry       *connect.Client[v1.UpdateCatalogEntryRequest, v1.UpdateCatalogEntryResponse]
 	deleteCatalogEntry       *connect.Client[v1.DeleteCatalogEntryRequest, v1.DeleteCatalogEntryResponse]
 	setCatalogListing        *connect.Client[v1.SetCatalogListingRequest, v1.SetCatalogListingResponse]
+	publishCatalogEntry      *connect.Client[v1.PublishCatalogEntryRequest, v1.PublishCatalogEntryResponse]
+	unpublishCatalogEntry    *connect.Client[v1.UnpublishCatalogEntryRequest, v1.UnpublishCatalogEntryResponse]
+	publishBundle            *connect.Client[v1.PublishBundleRequest, v1.PublishBundleResponse]
+	deleteBundle             *connect.Client[v1.DeleteBundleRequest, v1.DeleteBundleResponse]
+	deleteBundleVersion      *connect.Client[v1.DeleteBundleVersionRequest, v1.DeleteBundleVersionResponse]
 	ingestSkillFromURL       *connect.Client[v1.IngestSkillFromURLRequest, v1.IngestSkillFromURLResponse]
+	reingestBundle           *connect.Client[v1.ReingestBundleRequest, v1.ReingestBundleResponse]
+	listBundles              *connect.Client[v1.ListBundlesRequest, v1.ListBundlesResponse]
+	getBundle                *connect.Client[v1.GetBundleRequest, v1.GetBundleResponse]
+	getBundleDiff            *connect.Client[v1.GetBundleDiffRequest, v1.GetBundleDiffResponse]
+	repinProfileBundle       *connect.Client[v1.RepinProfileBundleRequest, v1.RepinProfileBundleResponse]
+	denySkillObject          *connect.Client[v1.DenySkillObjectRequest, v1.DenySkillObjectResponse]
+	allowSkillObject         *connect.Client[v1.AllowSkillObjectRequest, v1.AllowSkillObjectResponse]
+	listSkillObjectDenials   *connect.Client[v1.ListSkillObjectDenialsRequest, v1.ListSkillObjectDenialsResponse]
 }
 
 // CreateSpawn calls cp.v1.SpawnService.CreateSpawn.
@@ -835,6 +1040,11 @@ func (c *spawnServiceClient) RemoveProfileEntry(ctx context.Context, req *connec
 	return c.removeProfileEntry.CallUnary(ctx, req)
 }
 
+// UpdateProfileEntry calls cp.v1.SpawnService.UpdateProfileEntry.
+func (c *spawnServiceClient) UpdateProfileEntry(ctx context.Context, req *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error) {
+	return c.updateProfileEntry.CallUnary(ctx, req)
+}
+
 // AddProfileSecretRef calls cp.v1.SpawnService.AddProfileSecretRef.
 func (c *spawnServiceClient) AddProfileSecretRef(ctx context.Context, req *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error) {
 	return c.addProfileSecretRef.CallUnary(ctx, req)
@@ -900,9 +1110,74 @@ func (c *spawnServiceClient) SetCatalogListing(ctx context.Context, req *connect
 	return c.setCatalogListing.CallUnary(ctx, req)
 }
 
+// PublishCatalogEntry calls cp.v1.SpawnService.PublishCatalogEntry.
+func (c *spawnServiceClient) PublishCatalogEntry(ctx context.Context, req *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error) {
+	return c.publishCatalogEntry.CallUnary(ctx, req)
+}
+
+// UnpublishCatalogEntry calls cp.v1.SpawnService.UnpublishCatalogEntry.
+func (c *spawnServiceClient) UnpublishCatalogEntry(ctx context.Context, req *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error) {
+	return c.unpublishCatalogEntry.CallUnary(ctx, req)
+}
+
+// PublishBundle calls cp.v1.SpawnService.PublishBundle.
+func (c *spawnServiceClient) PublishBundle(ctx context.Context, req *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error) {
+	return c.publishBundle.CallUnary(ctx, req)
+}
+
+// DeleteBundle calls cp.v1.SpawnService.DeleteBundle.
+func (c *spawnServiceClient) DeleteBundle(ctx context.Context, req *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error) {
+	return c.deleteBundle.CallUnary(ctx, req)
+}
+
+// DeleteBundleVersion calls cp.v1.SpawnService.DeleteBundleVersion.
+func (c *spawnServiceClient) DeleteBundleVersion(ctx context.Context, req *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error) {
+	return c.deleteBundleVersion.CallUnary(ctx, req)
+}
+
 // IngestSkillFromURL calls cp.v1.SpawnService.IngestSkillFromURL.
 func (c *spawnServiceClient) IngestSkillFromURL(ctx context.Context, req *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
 	return c.ingestSkillFromURL.CallUnary(ctx, req)
+}
+
+// ReingestBundle calls cp.v1.SpawnService.ReingestBundle.
+func (c *spawnServiceClient) ReingestBundle(ctx context.Context, req *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error) {
+	return c.reingestBundle.CallUnary(ctx, req)
+}
+
+// ListBundles calls cp.v1.SpawnService.ListBundles.
+func (c *spawnServiceClient) ListBundles(ctx context.Context, req *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error) {
+	return c.listBundles.CallUnary(ctx, req)
+}
+
+// GetBundle calls cp.v1.SpawnService.GetBundle.
+func (c *spawnServiceClient) GetBundle(ctx context.Context, req *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error) {
+	return c.getBundle.CallUnary(ctx, req)
+}
+
+// GetBundleDiff calls cp.v1.SpawnService.GetBundleDiff.
+func (c *spawnServiceClient) GetBundleDiff(ctx context.Context, req *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error) {
+	return c.getBundleDiff.CallUnary(ctx, req)
+}
+
+// RepinProfileBundle calls cp.v1.SpawnService.RepinProfileBundle.
+func (c *spawnServiceClient) RepinProfileBundle(ctx context.Context, req *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error) {
+	return c.repinProfileBundle.CallUnary(ctx, req)
+}
+
+// DenySkillObject calls cp.v1.SpawnService.DenySkillObject.
+func (c *spawnServiceClient) DenySkillObject(ctx context.Context, req *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error) {
+	return c.denySkillObject.CallUnary(ctx, req)
+}
+
+// AllowSkillObject calls cp.v1.SpawnService.AllowSkillObject.
+func (c *spawnServiceClient) AllowSkillObject(ctx context.Context, req *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error) {
+	return c.allowSkillObject.CallUnary(ctx, req)
+}
+
+// ListSkillObjectDenials calls cp.v1.SpawnService.ListSkillObjectDenials.
+func (c *spawnServiceClient) ListSkillObjectDenials(ctx context.Context, req *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error) {
+	return c.listSkillObjectDenials.CallUnary(ctx, req)
 }
 
 // SpawnServiceHandler is an implementation of the cp.v1.SpawnService service.
@@ -963,6 +1238,10 @@ type SpawnServiceHandler interface {
 	DeleteProfile(context.Context, *connect.Request[v1.DeleteProfileRequest]) (*connect.Response[v1.DeleteProfileResponse], error)
 	AddProfileEntry(context.Context, *connect.Request[v1.AddProfileEntryRequest]) (*connect.Response[v1.AddProfileEntryResponse], error)
 	RemoveProfileEntry(context.Context, *connect.Request[v1.RemoveProfileEntryRequest]) (*connect.Response[v1.RemoveProfileEntryResponse], error)
+	// UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): targets and the
+	// disabled off-switch, in place, preserving entry_id. kind/name/source/catalog_id/bundle pin
+	// are immutable through it — not even present in the request.
+	UpdateProfileEntry(context.Context, *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error)
 	AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error)
 	RemoveProfileSecretRef(context.Context, *connect.Request[v1.RemoveProfileSecretRefRequest]) (*connect.Response[v1.RemoveProfileSecretRefResponse], error)
 	// User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
@@ -979,12 +1258,74 @@ type SpawnServiceHandler interface {
 	UpdateCatalogEntry(context.Context, *connect.Request[v1.UpdateCatalogEntryRequest]) (*connect.Response[v1.UpdateCatalogEntryResponse], error)
 	DeleteCatalogEntry(context.Context, *connect.Request[v1.DeleteCatalogEntryRequest]) (*connect.Response[v1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[v1.SetCatalogListingRequest]) (*connect.Response[v1.SetCatalogListingResponse], error)
+	// Admin-only catalog publish/unpublish (sp-mwco.3.4 — listing policy §4.6). New rows (both
+	// inline and URL-ingested) are created unlisted (creator-visible only); these RPCs are the
+	// sole door onto the global catalog. Unpublish shares SetCatalogListing(listed=false)'s
+	// guarded-unlist semantics (reference-count confirmation + kill-switch), gated to admins.
+	PublishCatalogEntry(context.Context, *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error)
+	UnpublishCatalogEntry(context.Context, *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error)
+	// PublishBundle lists every member of every version of a bundle — not just the latest, since a
+	// profile may pin an older version and must still be able to resolve it.
+	PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error)
+	// DeleteBundle / DeleteBundleVersion (sp-mwco.3.3 §4.3): creator-only, reference-checked delete
+	// for bundles/versions. A version or bundle referenced by a bundle_ref profile entry is
+	// rejected with FailedPrecondition (counts-only message) unless force=true. DeleteBundle
+	// cascades to its versions and their members but does NOT delete the member catalog rows
+	// (content-identity dedup — a row may be shared across bundles/versions).
+	DeleteBundle(context.Context, *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error)
+	DeleteBundleVersion(context.Context, *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error)
 	// IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
 	// SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
 	// content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
 	// Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
 	// Requires Garage to be configured; returns FailedPrecondition when not.
 	IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error)
+	// ReingestBundle re-fetches a bundle's upstream source, conditionally (If-None-Match on the
+	// bundle's stored etag — §4.8) and against a CP-wide refetch budget shared across all owners
+	// (GitHub's ~60/hr rate limit is per source IP, and the CP egresses from one IP). Idempotent on
+	// an unchanged upstream (changed=false, no new version); a 304 short-circuits to "up to date"
+	// (not_modified=true) without a repack/DB write. On a real change it cuts a new version and
+	// mints a diff_token that GetBundleDiff must be called with before a re-pin is permitted
+	// (§4.9 — the diff IS the supply-chain gate on re-pin). Creator-only.
+	ReingestBundle(context.Context, *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error)
+	// ListBundles lists the caller's own bundles (creator-only; bundles are unlisted by default —
+	// publishing via PublishBundle is the admin door onto the global catalog).
+	ListBundles(context.Context, *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error)
+	// GetBundle returns one bundle's provenance, every version (seq ASC), and its latest version's
+	// members. Creator-only.
+	GetBundle(context.Context, *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error)
+	// GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
+	// body diffs for added/changed members (§4.9 — an un-diffed one-click update channel is the same
+	// outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
+	// diff_token as viewed. Creator-only.
+	GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error)
+	// RepinProfileBundle re-pins a bundle_ref profile entry onto a newer version of its bundle
+	// (sp-mwco.1.8 §4.4/§4.9). Gated on diff_token: the caller must have minted a token via
+	// ReingestBundle and viewed it via GetBundleDiff for the SAME (bundle_id, pinned_version,
+	// version_id) pair — an un-diffed re-pin is rejected with FailedPrecondition. version_id's seq
+	// must be strictly greater than the entry's currently pinned seq (no rollback). Exclude/rename
+	// overrides are rebased onto the new member set (a dropped override for a removed member and an
+	// auto-resolved name collision are both reported as warnings, never a hard failure).
+	RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error)
+	// Real revocation (sp-mwco.3.2 §4.2): a sha256 kill switch consulted by presignNodeArtifacts on
+	// EVERY start path (create/resume/fork/recreate/migrate) and by the sp-mwco.4.3 re-presign
+	// handler. Delete removes only the customization_catalog row — the Garage object is never
+	// removed, and an already-bound spawn replays from its own persisted spawn_artifacts row
+	// (object_key + sha) at resume/fork WITHOUT re-consulting the catalog, so a deleted skill would
+	// otherwise stay fetchable by every spawn that ever bound it. Denying does NOT terminate
+	// already-running spawns (that is the separate kill-switch/terminate path, spec §4.4); its
+	// contract is exactly that the object cannot be re-materialized on any subsequent start.
+	// Admin-only (requireAdmin), keyed by sha256 (content identity), not catalog_id — the same
+	// object can be reachable from many catalog rows / bundle members / owners.
+	DenySkillObject(context.Context, *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error)
+	// AllowSkillObject un-denies a sha (e.g. an admin typo) — without it a mis-typed sha
+	// permanently bricks a legitimate skill for every spawn. NotFound when the sha is not
+	// currently denied. Admin-only.
+	AllowSkillObject(context.Context, *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error)
+	// ListSkillObjectDenials surfaces the recorded reason for every denial (§4.2's "reason
+	// recorded and surfaced"), ordered created_at DESC. Admin-only; backs the spawnctl CLI
+	// (sp-q2qm) and the §4.9 admin UI read path.
+	ListSkillObjectDenials(context.Context, *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error)
 }
 
 // NewSpawnServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1222,6 +1563,12 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("RemoveProfileEntry")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServiceUpdateProfileEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceUpdateProfileEntryProcedure,
+		svc.UpdateProfileEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("UpdateProfileEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceAddProfileSecretRefHandler := connect.NewUnaryHandler(
 		SpawnServiceAddProfileSecretRefProcedure,
 		svc.AddProfileSecretRef,
@@ -1300,10 +1647,88 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(spawnServiceMethods.ByName("SetCatalogListing")),
 		connect.WithHandlerOptions(opts...),
 	)
+	spawnServicePublishCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServicePublishCatalogEntryProcedure,
+		svc.PublishCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("PublishCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceUnpublishCatalogEntryHandler := connect.NewUnaryHandler(
+		SpawnServiceUnpublishCatalogEntryProcedure,
+		svc.UnpublishCatalogEntry,
+		connect.WithSchema(spawnServiceMethods.ByName("UnpublishCatalogEntry")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServicePublishBundleHandler := connect.NewUnaryHandler(
+		SpawnServicePublishBundleProcedure,
+		svc.PublishBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("PublishBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteBundleProcedure,
+		svc.DeleteBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDeleteBundleVersionHandler := connect.NewUnaryHandler(
+		SpawnServiceDeleteBundleVersionProcedure,
+		svc.DeleteBundleVersion,
+		connect.WithSchema(spawnServiceMethods.ByName("DeleteBundleVersion")),
+		connect.WithHandlerOptions(opts...),
+	)
 	spawnServiceIngestSkillFromURLHandler := connect.NewUnaryHandler(
 		SpawnServiceIngestSkillFromURLProcedure,
 		svc.IngestSkillFromURL,
 		connect.WithSchema(spawnServiceMethods.ByName("IngestSkillFromURL")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceReingestBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceReingestBundleProcedure,
+		svc.ReingestBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("ReingestBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListBundlesHandler := connect.NewUnaryHandler(
+		SpawnServiceListBundlesProcedure,
+		svc.ListBundles,
+		connect.WithSchema(spawnServiceMethods.ByName("ListBundles")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceGetBundleProcedure,
+		svc.GetBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("GetBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceGetBundleDiffHandler := connect.NewUnaryHandler(
+		SpawnServiceGetBundleDiffProcedure,
+		svc.GetBundleDiff,
+		connect.WithSchema(spawnServiceMethods.ByName("GetBundleDiff")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceRepinProfileBundleHandler := connect.NewUnaryHandler(
+		SpawnServiceRepinProfileBundleProcedure,
+		svc.RepinProfileBundle,
+		connect.WithSchema(spawnServiceMethods.ByName("RepinProfileBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceDenySkillObjectHandler := connect.NewUnaryHandler(
+		SpawnServiceDenySkillObjectProcedure,
+		svc.DenySkillObject,
+		connect.WithSchema(spawnServiceMethods.ByName("DenySkillObject")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceAllowSkillObjectHandler := connect.NewUnaryHandler(
+		SpawnServiceAllowSkillObjectProcedure,
+		svc.AllowSkillObject,
+		connect.WithSchema(spawnServiceMethods.ByName("AllowSkillObject")),
+		connect.WithHandlerOptions(opts...),
+	)
+	spawnServiceListSkillObjectDenialsHandler := connect.NewUnaryHandler(
+		SpawnServiceListSkillObjectDenialsProcedure,
+		svc.ListSkillObjectDenials,
+		connect.WithSchema(spawnServiceMethods.ByName("ListSkillObjectDenials")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/cp.v1.SpawnService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1384,6 +1809,8 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceAddProfileEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceRemoveProfileEntryProcedure:
 			spawnServiceRemoveProfileEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceUpdateProfileEntryProcedure:
+			spawnServiceUpdateProfileEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceAddProfileSecretRefProcedure:
 			spawnServiceAddProfileSecretRefHandler.ServeHTTP(w, r)
 		case SpawnServiceRemoveProfileSecretRefProcedure:
@@ -1410,8 +1837,34 @@ func NewSpawnServiceHandler(svc SpawnServiceHandler, opts ...connect.HandlerOpti
 			spawnServiceDeleteCatalogEntryHandler.ServeHTTP(w, r)
 		case SpawnServiceSetCatalogListingProcedure:
 			spawnServiceSetCatalogListingHandler.ServeHTTP(w, r)
+		case SpawnServicePublishCatalogEntryProcedure:
+			spawnServicePublishCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServiceUnpublishCatalogEntryProcedure:
+			spawnServiceUnpublishCatalogEntryHandler.ServeHTTP(w, r)
+		case SpawnServicePublishBundleProcedure:
+			spawnServicePublishBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteBundleProcedure:
+			spawnServiceDeleteBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceDeleteBundleVersionProcedure:
+			spawnServiceDeleteBundleVersionHandler.ServeHTTP(w, r)
 		case SpawnServiceIngestSkillFromURLProcedure:
 			spawnServiceIngestSkillFromURLHandler.ServeHTTP(w, r)
+		case SpawnServiceReingestBundleProcedure:
+			spawnServiceReingestBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceListBundlesProcedure:
+			spawnServiceListBundlesHandler.ServeHTTP(w, r)
+		case SpawnServiceGetBundleProcedure:
+			spawnServiceGetBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceGetBundleDiffProcedure:
+			spawnServiceGetBundleDiffHandler.ServeHTTP(w, r)
+		case SpawnServiceRepinProfileBundleProcedure:
+			spawnServiceRepinProfileBundleHandler.ServeHTTP(w, r)
+		case SpawnServiceDenySkillObjectProcedure:
+			spawnServiceDenySkillObjectHandler.ServeHTTP(w, r)
+		case SpawnServiceAllowSkillObjectProcedure:
+			spawnServiceAllowSkillObjectHandler.ServeHTTP(w, r)
+		case SpawnServiceListSkillObjectDenialsProcedure:
+			spawnServiceListSkillObjectDenialsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1573,6 +2026,10 @@ func (UnimplementedSpawnServiceHandler) RemoveProfileEntry(context.Context, *con
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RemoveProfileEntry is not implemented"))
 }
 
+func (UnimplementedSpawnServiceHandler) UpdateProfileEntry(context.Context, *connect.Request[v1.UpdateProfileEntryRequest]) (*connect.Response[v1.UpdateProfileEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UpdateProfileEntry is not implemented"))
+}
+
 func (UnimplementedSpawnServiceHandler) AddProfileSecretRef(context.Context, *connect.Request[v1.AddProfileSecretRefRequest]) (*connect.Response[v1.AddProfileSecretRefResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.AddProfileSecretRef is not implemented"))
 }
@@ -1625,6 +2082,58 @@ func (UnimplementedSpawnServiceHandler) SetCatalogListing(context.Context, *conn
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.SetCatalogListing is not implemented"))
 }
 
+func (UnimplementedSpawnServiceHandler) PublishCatalogEntry(context.Context, *connect.Request[v1.PublishCatalogEntryRequest]) (*connect.Response[v1.PublishCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PublishCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) UnpublishCatalogEntry(context.Context, *connect.Request[v1.UnpublishCatalogEntryRequest]) (*connect.Response[v1.UnpublishCatalogEntryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.UnpublishCatalogEntry is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) PublishBundle(context.Context, *connect.Request[v1.PublishBundleRequest]) (*connect.Response[v1.PublishBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.PublishBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteBundle(context.Context, *connect.Request[v1.DeleteBundleRequest]) (*connect.Response[v1.DeleteBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DeleteBundleVersion(context.Context, *connect.Request[v1.DeleteBundleVersionRequest]) (*connect.Response[v1.DeleteBundleVersionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DeleteBundleVersion is not implemented"))
+}
+
 func (UnimplementedSpawnServiceHandler) IngestSkillFromURL(context.Context, *connect.Request[v1.IngestSkillFromURLRequest]) (*connect.Response[v1.IngestSkillFromURLResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.IngestSkillFromURL is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ReingestBundle(context.Context, *connect.Request[v1.ReingestBundleRequest]) (*connect.Response[v1.ReingestBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ReingestBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListBundles(context.Context, *connect.Request[v1.ListBundlesRequest]) (*connect.Response[v1.ListBundlesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListBundles is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetBundle(context.Context, *connect.Request[v1.GetBundleRequest]) (*connect.Response[v1.GetBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) GetBundleDiff(context.Context, *connect.Request[v1.GetBundleDiffRequest]) (*connect.Response[v1.GetBundleDiffResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.GetBundleDiff is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) RepinProfileBundle(context.Context, *connect.Request[v1.RepinProfileBundleRequest]) (*connect.Response[v1.RepinProfileBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.RepinProfileBundle is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) DenySkillObject(context.Context, *connect.Request[v1.DenySkillObjectRequest]) (*connect.Response[v1.DenySkillObjectResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.DenySkillObject is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) AllowSkillObject(context.Context, *connect.Request[v1.AllowSkillObjectRequest]) (*connect.Response[v1.AllowSkillObjectResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.AllowSkillObject is not implemented"))
+}
+
+func (UnimplementedSpawnServiceHandler) ListSkillObjectDenials(context.Context, *connect.Request[v1.ListSkillObjectDenialsRequest]) (*connect.Response[v1.ListSkillObjectDenialsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("cp.v1.SpawnService.ListSkillObjectDenials is not implemented"))
 }

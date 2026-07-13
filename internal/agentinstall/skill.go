@@ -7,12 +7,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"spawnery/internal/agentinstall/spec"
 )
 
-// installSkillTree is the shared skill-install implementation used by claude and codex.
-// It performs an atomic upsert-by-name: copies the source tree into a temp dir under
-// layout.SkillPath, then atomically replaces the destination with os.Rename.
-func installSkillTree(layout AgentLayout, a Artifact, opts Options) Report {
+// installSkill is the shared skill-install implementation used by every emitter.
+//
+// Each skill installs once into the canonical dir (~/.agents/skills/<name>/, shared
+// by every agent) and, if layout.SkillPath is non-empty, a second REAL COPY (never a
+// symlink — claude-code #31005/#38051/#25367) into the agent's native skill dir. Both
+// copies are atomic upsert-by-name: copy the source tree into a sibling temp dir, stamp
+// an ownership marker, then atomically replace the destination with os.Rename.
+//
+// Before either copy is touched, every destination is checked for a name-squat: a
+// pre-existing directory occupying <name> that was not itself installed by a prior
+// spawnery apply (see canonical.go's checkSquat). A squat on either destination fails
+// the whole install — nothing is written, including the canonical copy.
+func installSkill(layout AgentLayout, a Artifact, opts Options) Report {
 	base := Report{
 		Agent: layout.Name,
 		Kind:  KindSkill,
@@ -68,23 +79,105 @@ func installSkillTree(layout AgentLayout, a Artifact, opts Options) Report {
 		return base
 	}
 
-	// Ensure the skills root exists.
-	if err := os.MkdirAll(layout.SkillPath, 0o755); err != nil {
+	if opts.HomeDir == "" {
 		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("create skills directory: %v", err)
+		base.Reason = "HomeDir not set: cannot resolve canonical skills dir"
 		return base
 	}
 
-	dest := filepath.Join(layout.SkillPath, a.Name)
+	// Every skill installs once into the canonical dir; agents that also need a
+	// real native copy (currently claude, plus codex's legacy compat copy) name it
+	// via layout.SkillPath.
+	dirs := []string{CanonicalSkillsDir(opts.HomeDir)}
+	if layout.SkillPath != "" {
+		dirs = append(dirs, layout.SkillPath)
+	}
 
-	// Atomic upsert: copy into a sibling temp dir, then rename into place.
-	tmp, err := os.MkdirTemp(layout.SkillPath, ".tmp-"+a.Name+"-")
+	dests := make([]string, len(dirs))
+	for i, dir := range dirs {
+		dests[i] = filepath.Join(dir, a.Name)
+	}
+
+	// Name-squat guard: runs before any destination is touched, so a squat on either
+	// destination blocks the whole install.
+	if err := checkSquat(dests); err != nil {
+		base.Status = StatusFailed
+		base.Reason = err.Error()
+		return base
+	}
+
+	// Note which destinations were previously spawnery-managed, so a re-apply's report
+	// records the overwrite (not just silently upserts).
+	var overwritten []string
+	for _, dest := range dests {
+		if exists, managed, err := destOwnership(dest); err != nil {
+			base.Status = StatusFailed
+			base.Reason = err.Error()
+			return base
+		} else if exists && managed {
+			overwritten = append(overwritten, dest)
+		}
+	}
+
+	marker := skillMarker{
+		Name:           a.Name,
+		ProfileID:      opts.ProfileID,
+		ProfileVersion: opts.ProfileVersion,
+		InstalledBy:    "spawnery",
+	}
+	if src := a.Skill.Source; src != nil {
+		marker.SourceURL = src.URL
+		marker.SourceRef = src.Ref
+		marker.SourceCommit = src.Commit
+		marker.SourceSubdir = src.Subdir
+	}
+
+	var skipped []string
+	var sanitized bool
+	for _, dir := range dirs {
+		s, changed, err := installTreeAt(dir, a.Name, src, marker, a.Skill.Source)
+		if err != nil {
+			base.Status = StatusFailed
+			base.Reason = fmt.Sprintf("install skill to %s: %v", dir, err)
+			return base
+		}
+		skipped = append(skipped, s...)
+		sanitized = sanitized || changed
+	}
+
+	base.Status = StatusApplied
+	var reasonParts []string
+	if len(skipped) > 0 {
+		reasonParts = append(reasonParts, fmt.Sprintf("skipped %d symlink(s): %s", len(skipped), strings.Join(skipped, ", ")))
+	}
+	if len(overwritten) > 0 {
+		reasonParts = append(reasonParts, fmt.Sprintf("overwrote previously-managed skill install at: %s", strings.Join(overwritten, ", ")))
+	}
+	if sanitized {
+		reasonParts = append(reasonParts, "sanitized SKILL.md frontmatter (description capped to 1 KiB)")
+	}
+	base.Reason = strings.Join(reasonParts, "; ")
+	return base
+}
+
+// installTreeAt performs the atomic upsert-by-name of src into dir/name: copy into a
+// sibling temp dir, sanitize the staged SKILL.md's frontmatter (never the source — the
+// stored tar upstream must stay byte-identical, sp-mwco.1.11), inject the provenance banner
+// for a non-nil source (sp-mwco.2.8 §4.6 — after sanitization, since that rewrites the
+// frontmatter block; before the marker), stamp the ownership marker, then atomically replace
+// dir/name with os.Rename. Returns the relative paths of any symlinks skipped during the copy,
+// and whether SKILL.md's frontmatter was rewritten.
+func installTreeAt(dir, name, src string, marker skillMarker, source *spec.SkillSource) (skippedSymlinks []string, sanitized bool, err error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, false, fmt.Errorf("create skills directory: %w", err)
+	}
+
+	dest := filepath.Join(dir, name)
+
+	tmp, err := os.MkdirTemp(dir, ".tmp-"+name+"-")
 	if err != nil {
-		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("create temp directory for skill: %v", err)
-		return base
+		return nil, false, fmt.Errorf("create temp directory for skill: %w", err)
 	}
-	// Clean up temp dir on failure.
 	ok := false
 	defer func() {
 		if !ok {
@@ -94,42 +187,48 @@ func installSkillTree(layout AgentLayout, a Artifact, opts Options) Report {
 
 	skipped, err := copyTree(src, tmp)
 	if err != nil {
-		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("copy skill tree: %v", err)
-		return base
+		return nil, false, fmt.Errorf("copy skill tree: %w", err)
 	}
 
-	// Remove previous install (if any), then rename tmp into place.
+	sanitized, err = sanitizeSkillMD(tmp, name)
+	if err != nil {
+		return nil, false, fmt.Errorf("sanitize SKILL.md: %w", err)
+	}
+
+	// Fail closed: an unlabelled untrusted skill is a failed install, not a silent one.
+	if err := writeProvenance(tmp, source); err != nil {
+		return nil, false, fmt.Errorf("write provenance banner: %w", err)
+	}
+
+	if err := writeMarker(tmp, marker); err != nil {
+		return nil, false, fmt.Errorf("write skill ownership marker: %w", err)
+	}
+
 	if err := os.RemoveAll(dest); err != nil {
-		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("remove previous skill install: %v", err)
-		return base
+		return nil, false, fmt.Errorf("remove previous skill install: %w", err)
 	}
 	if err := os.Rename(tmp, dest); err != nil {
-		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("rename temp dir to dest: %v", err)
-		return base
+		return nil, false, fmt.Errorf("rename temp dir to dest: %w", err)
 	}
 	ok = true
 
 	// Restrict the skill top-level directory to owner-only access (0700).
 	if err := os.Chmod(dest, 0o700); err != nil {
-		base.Status = StatusFailed
-		base.Reason = fmt.Sprintf("chmod skill top dir: %v", err)
-		return base
+		return nil, false, fmt.Errorf("chmod skill top dir: %w", err)
 	}
 
-	base.Status = StatusApplied
-	if len(skipped) > 0 {
-		base.Reason = fmt.Sprintf("skipped %d symlink(s): %s", len(skipped), strings.Join(skipped, ", "))
-	}
-	return base
+	return skipped, sanitized, nil
 }
 
-// validateSkillName returns an error if name is not a clean single path segment.
+// validateSkillName returns an error if name is not a clean single path segment, or exceeds
+// spec.MaxSkillNameBytes (§4.9: the name is loaded into a harness's system prompt alongside
+// the description, so it gets the same bound).
 func validateSkillName(name string) error {
 	if name == "" {
 		return fmt.Errorf("skill name must not be empty")
+	}
+	if len(name) > spec.MaxSkillNameBytes {
+		return fmt.Errorf("skill name exceeds %d bytes: %q", spec.MaxSkillNameBytes, name)
 	}
 	if strings.ContainsAny(name, "/\\") {
 		return fmt.Errorf("skill name must not contain path separators: %q", name)

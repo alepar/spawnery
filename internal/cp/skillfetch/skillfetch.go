@@ -5,7 +5,7 @@
 //   - Per-hop host allowlist (github.com, api.github.com, codeload.github.com)
 //   - Resolved-IP blocking for loopback/RFC1918/link-local/CGNAT/metadata ranges
 //   - Streaming size caps (wire and decompressed) before any buffering
-//   - Tar-entry safety (no symlinks, hardlinks, devices, absolute paths, .. escapes)
+//   - Tar-entry safety (non-regular entries skipped and reported; absolute paths and .. escapes rejected)
 //   - Canonical deterministic repack for stable sha256 content identity
 package skillfetch
 
@@ -24,20 +24,35 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"gopkg.in/yaml.v3"
+
+	"spawnery/internal/agentinstall/spec"
 )
 
 const (
-	// WireCapBytes is the maximum compressed size of the tarball over the wire (~20 MiB).
-	WireCapBytes = 20 * 1024 * 1024
-	// DecompressedCapBytes is the maximum decompressed size before tar parsing (~50 MiB).
-	DecompressedCapBytes = 50 * 1024 * 1024
-	// PlainTarCapBytes is the maximum plain-tar size after repack (~50 MiB).
-	PlainTarCapBytes = 50 * 1024 * 1024
-	// FileCountCap is the maximum number of entries in the tarball.
-	FileCountCap = 10_000
-	// HTTPTimeout is the per-fetch HTTP deadline.
-	HTTPTimeout = 60 * time.Second
+	// DefaultWireCapBytes is the default maximum compressed size of the tarball over the wire
+	// (~20 MiB), used when Config.WireCapBytes is zero.
+	DefaultWireCapBytes = 20 * 1024 * 1024
+	// DefaultDecompressedCapBytes is the default maximum decompressed size before tar parsing
+	// (~50 MiB), used when Config.DecompressedCapBytes is zero.
+	DefaultDecompressedCapBytes = 50 * 1024 * 1024
+	// DefaultPlainTarCapBytes is the default maximum plain-tar size after repack (~50 MiB),
+	// used when Config.PlainTarCapBytes is zero.
+	DefaultPlainTarCapBytes = 50 * 1024 * 1024
+	// DefaultFileCountCap is the default maximum number of entries in the tarball, used when
+	// Config.FileCountCap is zero.
+	DefaultFileCountCap = 10_000
+	// DefaultHTTPTimeout is the default per-fetch HTTP deadline, used when Config.HTTPTimeout
+	// is zero.
+	DefaultHTTPTimeout = 60 * time.Second
 )
+
+// plainTarCapErr returns an error if plainSize exceeds capBytes, else nil.
+func plainTarCapErr(plainSize, capBytes int64) error {
+	if plainSize > capBytes {
+		return fmt.Errorf("skill tar exceeds size cap (%d > %d bytes)", plainSize, capBytes)
+	}
+	return nil
+}
 
 // RepoRef is the parsed, normalized GitHub repo reference.
 type RepoRef struct {
@@ -55,6 +70,13 @@ type Result struct {
 	PlainTarSHA256  string // hex sha256 of the plain (uncompressed) canonical tar
 	CompressedBytes []byte // zstd-compressed canonical tar
 	PlainSize       int64  // plain tar size in bytes
+	// SkippedEntries lists non-regular tar entries (symlink, hardlink, device, fifo) that were
+	// skipped, not fetched. Each element is formatted "<path> (<kind>)", e.g. "AGENTS.md (symlink)".
+	// nil when nothing was skipped.
+	SkippedEntries []string
+	// SourceCommit is the commit sha recovered from the GitHub tarball wrapper dir
+	// (owner-repo-<sha>/), or "" when the wrapper isn't GitHub-shaped (§4.9 commit pinning).
+	SourceCommit string
 }
 
 // Fetcher fetches a GitHub skill and returns a Result.
@@ -62,21 +84,65 @@ type Fetcher interface {
 	Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, requestedName, description string) (Result, error)
 }
 
+// BundleFetcher fetches a GitHub repo tarball and discovers/repacks every skill in it (§4.2).
+// Declared separately from Fetcher (rather than adding a method to it) so existing Fetcher
+// implementations — notably internal/cp's fakeFetcher test double — are unaffected; *fetcher
+// satisfies both.
+type BundleFetcher interface {
+	FetchBundle(ctx context.Context, ref RepoRef, gitRef, subdir string) (BundleResult, error)
+}
+
 // Config holds the runtime parameters for the fetcher.
+//
+// The caps here are enforced CP-side, at ingest. They are deliberately NOT the same knob as the
+// host allowlist in fetch.go: allowedHosts is a code constant (see the comment there) because it
+// only ever widens where a *redirect* may land, never where a fetch may originate — origination
+// is pinned by ParseRepoURL + tarballURL. The caps below have no such origination hazard, so they
+// are config-surfaced (skills.* in cmd/spawnery_cp/config.go).
 type Config struct {
 	// GitHubToken is an optional Bearer token for authenticated GitHub API access.
 	// Raises the shared rate-limit from ~60/hr to 5000/hr per source IP.
 	GitHubToken string
 	// ZstdLevel is the zstd compression level (1–19; default ~3 if 0).
 	ZstdLevel int
+	// WireCapBytes is the maximum compressed size of the tarball over the wire.
+	// Zero means DefaultWireCapBytes.
+	WireCapBytes int64
+	// DecompressedCapBytes is the maximum decompressed size before tar parsing.
+	// Zero means DefaultDecompressedCapBytes.
+	DecompressedCapBytes int64
+	// PlainTarCapBytes is the maximum plain-tar size after canonical repack.
+	// Zero means DefaultPlainTarCapBytes.
+	PlainTarCapBytes int64
+	// FileCountCap is the maximum number of entries in the tarball.
+	// Zero means DefaultFileCountCap.
+	FileCountCap int
+	// HTTPTimeout is the per-fetch HTTP deadline. Zero means DefaultHTTPTimeout.
+	HTTPTimeout time.Duration
 }
 
-// New returns a Fetcher with the given config.
+// New returns a Fetcher with the given config. Zero-valued cap/timeout fields fall back to the
+// package Default* constants.
 func New(cfg Config) Fetcher {
 	if cfg.ZstdLevel == 0 {
 		cfg.ZstdLevel = 3
 	}
-	return &fetcher{cfg: cfg, client: newSecureClient()}
+	if cfg.WireCapBytes == 0 {
+		cfg.WireCapBytes = DefaultWireCapBytes
+	}
+	if cfg.DecompressedCapBytes == 0 {
+		cfg.DecompressedCapBytes = DefaultDecompressedCapBytes
+	}
+	if cfg.PlainTarCapBytes == 0 {
+		cfg.PlainTarCapBytes = DefaultPlainTarCapBytes
+	}
+	if cfg.FileCountCap == 0 {
+		cfg.FileCountCap = DefaultFileCountCap
+	}
+	if cfg.HTTPTimeout == 0 {
+		cfg.HTTPTimeout = DefaultHTTPTimeout
+	}
+	return &fetcher{cfg: cfg, client: newSecureClient(cfg)}
 }
 
 type fetcher struct {
@@ -151,7 +217,8 @@ func tarballURL(owner, repo, ref string) string {
 
 // skillFrontmatter holds the parsed SKILL.md YAML front matter.
 type skillFrontmatter struct {
-	Name string `yaml:"name"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
 }
 
 // parseSkillMD parses the YAML front matter from SKILL.md content.
@@ -189,11 +256,31 @@ func validateName(name string) error {
 
 // sanitizeName converts a repo name (or frontmatter name) into a clean single path segment:
 // lowercase, spaces/underscores to hyphens, strip leading/trailing hyphens.
+//
+// Charset and length caps on name are explicitly deferred to sp-mwco.2.4 (agentinstall name-squat
+// guard work) — not forgotten here, just out of this task's scope.
 func sanitizeName(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	name = strings.NewReplacer(" ", "-", "_", "-").Replace(name)
 	name = strings.Trim(name, "-.")
 	return name
+}
+
+// maxDescriptionBytes caps a sanitized SKILL.md frontmatter description at 1 KiB (§4.9): every
+// harness loads each installed skill's description into the system prompt at startup, so an
+// unbounded, attacker-controlled description is a direct prompt-injection surface. Delegates to
+// spec.MaxDescriptionBytes — see sanitizeDescription.
+const maxDescriptionBytes = spec.MaxDescriptionBytes
+
+// sanitizeDescription bounds and cleans an untrusted SKILL.md frontmatter description before it
+// is ever persisted or shown to an agent (§4.9). This only sanitizes the CATALOG ROW's
+// Description (Result.Description / Member.Description) — the SKILL.md shipped in the stored tar
+// stays byte-for-byte (canonicalRepack, sha dedup identity). The description a harness actually
+// loads into its system prompt is sanitized separately, at install time, by
+// spec.SanitizeDescription via agentinstall's frontmatter rewriter (sp-mwco.1.11). Delegates to
+// spec.SanitizeDescription so there is one implementation, not two.
+func sanitizeDescription(raw string) string {
+	return spec.SanitizeDescription(raw)
 }
 
 // tarEntry is a normalized file entry for the canonical repack.
@@ -209,9 +296,14 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 	rawURL := tarballURL(ref.Owner, ref.Repo, gitRef)
 
 	// Download and unpack into in-memory entries
-	entries, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
+	unpacked, err := f.client.fetchAndUnpack(ctx, rawURL, f.cfg.GitHubToken, subdir)
 	if err != nil {
 		return Result{}, err
+	}
+	entries := unpacked.entries
+	var skippedEntries []string
+	for _, se := range unpacked.skipped {
+		skippedEntries = append(skippedEntries, fmt.Sprintf("%s (%s)", se.path, se.kind))
 	}
 
 	// Require SKILL.md at the top level (after wrapper strip + subdir descent)
@@ -266,8 +358,8 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 	if err != nil {
 		return Result{}, fmt.Errorf("repack: %w", err)
 	}
-	if int64(len(plainTar)) > PlainTarCapBytes {
-		return Result{}, fmt.Errorf("skill tar exceeds size cap (%d > %d bytes)", len(plainTar), PlainTarCapBytes)
+	if err := plainTarCapErr(int64(len(plainTar)), f.cfg.PlainTarCapBytes); err != nil {
+		return Result{}, err
 	}
 
 	// sha256 over the PLAIN tar
@@ -294,6 +386,8 @@ func (f *fetcher) Fetch(ctx context.Context, ref RepoRef, gitRef, subdir, reques
 		PlainTarSHA256:  sha256hex,
 		CompressedBytes: compressed,
 		PlainSize:       int64(len(plainTar)),
+		SkippedEntries:  skippedEntries,
+		SourceCommit:    unpacked.sourceCommit,
 	}, nil
 }
 

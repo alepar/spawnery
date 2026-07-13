@@ -130,6 +130,73 @@ func (r *profileRepo) AddEntry(ctx context.Context, profileID string, expectedVe
 	return newVersion, err
 }
 
+// UpdateEntryPin CAS-repins a bundle_ref entry onto a new version + overrides atomically
+// (sp-mwco.1.8 §4.9 — RepinProfileBundle's store call). Returns ErrNotFound when the profile
+// version matches but the entry row is absent, ErrConflict when expectedVersion is stale.
+func (r *profileRepo) UpdateEntryPin(ctx context.Context, profileID string, expectedVersion uint64, entryID, versionID, overridesJSON string, now int64) (uint64, error) {
+	var newVersion uint64
+	err := r.runInTx(ctx, func(db bun.IDB) error {
+		ver, uerr := casUpdateDB(ctx, db, profileID, expectedVersion, now, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+			return q
+		})
+		if uerr != nil {
+			return uerr
+		}
+		newVersion = ver
+		res, uerr := db.NewUpdate().Model((*ProfileEntry)(nil)).
+			Set("version_id = ?", versionID).
+			Set("bundle_overrides = ?", overridesJSON).
+			Where("profile_id = ? AND entry_id = ?", profileID, entryID).
+			Exec(ctx)
+		if uerr != nil {
+			return uerr
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return newVersion, err
+}
+
+// UpdateEntry CAS-updates an entry's targets + disabled in place atomically, preserving entry_id
+// and every other column (sp-mwco.2.8 §4.6 — UpdateProfileEntry's store call, a scoping-only
+// mutation). Returns ErrNotFound when the profile version matches but the entry row is absent,
+// ErrConflict when expectedVersion is stale.
+func (r *profileRepo) UpdateEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, targets []string, disabled bool, now int64) (uint64, error) {
+	if len(targets) == 0 {
+		targets = []string{"all"}
+	}
+	targetsJSON, err := json.Marshal(targets)
+	if err != nil {
+		return 0, fmt.Errorf("store: encode entry targets: %w", err)
+	}
+
+	var newVersion uint64
+	txErr := r.runInTx(ctx, func(db bun.IDB) error {
+		ver, uerr := casUpdateDB(ctx, db, profileID, expectedVersion, now, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+			return q
+		})
+		if uerr != nil {
+			return uerr
+		}
+		newVersion = ver
+		res, uerr := db.NewUpdate().Model((*ProfileEntry)(nil)).
+			Set("targets = ?", string(targetsJSON)).
+			Set("disabled = ?", disabled).
+			Where("profile_id = ? AND entry_id = ?", profileID, entryID).
+			Exec(ctx)
+		if uerr != nil {
+			return uerr
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return newVersion, txErr
+}
+
 // RemoveEntry CAS-removes an entry from the profile atomically.
 func (r *profileRepo) RemoveEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, now int64) (uint64, error) {
 	var newVersion uint64
@@ -210,6 +277,128 @@ func (r *profileRepo) ListProfileIDsByCatalogRef(ctx context.Context, catalogID 
 	return ids, nil
 }
 
+// ListProfileIDsByBundleVersions returns the distinct profile_ids of profiles that contain at
+// least one bundle_ref entry pinned to one of the given versionIDs. Empty slice (not error) when
+// versionIDs is empty or none match — mirrors ListProfileIDsByCatalogRef's never-nil contract.
+func (r *profileRepo) ListProfileIDsByBundleVersions(ctx context.Context, versionIDs []string) ([]string, error) {
+	if len(versionIDs) == 0 {
+		return []string{}, nil
+	}
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND version_id IN (?)", string(ProfileSourceBundle), bun.In(versionIDs)).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// CountRefsByCatalogRef returns the number of distinct profiles, and the number of distinct
+// owners of those profiles, that contain a catalog_ref entry pointing to catalogID. Zero refs
+// returns (0, 0, nil) — never an error.
+func (r *profileRepo) CountRefsByCatalogRef(ctx context.Context, catalogID string) (int, int, error) {
+	var row struct {
+		Profiles int `bun:"profiles"`
+		Owners   int `bun:"owners"`
+	}
+	err := r.db.NewSelect().
+		TableExpr("profile_entries AS pe").
+		Join("JOIN profiles AS pf ON pf.profile_id = pe.profile_id").
+		ColumnExpr("COUNT(DISTINCT pe.profile_id) AS profiles").
+		ColumnExpr("COUNT(DISTINCT pf.owner_id) AS owners").
+		Where("pe.source_kind = ? AND pe.catalog_id = ?", string(ProfileSourceCatalog), catalogID).
+		Scan(ctx, &row)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row.Profiles, row.Owners, nil
+}
+
+// ListProfileIDsByBundleRef returns the distinct profile_ids of profiles that contain at least
+// one bundle_ref entry pinned to the given bundleID. Empty slice (not error) when none match.
+func (r *profileRepo) ListProfileIDsByBundleRef(ctx context.Context, bundleID string) ([]string, error) {
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND bundle_id = ?", string(ProfileSourceBundle), bundleID).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// ListProfileIDsByBundleVersionRef returns the distinct profile_ids of profiles that contain at
+// least one bundle_ref entry pinned to the given versionID. Empty slice (not error) when none
+// match.
+func (r *profileRepo) ListProfileIDsByBundleVersionRef(ctx context.Context, versionID string) ([]string, error) {
+	var ids []string
+	err := r.db.NewSelect().
+		TableExpr("profile_entries").
+		ColumnExpr("DISTINCT profile_id").
+		Where("source_kind = ? AND version_id = ?", string(ProfileSourceBundle), versionID).
+		Scan(ctx, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// CountBundleRefs returns the number of distinct profiles, and the number of distinct owners of
+// those profiles, that contain a bundle_ref entry pinned to bundleID. Zero refs returns
+// (0, 0, nil) — never an error. Mirrors CountRefsByCatalogRef's shape.
+func (r *profileRepo) CountBundleRefs(ctx context.Context, bundleID string) (int, int, error) {
+	var row struct {
+		Profiles int `bun:"profiles"`
+		Owners   int `bun:"owners"`
+	}
+	err := r.db.NewSelect().
+		TableExpr("profile_entries AS pe").
+		Join("JOIN profiles AS pf ON pf.profile_id = pe.profile_id").
+		ColumnExpr("COUNT(DISTINCT pe.profile_id) AS profiles").
+		ColumnExpr("COUNT(DISTINCT pf.owner_id) AS owners").
+		Where("pe.source_kind = ? AND pe.bundle_id = ?", string(ProfileSourceBundle), bundleID).
+		Scan(ctx, &row)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row.Profiles, row.Owners, nil
+}
+
+// CountBundleVersionRefs returns the number of distinct profiles, and the number of distinct
+// owners of those profiles, that contain a bundle_ref entry pinned to versionID. Zero refs
+// returns (0, 0, nil) — never an error.
+func (r *profileRepo) CountBundleVersionRefs(ctx context.Context, versionID string) (int, int, error) {
+	var row struct {
+		Profiles int `bun:"profiles"`
+		Owners   int `bun:"owners"`
+	}
+	err := r.db.NewSelect().
+		TableExpr("profile_entries AS pe").
+		Join("JOIN profiles AS pf ON pf.profile_id = pe.profile_id").
+		ColumnExpr("COUNT(DISTINCT pe.profile_id) AS profiles").
+		ColumnExpr("COUNT(DISTINCT pf.owner_id) AS owners").
+		Where("pe.source_kind = ? AND pe.version_id = ?", string(ProfileSourceBundle), versionID).
+		Scan(ctx, &row)
+	if err != nil {
+		return 0, 0, err
+	}
+	return row.Profiles, row.Owners, nil
+}
+
 // casUpdate is a convenience wrapper around casUpdateDB using r.db.
 func (r *profileRepo) casUpdate(ctx context.Context, profileID string, expectedVersion uint64, now int64, extra func(*bun.UpdateQuery) *bun.UpdateQuery) (uint64, error) {
 	return casUpdateDB(ctx, r.db, profileID, expectedVersion, now, extra)
@@ -244,8 +433,29 @@ func casUpdateDB(ctx context.Context, db bun.IDB, profileID string, expectedVers
 
 // --- JSON helpers -----------------------------------------------------------
 
-// encodeProfileEntry marshals Targets and MCPSecretRefs into their JSON columns.
-// Empty Targets defaults to ["all"].
+// bundleOverrides is the JSON shape of ProfileEntry.BundleOverridesJSON (sp-mwco.1.8 §4.4):
+// {"exclude":["skills/foo"],"rename":{"skills/bar":"bar-2"}}, keyed by member source_subdir.
+type bundleOverrides struct {
+	Exclude []string          `json:"exclude,omitempty"`
+	Rename  map[string]string `json:"rename,omitempty"`
+}
+
+// EncodeBundleOverrides marshals exclude/rename overrides into the bundle_overrides column shape.
+// Returns "" when both are empty — the non-bundle-entry / no-overrides default. Exported so the cp
+// package can build the same JSON shape for ProfileRepo.UpdateEntryPin without duplicating it.
+func EncodeBundleOverrides(exclude []string, rename map[string]string) (string, error) {
+	if len(exclude) == 0 && len(rename) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(bundleOverrides{Exclude: exclude, Rename: rename})
+	if err != nil {
+		return "", fmt.Errorf("store: encode bundle overrides: %w", err)
+	}
+	return string(b), nil
+}
+
+// encodeProfileEntry marshals Targets, MCPSecretRefs, and (for bundle_ref entries)
+// ExcludeSubdirs/RenameSubdirs into their JSON columns. Empty Targets defaults to ["all"].
 func encodeProfileEntry(e *ProfileEntry) error {
 	targets := e.Targets
 	if len(targets) == 0 {
@@ -266,10 +476,20 @@ func encodeProfileEntry(e *ProfileEntry) error {
 		return fmt.Errorf("store: encode entry mcp_secret_refs: %w", err)
 	}
 	e.SecretRefsJSON = string(rb)
+
+	if e.SourceKind == ProfileSourceBundle {
+		ov, err := EncodeBundleOverrides(e.ExcludeSubdirs, e.RenameSubdirs)
+		if err != nil {
+			return err
+		}
+		e.BundleOverridesJSON = ov
+	} else {
+		e.BundleOverridesJSON = ""
+	}
 	return nil
 }
 
-// decodeProfileEntry unmarshals the JSON text columns back into slice fields.
+// decodeProfileEntry unmarshals the JSON text columns back into slice/map fields.
 func decodeProfileEntry(e *ProfileEntry) error {
 	if e.TargetsJSON != "" {
 		if err := json.Unmarshal([]byte(e.TargetsJSON), &e.Targets); err != nil {
@@ -280,6 +500,14 @@ func decodeProfileEntry(e *ProfileEntry) error {
 		if err := json.Unmarshal([]byte(e.SecretRefsJSON), &e.MCPSecretRefs); err != nil {
 			return fmt.Errorf("store: decode entry mcp_secret_refs: %w", err)
 		}
+	}
+	if e.BundleOverridesJSON != "" {
+		var ov bundleOverrides
+		if err := json.Unmarshal([]byte(e.BundleOverridesJSON), &ov); err != nil {
+			return fmt.Errorf("store: decode entry bundle_overrides: %w", err)
+		}
+		e.ExcludeSubdirs = ov.Exclude
+		e.RenameSubdirs = ov.Rename
 	}
 	return nil
 }

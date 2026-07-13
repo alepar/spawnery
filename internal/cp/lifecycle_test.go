@@ -405,6 +405,41 @@ func TestResumeSpawn(t *testing.T) {
 	}
 }
 
+// TestResumeSpawn_ClearsStaleSkillInstalls verifies that a fresh provisioning attempt
+// (resumeLocked) drops any skill-install report left over from a prior episode (sp-mwco.2.7): the
+// fake node in this test sends no SkillInstallReport, so if resumeLocked didn't clear it, the
+// stale entry would linger forever, misrepresenting the new episode's (unconfigured) skill state.
+func TestResumeSpawn_ClearsStaleSkillInstalls(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	stop := startAcker(t, s, reg)
+	defer stop()
+	ctx := auth.WithOwner(context.Background(), "alice")
+
+	resp, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatalf("CreateSpawn: %v", err)
+	}
+	id := resp.Msg.SpawnId
+	waitActive(t, s, id)
+
+	// Seed a stale entry as if a prior episode had reported it.
+	s.skillInstalls.set(id, 1, []skillInstallEntry{{Name: "stale-from-prior-episode", Status: "applied"}})
+
+	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("SuspendSpawn: %v", err)
+	}
+	if _, err := s.ResumeSpawn(ctx, connect.NewRequest(&cpv1.ResumeSpawnRequest{SpawnId: id})); err != nil {
+		t.Fatalf("ResumeSpawn: %v", err)
+	}
+	sp, _ := s.st.Spawns().Get(ctx, id)
+	if sp.Status != store.Active {
+		t.Fatalf("status=%v want active after resume", sp.Status)
+	}
+	if _, ok := s.skillInstalls.get(id); ok {
+		t.Error("stale skillInstalls entry survived resume (the fake node never re-reported it)")
+	}
+}
+
 func TestRecreateSpawn(t *testing.T) {
 	s, reg, _ := newTestServer(t)
 	stop := startAcker(t, s, reg)

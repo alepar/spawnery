@@ -20,6 +20,22 @@ func NewRegistry(env Environ) Registry {
 	r["opencode"] = newOpencodeEmitter(xdgConfig)
 	r["hermes"] = newHermesEmitter(homeDir)
 	r["goose"] = newGooseEmitter(xdgConfig)
+	// pi (sp-mwco.2.5, spike-confirmed: reads ~/.agents/skills natively, no glue).
+	//
+	// MIGRATION HAZARD, decided (not a surprise): registering pi here silently widens
+	// every existing profile entry with targets: []/["all"] to a sixth agent. This is
+	// intended, not grandfathered — "all" is stored as ["all"], translated to
+	// "all-detected" at CP assembly time, and resolved in the pod against the agents
+	// actually detected there (Detect ∩ registry); a new registry entry joining is
+	// exactly what "every agent this spawn could run" asks for. Blast radius is
+	// bounded: a pi spawn gets the same skills the profile already gives
+	// claude/goose/opencode; explicit target lists are unaffected; the web "all"
+	// checkbox renders from the generated AGENTS list, so pi shows up as a checkbox
+	// the user can uncheck. See the dated Post-Implementation Note in
+	// docs/superpowers/specs/2026-07-12-all-agent-skill-install-design.md.
+	r["pi"] = newPiEmitter(homeDir)
+	// nori is deliberately NOT registered: it is an ACP client, not a harness — it has
+	// no native skill/config surface of its own to install into.
 	return r
 }
 
@@ -32,7 +48,7 @@ func (r Registry) Lookup(name string) (Emitter, bool) {
 // Names returns the list of registered agent names in a deterministic order.
 func (r Registry) Names() []string {
 	// Return in canonical order.
-	canonical := []string{"claude", "codex", "opencode", "hermes", "goose"}
+	canonical := []string{"claude", "codex", "opencode", "hermes", "goose", "pi"}
 	out := make([]string, 0, len(canonical))
 	for _, name := range canonical {
 		if _, ok := r[name]; ok {

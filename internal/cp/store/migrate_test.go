@@ -32,7 +32,7 @@ func TestMigrationsCreateAllTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(names)
-	want := []string{"agent_image_binaries", "agent_images", "app_version_mounts", "app_versions", "apps", "customization_catalog", "migration_transfer_sets", "owners", "profile_entries", "profile_secrets", "profiles", "secrets", "spawn_artifacts", "spawn_containers", "spawn_mounts", "spawns"}
+	want := []string{"agent_image_binaries", "agent_images", "app_version_mounts", "app_versions", "apps", "customization_catalog", "migration_transfer_sets", "owners", "profile_entries", "profile_secrets", "profiles", "secrets", "skill_bundle", "skill_bundle_member", "skill_bundle_version", "skill_object_denylist", "spawn_artifacts", "spawn_containers", "spawn_mounts", "spawns"}
 	if len(names) != len(want) {
 		t.Fatalf("tables = %v, want %v", names, want)
 	}
@@ -168,5 +168,124 @@ func TestSQLiteDownForkContractDropsAddedColumns(t *testing.T) {
 		if transferSets[col] {
 			t.Fatalf("migration_transfer_sets.%s still present after rollback", col)
 		}
+	}
+}
+
+// TestMigration0025BackfillsNullProvenance is the bead's "re-paste key matches" criterion at the
+// SQL level: a pre-0025 catalog row with NULL source_ref/source_subdir must read back as empty after
+// the migration, and must be selectable by the exact equality predicate the unique index and the
+// repo's GetByKey lookup use — proving a NULL-bearing key can no longer silently never match.
+func TestMigration0025BackfillsNullProvenance(t *testing.T) {
+	sqldb, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqldb.Close()
+
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(sqldb, "migrations/sqlite", 24); err != nil {
+		t.Fatalf("migrate up to 24: %v", err)
+	}
+
+	if _, err := sqldb.Exec(
+		`INSERT INTO customization_catalog
+			(catalog_id, creator_id, kind, name, description, listed, created_at, updated_at,
+			 source_url, source_ref, source_subdir, sha256, size)
+		 VALUES (?, ?, 'skill', 'my-skill', 'desc', 1, 1, 1, ?, NULL, NULL, NULL, NULL)`,
+		"cat-null-prov", "alice", "owner/repo",
+	); err != nil {
+		t.Fatalf("insert pre-migration row: %v", err)
+	}
+
+	if err := goose.UpTo(sqldb, "migrations/sqlite", 25); err != nil {
+		t.Fatalf("migrate up to 25: %v", err)
+	}
+
+	var sourceRef, sourceSubdir string
+	if err := sqldb.QueryRow(
+		"SELECT source_ref, source_subdir FROM customization_catalog WHERE catalog_id = ?", "cat-null-prov",
+	).Scan(&sourceRef, &sourceSubdir); err != nil {
+		t.Fatalf("select backfilled row: %v", err)
+	}
+	if sourceRef != "" || sourceSubdir != "" {
+		t.Fatalf("source_ref/source_subdir = %q/%q, want empty strings", sourceRef, sourceSubdir)
+	}
+
+	var catalogID string
+	if err := sqldb.QueryRow(
+		"SELECT catalog_id FROM customization_catalog WHERE source_ref = '' AND source_subdir = ''",
+	).Scan(&catalogID); err != nil {
+		t.Fatalf("select by empty-string predicate: %v", err)
+	}
+	if catalogID != "cat-null-prov" {
+		t.Fatalf("catalog_id = %q, want cat-null-prov", catalogID)
+	}
+}
+
+// TestMigration0025Down verifies the sqlite table-rebuild rollback is honest: DownTo(24) succeeds,
+// drops the three bundle tables, and leaves customization_catalog rows intact.
+func TestMigration0025Down(t *testing.T) {
+	sqldb, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqldb.Close()
+
+	goose.SetBaseFS(migrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpTo(sqldb, "migrations/sqlite", 25); err != nil {
+		t.Fatalf("migrate up to 25: %v", err)
+	}
+
+	if _, err := sqldb.Exec(
+		`INSERT INTO customization_catalog
+			(catalog_id, creator_id, kind, name, description, listed, created_at, updated_at,
+			 source_url, source_ref, source_subdir, sha256, size, bundle_member, source_commit)
+		 VALUES (?, ?, 'skill', 'my-skill', 'desc', 1, 1, 1, 'owner/repo', '', '', NULL, NULL, 0, '')`,
+		"cat-down", "alice",
+	); err != nil {
+		t.Fatalf("insert post-migration row: %v", err)
+	}
+
+	if err := goose.DownTo(sqldb, "migrations/sqlite", 24); err != nil {
+		t.Fatalf("migrate down to 24: %v", err)
+	}
+
+	var name string
+	if err := sqldb.QueryRow("SELECT name FROM customization_catalog WHERE catalog_id = ?", "cat-down").Scan(&name); err != nil {
+		t.Fatalf("select surviving row: %v", err)
+	}
+	if name != "my-skill" {
+		t.Fatalf("name = %q, want my-skill", name)
+	}
+
+	var tableCount int
+	if err := sqldb.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
+			('skill_bundle', 'skill_bundle_version', 'skill_bundle_member')`,
+	).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 0 {
+		t.Fatalf("bundle tables remaining after rollback = %d, want 0", tableCount)
+	}
+
+	rows, err := sqldb.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("foreign_key_check returned violations after rollback")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("foreign_key_check rows: %v", err)
 	}
 }

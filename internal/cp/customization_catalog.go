@@ -39,9 +39,13 @@ func (s *Server) CreateCatalogEntry(ctx context.Context, req *connect.Request[cp
 		Name:        name,
 		Description: req.Msg.Description,
 		Content:     req.Msg.Content,
-		Listed:      true,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		// Unlisted by default (sp-mwco.3.4 §4.6 D1): ListVisibleTo has no tenant filter beyond
+		// "listed OR mine", so an inline entry left listed=true here would leak to every other
+		// tenant just like a URL-ingested skill. PublishCatalogEntry (admin-only) is the sole
+		// door onto the global catalog.
+		Listed:    false,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := s.st.CustomizationCatalog().Create(ctx, e); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -52,7 +56,7 @@ func (s *Server) CreateCatalogEntry(ctx context.Context, req *connect.Request[cp
 // --- GetCatalogEntry ---------------------------------------------------------
 
 func (s *Server) GetCatalogEntry(ctx context.Context, req *connect.Request[cpv1.GetCatalogEntryRequest]) (*connect.Response[cpv1.GetCatalogEntryResponse], error) {
-	_, ok := auth.OwnerFromContext(ctx)
+	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
@@ -63,28 +67,28 @@ func (s *Server) GetCatalogEntry(ctx context.Context, req *connect.Request[cpv1.
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	// Tenant gate (sp-mwco.3.4 §4.6 D6): NotFound, not PermissionDenied — do not confirm
+	// existence of an entry the caller can't see.
+	if !catalogEntryVisibleTo(e, owner) {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+	}
 	return connect.NewResponse(&cpv1.GetCatalogEntryResponse{Entry: catalogEntryToProto(e)}), nil
 }
 
 // --- ListCatalogEntries -------------------------------------------------------
 
 func (s *Server) ListCatalogEntries(ctx context.Context, _ *connect.Request[cpv1.ListCatalogEntriesRequest]) (*connect.Response[cpv1.ListCatalogEntriesResponse], error) {
-	_, ok := auth.OwnerFromContext(ctx)
+	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
-	entries, err := s.st.CustomizationCatalog().List(ctx)
+	entries, err := s.st.CustomizationCatalog().ListVisibleTo(ctx, owner)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	out := make([]*cpv1.CatalogEntrySummary, len(entries))
 	for i, e := range entries {
-		out[i] = &cpv1.CatalogEntrySummary{
-			CatalogId:   e.CatalogID,
-			Kind:        entryKindToProto(store.ProfileEntryKind(e.Kind)),
-			Name:        e.Name,
-			Description: e.Description,
-		}
+		out[i] = catalogEntrySummaryToProto(e)
 	}
 	return connect.NewResponse(&cpv1.ListCatalogEntriesResponse{Entries: out}), nil
 }
@@ -106,6 +110,13 @@ func (s *Server) UpdateCatalogEntry(ctx context.Context, req *connect.Request[cp
 	if e.CreatorID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
 	}
+	// URL-ingested rows are immutable: assembly prefers SHA256 over Content, so an edit here
+	// is either rejected by the tar validator or silently ignored at spawn time. Change
+	// upstream and re-ingest instead.
+	if e.SHA256 != nil && *e.SHA256 != "" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("catalog entry %q was ingested from a URL and is immutable; change it upstream and re-ingest", req.Msg.CatalogId))
+	}
 	name := strings.TrimSpace(req.Msg.Name)
 	if err := validateCustomContent(store.ProfileEntryKind(e.Kind), name, req.Msg.Content); err != nil {
 		return nil, err
@@ -121,11 +132,30 @@ func (s *Server) UpdateCatalogEntry(ctx context.Context, req *connect.Request[cp
 
 // --- DeleteCatalogEntry -------------------------------------------------------
 
+// DeleteCatalogEntry deletes a catalog entry, guarded by a reference check run under an exclusive
+// lock (sp-mwco.3.3 §3):
+//
+//  1. A catalog entry that is a member of any bundle version (SkillBundles().MemberVersionIDs) is
+//     rejected outright — force does NOT override this, since forcing would orphan a live bundle
+//     version. Delete the bundle version instead.
+//  2. Otherwise, an entry referenced by any profile (Profiles().CountRefsByCatalogRef) is rejected
+//     with FailedPrecondition unless force=true. The message carries COUNTS ONLY — never a
+//     profile id, name, or owner id: the catalog is global and refs span tenants, so naming them
+//     would be a cross-tenant disclosure.
+//
+// Both checks and the delete itself run inside one WithTx, with CustomizationCatalog().LockRow
+// taken first: LockRow is the mutex AddProfileEntry also takes on the same catalog_id before
+// inserting a CATALOG_REF entry, so the two calls serialize instead of racing. That closes the
+// only path that could create a fresh dangling ref — force=true still creates one deliberately,
+// and profile-assembly keeps failing loud on a dangling ref as defense in depth.
 func (s *Server) DeleteCatalogEntry(ctx context.Context, req *connect.Request[cpv1.DeleteCatalogEntryRequest]) (*connect.Response[cpv1.DeleteCatalogEntryResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
 	}
+	// Fast-path pre-tx check: cheap existence + creator check before opening a transaction for the
+	// common "wrong owner" / "already gone" cases. The in-tx re-check below (under the lock) is
+	// authoritative.
 	e, err := s.st.CustomizationCatalog().Get(ctx, req.Msg.CatalogId)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
@@ -136,18 +166,60 @@ func (s *Server) DeleteCatalogEntry(ctx context.Context, req *connect.Request[cp
 	if e.CreatorID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
 	}
-	// Resolve affected spawns BEFORE deleting — no FK cascade from catalog→profile_entries,
-	// so the entries survive the catalog delete, but capturing first is belt-and-suspenders.
-	affected, killErr := s.resolveAffectedSpawns(ctx, req.Msg.CatalogId)
-	if killErr != nil {
-		log.Printf("kill-switch: resolve for catalog %s failed: %v (delete proceeds)", req.Msg.CatalogId, killErr)
-	}
-	if err := s.st.CustomizationCatalog().Delete(ctx, req.Msg.CatalogId); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+
+	var affected []store.Spawn
+	txErr := s.st.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CustomizationCatalog().LockRow(ctx, req.Msg.CatalogId); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+			}
+			return err
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		e, err := tx.CustomizationCatalog().Get(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		if e.CreatorID != owner {
+			return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
+		}
+
+		versionIDs, err := tx.SkillBundles().MemberVersionIDs(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		if len(versionIDs) > 0 {
+			return refusedByBundleMembership(req.Msg.CatalogId, len(versionIDs))
+		}
+
+		profiles, owners, err := tx.Profiles().CountRefsByCatalogRef(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		if profiles > 0 && !req.Msg.Force {
+			return refusedByProfileRefs(fmt.Sprintf("catalog entry %s", req.Msg.CatalogId), profiles, owners)
+		}
+
+		// Resolve affected spawns in-tx (read-consistent with the delete below), then delete.
+		profileIDs, err := tx.Profiles().ListProfileIDsByCatalogRef(ctx, req.Msg.CatalogId)
+		if err != nil {
+			return err
+		}
+		affected, err = tx.Spawns().ListLiveByProfileIDs(ctx, profileIDs)
+		if err != nil {
+			return err
+		}
+		return tx.CustomizationCatalog().Delete(ctx, req.Msg.CatalogId)
+	})
+	if txErr != nil {
+		var cerr *connect.Error
+		if errors.As(txErr, &cerr) {
+			return nil, cerr
+		}
+		return nil, connect.NewError(connect.CodeInternal, txErr)
 	}
+
+	// Kill-switch AFTER commit — never inside the tx: it terminates spawns over the network and
+	// writes rows on a best-effort basis, and must not hold the delete's lock hostage.
 	s.killSwitchForCatalog(ctx, req.Msg.CatalogId, affected)
 	return connect.NewResponse(&cpv1.DeleteCatalogEntryResponse{}), nil
 }
@@ -166,36 +238,135 @@ func (s *Server) SetCatalogListing(ctx context.Context, req *connect.Request[cpv
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+
+	if req.Msg.Listed {
+		// Only an admin may (re)list via the legacy verb (sp-mwco.3.4 §4.6 D4) — otherwise it is a
+		// trivial bypass of the admin-only PublishCatalogEntry gate. Creators keep unlisting, below.
+		if !s.isAdmin(owner) {
+			return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("listing an entry requires admin"))
+		}
+		if err := s.st.CustomizationCatalog().SetListed(ctx, req.Msg.CatalogId, true); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+			}
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		return connect.NewResponse(&cpv1.SetCatalogListingResponse{}), nil
+	}
+
 	if e.CreatorID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not the creator of %q", req.Msg.CatalogId))
 	}
-	if err := s.st.CustomizationCatalog().SetListed(ctx, req.Msg.CatalogId, req.Msg.Listed); err != nil {
+	counts, err := s.unlistWithGuard(ctx, req.Msg.CatalogId, req.Msg.Confirm)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&cpv1.SetCatalogListingResponse{
+		ReferencedProfiles:       int32(counts.profiles),
+		ReferencedOwners:         int32(counts.owners),
+		ReferencedBundleVersions: int32(counts.bundleVersions),
+		TerminatedSpawns:         int32(counts.terminated),
+	}), nil
+}
+
+// listingCounts summarizes the reference blast-radius of an unlist — used both to build the
+// guard's FailedPrecondition message and to populate the wire response after a confirmed unlist.
+type listingCounts struct {
+	profiles       int
+	owners         int
+	bundleVersions int
+	terminated     int
+}
+
+// unlistWithGuard is the shared listed=false path behind SetCatalogListing and
+// UnpublishCatalogEntry (sp-mwco.3.4 §4.6 D5 — guarded unlisting). It counts references FIRST:
+// profiles/owners referencing catalogID via a catalog_ref entry, and bundle versions that include
+// it as a member. A nonzero reference count with confirm=false is rejected with
+// FailedPrecondition carrying COUNTS ONLY — never profile ids, owner ids, or spawn ids (the same
+// cross-tenant-disclosure rule as the delete path, sp-mwco.3.3 §4.3). confirm=true (or zero
+// references) proceeds to SetListed(false) and the existing kill-switch.
+func (s *Server) unlistWithGuard(ctx context.Context, catalogID string, confirm bool) (listingCounts, error) {
+	if _, err := s.st.CustomizationCatalog().Get(ctx, catalogID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+			return listingCounts{}, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return listingCounts{}, connect.NewError(connect.CodeInternal, err)
 	}
-	// De-listing is a revoke: kill running spawns that use this entry.
-	// Re-listing (listed=true) is not a revoke — no kill.
-	if !req.Msg.Listed {
-		affected, killErr := s.resolveAffectedSpawns(ctx, req.Msg.CatalogId)
+
+	profiles, owners, err := s.st.Profiles().CountRefsByCatalogRef(ctx, catalogID)
+	if err != nil {
+		return listingCounts{}, connect.NewError(connect.CodeInternal, err)
+	}
+	versionIDs, err := s.st.SkillBundles().MemberVersionIDs(ctx, catalogID)
+	if err != nil {
+		return listingCounts{}, connect.NewError(connect.CodeInternal, err)
+	}
+	counts := listingCounts{profiles: profiles, owners: owners, bundleVersions: len(versionIDs)}
+
+	// A spawn is in the blast radius via a catalog_ref profile OR via bundle-version membership
+	// (sp-mwco.1.6) — resolving spawns when the entry is referenced by neither would always come
+	// back empty, so only skip the query in that case.
+	var affected []store.Spawn
+	if profiles > 0 || counts.bundleVersions > 0 {
+		var killErr error
+		affected, killErr = s.resolveAffectedSpawns(ctx, catalogID)
 		if killErr != nil {
-			log.Printf("kill-switch: resolve for catalog %s failed: %v (delist proceeds)", req.Msg.CatalogId, killErr)
+			log.Printf("kill-switch: resolve for catalog %s failed: %v", catalogID, killErr)
 		}
-		s.killSwitchForCatalog(ctx, req.Msg.CatalogId, affected)
 	}
-	return connect.NewResponse(&cpv1.SetCatalogListingResponse{}), nil
+
+	if (profiles > 0 || counts.bundleVersions > 0) && !confirm {
+		return listingCounts{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+			"entry is referenced by %d profile(s) across %d owner(s) and %d bundle version(s); re-send with confirm=true to unlist (this terminates %d running spawn(s))",
+			profiles, owners, counts.bundleVersions, len(affected)))
+	}
+
+	if err := s.st.CustomizationCatalog().SetListed(ctx, catalogID, false); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return listingCounts{}, connect.NewError(connect.CodeNotFound, fmt.Errorf("catalog entry not found"))
+		}
+		return listingCounts{}, connect.NewError(connect.CodeInternal, err)
+	}
+	s.killSwitchForCatalog(ctx, catalogID, affected)
+	counts.terminated = len(affected)
+	return counts, nil
 }
 
 // --- Kill-switch helpers (sp-nrzf.3.9) ----------------------------------------
 
-// resolveAffectedSpawns returns the live (non-deleted) spawns that reference catalogID
-// through a catalog_ref profile entry. Returns (nil, err) on store failure.
+// resolveAffectedSpawns returns the live (non-deleted) spawns that reference catalogID, either
+// directly through a catalog_ref profile entry, or transitively through a bundle_ref profile
+// entry pinned to a bundle version that includes catalogID as a member (sp-mwco.1.6 §4.5 — a
+// skill delivered only via a bundle must be just as revocable as one referenced directly). The
+// two legs are unioned and deduplicated before resolving live spawns. Returns (nil, err) if
+// EITHER leg fails — a partial (best-effort) union would silently under-terminate, which is the
+// exact bug class this resolver exists to close.
 func (s *Server) resolveAffectedSpawns(ctx context.Context, catalogID string) ([]store.Spawn, error) {
-	profileIDs, err := s.st.Profiles().ListProfileIDsByCatalogRef(ctx, catalogID)
+	catalogProfileIDs, err := s.st.Profiles().ListProfileIDsByCatalogRef(ctx, catalogID)
 	if err != nil {
 		return nil, fmt.Errorf("list profile ids: %w", err)
 	}
+	versionIDs, err := s.st.SkillBundles().MemberVersionIDs(ctx, catalogID)
+	if err != nil {
+		return nil, fmt.Errorf("list bundle member versions: %w", err)
+	}
+	bundleProfileIDs, err := s.st.Profiles().ListProfileIDsByBundleVersions(ctx, versionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list profile ids by bundle version: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(catalogProfileIDs)+len(bundleProfileIDs))
+	profileIDs := make([]string, 0, len(catalogProfileIDs)+len(bundleProfileIDs))
+	for _, ids := range [][]string{catalogProfileIDs, bundleProfileIDs} {
+		for _, id := range ids {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			profileIDs = append(profileIDs, id)
+		}
+	}
+
 	spawns, err := s.st.Spawns().ListLiveByProfileIDs(ctx, profileIDs)
 	if err != nil {
 		return nil, fmt.Errorf("list live spawns: %w", err)
@@ -221,18 +392,80 @@ func (s *Server) killSwitchForCatalog(ctx context.Context, catalogID string, aff
 	log.Printf("kill-switch: catalog %s: terminated %d/%d affected spawns", catalogID, terminated, len(affected))
 }
 
+// catalogEntryVisibleTo reports whether a catalog entry is visible to owner under the tenant
+// gate (sp-mwco.3.4 §4.6 D6): listed OR the caller is the creator.
+func catalogEntryVisibleTo(e store.CustomizationCatalogEntry, owner string) bool {
+	return e.Listed || e.CreatorID == owner
+}
+
 // --- Wire <-> store conversions -----------------------------------------------
+
+// provenanceSourceURL renders the persisted provenance source as a resolvable URL.
+// ingest_skill.go persists a bare "owner/repo" slug (github.com is the only supported host);
+// a value that already has a scheme passes through unchanged. The STORED value stays canonical:
+// it is the bundle unique key (creator_id, source_url, source_ref, source_subdir) and
+// skillfetch.ParseRepoURL accepts both forms, so nothing downstream cares.
+func provenanceSourceURL(s string) string {
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		return s // deliberately dumb + total
+	}
+	return "https://github.com/" + s
+}
+
+// derefString returns "" for a nil pointer, else the pointed-to value.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// derefInt64 returns 0 for a nil pointer, else the pointed-to value.
+func derefInt64(i *int64) int64 {
+	if i == nil {
+		return 0
+	}
+	return *i
+}
 
 func catalogEntryToProto(e store.CustomizationCatalogEntry) *cpv1.CustomizationCatalogEntry {
 	return &cpv1.CustomizationCatalogEntry{
-		CatalogId:   e.CatalogID,
-		CreatorId:   e.CreatorID,
-		Kind:        entryKindToProto(store.ProfileEntryKind(e.Kind)),
-		Name:        e.Name,
-		Description: e.Description,
-		Content:     e.Content,
-		Listed:      e.Listed,
-		CreatedAt:   e.CreatedAt,
-		UpdatedAt:   e.UpdatedAt,
+		CatalogId:    e.CatalogID,
+		CreatorId:    e.CreatorID,
+		Kind:         entryKindToProto(store.ProfileEntryKind(e.Kind)),
+		Name:         e.Name,
+		Description:  e.Description,
+		Content:      e.Content,
+		Listed:       e.Listed,
+		CreatedAt:    e.CreatedAt,
+		UpdatedAt:    e.UpdatedAt,
+		SourceUrl:    provenanceSourceURL(e.SourceURL),
+		SourceRef:    e.SourceRef,
+		SourceSubdir: e.SourceSubdir,
+		SourceCommit: e.SourceCommit,
+		Sha256:       derefString(e.SHA256),
+		Size:         derefInt64(e.Size),
+		BundleMember: e.BundleMember,
+	}
+}
+
+// catalogEntrySummaryToProto builds the lightweight list view, including the same provenance
+// fields as catalogEntryToProto (same helpers, so the two mappers cannot drift).
+func catalogEntrySummaryToProto(e store.CustomizationCatalogEntry) *cpv1.CatalogEntrySummary {
+	return &cpv1.CatalogEntrySummary{
+		CatalogId:    e.CatalogID,
+		Kind:         entryKindToProto(store.ProfileEntryKind(e.Kind)),
+		Name:         e.Name,
+		Description:  e.Description,
+		SourceUrl:    provenanceSourceURL(e.SourceURL),
+		SourceRef:    e.SourceRef,
+		SourceSubdir: e.SourceSubdir,
+		SourceCommit: e.SourceCommit,
+		Sha256:       derefString(e.SHA256),
+		Size:         derefInt64(e.Size),
+		BundleMember: e.BundleMember,
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/uptrace/bun"
@@ -31,6 +32,18 @@ func (r *customizationCatalogRepo) Get(ctx context.Context, catalogID string) (C
 func (r *customizationCatalogRepo) List(ctx context.Context) ([]CustomizationCatalogEntry, error) {
 	var out []CustomizationCatalogEntry
 	err := r.db.NewSelect().Model(&out).Where("listed = ?", true).Order("name ASC").Scan(ctx)
+	return out, err
+}
+
+// ListVisibleTo returns every entry visible to ownerID — listed=true entries (global) UNION
+// ownerID's own entries (including unlisted) — ordered by name ASC. This is the tenant-scoped
+// visibility rule (sp-mwco.3.4 §4.6 D2): "listed OR mine". Backs ListCatalogEntries.
+func (r *customizationCatalogRepo) ListVisibleTo(ctx context.Context, ownerID string) ([]CustomizationCatalogEntry, error) {
+	var out []CustomizationCatalogEntry
+	err := r.db.NewSelect().Model(&out).
+		Where("listed = ? OR creator_id = ?", true, ownerID).
+		Order("name ASC").
+		Scan(ctx)
 	return out, err
 }
 
@@ -63,6 +76,36 @@ func (r *customizationCatalogRepo) Update(ctx context.Context, catalogID string,
 func (r *customizationCatalogRepo) SetListed(ctx context.Context, catalogID string, listed bool) error {
 	res, err := r.db.NewUpdate().Model((*CustomizationCatalogEntry)(nil)).
 		Set("listed = ?", listed).
+		Where("catalog_id = ?", catalogID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LockRow acquires an exclusive lock on the catalog row for the remainder of the enclosing tx.
+// MUST be called inside WithTx — returns an error otherwise (checked via a type assertion on the
+// underlying bun.IDB, cheap and directly testable). ErrNotFound when the row is gone, so LockRow
+// doubles as the existence check.
+//
+// Implemented as a no-op self-assignment UPDATE rather than SELECT ... FOR UPDATE: FOR UPDATE is
+// not portable (SQLite rejects it, and the hermetic store is SQLite). On Postgres the UPDATE takes
+// a row-level exclusive lock that a concurrent LockRow blocks on until commit/rollback; on SQLite
+// it promotes the enclosing transaction to a write transaction, which the driver's `_txlock`
+// setting can turn into the same block-until-commit behavior at BEGIN. This is the mutex that lets
+// DeleteCatalogEntry and AddProfileEntry serialize against each other on the referenced row
+// (sp-mwco.3.3 §2) instead of racing on the referencing rows, which row locks cannot do (a lock on
+// existing rows never blocks a fresh INSERT).
+func (r *customizationCatalogRepo) LockRow(ctx context.Context, catalogID string) error {
+	if _, ok := r.db.(*bun.DB); ok {
+		return fmt.Errorf("store: LockRow must be called inside WithTx")
+	}
+	res, err := r.db.NewUpdate().Model((*CustomizationCatalogEntry)(nil)).
+		Set("updated_at = updated_at").
 		Where("catalog_id = ?", catalogID).
 		Exec(ctx)
 	if err != nil {

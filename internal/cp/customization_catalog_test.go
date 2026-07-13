@@ -1,11 +1,17 @@
 package cp
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/cp/skillfetch"
+	"spawnery/internal/cp/skillstore"
+	"spawnery/internal/cp/store"
 )
 
 var skillContent = []byte("skill-content")
@@ -40,6 +46,30 @@ func TestCreateCatalogEntry_Happy(t *testing.T) {
 	}
 	if resp.Msg.CatalogId == "" {
 		t.Error("expected non-empty catalog_id")
+	}
+}
+
+// TestCreateCatalogEntry_UnlistedByDefault verifies the sp-mwco.3.4 §4.6 D1 rule: every newly
+// created row (inline entries too, not just URL-ingested ones) starts unlisted.
+func TestCreateCatalogEntry_UnlistedByDefault(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	resp, err := s.CreateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.CreateCatalogEntryRequest{
+		Kind:        cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+		Name:        "my-skill",
+		Description: "A test skill",
+		Content:     skillContent,
+	}))
+	if err != nil {
+		t.Fatalf("CreateCatalogEntry: %v", err)
+	}
+
+	gr, err := s.GetCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: resp.Msg.CatalogId}))
+	if err != nil {
+		t.Fatalf("GetCatalogEntry: %v", err)
+	}
+	if gr.Msg.Entry.Listed {
+		t.Error("expected listed=false for a freshly created entry")
 	}
 }
 
@@ -109,20 +139,24 @@ func TestGetCatalogEntry_Happy(t *testing.T) {
 	if resp.Msg.Entry.CreatorId != "alice" {
 		t.Errorf("creator_id mismatch: got %q", resp.Msg.Entry.CreatorId)
 	}
-	if !resp.Msg.Entry.Listed {
-		t.Error("expected listed=true")
+	// Unlisted by default (sp-mwco.3.4 §4.6 D1).
+	if resp.Msg.Entry.Listed {
+		t.Error("expected listed=false")
 	}
 }
 
-func TestGetCatalogEntry_AnyOwnerCanRead(t *testing.T) {
+// TestGetCatalogEntry_UnlistedForeignOwner_NotFound verifies the tenant gate (§4.6 D6): a
+// freshly created (unlisted) entry is invisible to anyone but its creator.
+func TestGetCatalogEntry_UnlistedForeignOwner_NotFound(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
 	catalogID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
 
-	// Bob (not creator) can read Alice's entry.
+	// Bob (not creator) cannot see Alice's unlisted entry — NotFound, not PermissionDenied (don't
+	// confirm existence).
 	_, err := s.GetCatalogEntry(bobCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catalogID}))
-	if err != nil {
-		t.Errorf("bob should be able to read any catalog entry, got: %v", err)
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("expected NotFound for a foreign unlisted entry, got %v", err)
 	}
 }
 
@@ -146,39 +180,48 @@ func TestGetCatalogEntry_Unauthenticated(t *testing.T) {
 
 // --- ListCatalogEntries -------------------------------------------------------
 
-func TestListCatalogEntries_ListedOnly(t *testing.T) {
+// TestListCatalogEntries_UnlistedInvisibleToOtherTenant verifies the tenant-scoped visibility
+// rule (sp-mwco.3.4 §4.6 D2): "listed OR mine". A freshly created (unlisted) entry is visible to
+// its creator but invisible to every other tenant.
+func TestListCatalogEntries_UnlistedInvisibleToOtherTenant(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
-	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
+	createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
 
-	// Delist it; should not appear in global list.
-	if _, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
-		CatalogId: catID, Listed: false,
-	})); err != nil {
-		t.Fatalf("SetCatalogListing: %v", err)
-	}
-
-	resp, err := s.ListCatalogEntries(aliceCtx(), connect.NewRequest(&cpv1.ListCatalogEntriesRequest{}))
+	aliceResp, err := s.ListCatalogEntries(aliceCtx(), connect.NewRequest(&cpv1.ListCatalogEntriesRequest{}))
 	if err != nil {
-		t.Fatalf("ListCatalogEntries: %v", err)
+		t.Fatalf("ListCatalogEntries alice: %v", err)
 	}
-	if len(resp.Msg.Entries) != 0 {
-		t.Errorf("expected 0 entries after delist, got %d", len(resp.Msg.Entries))
+	if len(aliceResp.Msg.Entries) != 1 {
+		t.Errorf("alice should see her own unlisted entry, got %d", len(aliceResp.Msg.Entries))
+	}
+
+	bobResp, err := s.ListCatalogEntries(bobCtx(), connect.NewRequest(&cpv1.ListCatalogEntriesRequest{}))
+	if err != nil {
+		t.Fatalf("ListCatalogEntries bob: %v", err)
+	}
+	if len(bobResp.Msg.Entries) != 0 {
+		t.Errorf("bob should NOT see alice's unlisted entry, got %d", len(bobResp.Msg.Entries))
 	}
 }
 
-func TestListCatalogEntries_AnyOwnerCanList(t *testing.T) {
+// TestListCatalogEntries_PublishedVisibleToAllTenants verifies that once an admin publishes an
+// entry, it becomes visible to every tenant (not just the creator).
+func TestListCatalogEntries_PublishedVisibleToAllTenants(t *testing.T) {
 	s, _, _ := newTestServer(t)
+	s.SetAdminOwners([]string{"admin"})
 
-	createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "alice-skill")
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "alice-skill")
+	if _, err := s.PublishCatalogEntry(adminCtx(), connect.NewRequest(&cpv1.PublishCatalogEntryRequest{CatalogId: catID})); err != nil {
+		t.Fatalf("PublishCatalogEntry: %v", err)
+	}
 
-	// Bob can see Alice's listed entry.
 	resp, err := s.ListCatalogEntries(bobCtx(), connect.NewRequest(&cpv1.ListCatalogEntriesRequest{}))
 	if err != nil {
 		t.Fatalf("ListCatalogEntries bob: %v", err)
 	}
 	if len(resp.Msg.Entries) != 1 {
-		t.Errorf("expected 1 entry visible to bob, got %d", len(resp.Msg.Entries))
+		t.Errorf("expected 1 published entry visible to bob, got %d", len(resp.Msg.Entries))
 	}
 	// Content must NOT be in the summary.
 	summary := resp.Msg.Entries[0]
@@ -259,6 +302,94 @@ func TestUpdateCatalogEntry_InvalidContent(t *testing.T) {
 	}
 }
 
+func TestUpdateCatalogEntry_URLIngestedRowRejected(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	result := makeCannedResult("url-skill")
+	fakeStore := skillstore.NewFakeSkillStore()
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
+
+	ingestResp, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
+		Url: "testowner/testrepo",
+	}))
+	if err != nil {
+		t.Fatalf("IngestSkillFromURL: %v", err)
+	}
+	catID := ingestResp.Msg.CatalogId
+
+	_, err = s.UpdateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
+		CatalogId:   catID,
+		Name:        "renamed",
+		Description: "new desc",
+		Content:     []byte("new content"),
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("expected FailedPrecondition for URL-ingested row, got %v", err)
+	}
+
+	gr, gerr := s.GetCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catID}))
+	if gerr != nil {
+		t.Fatalf("GetCatalogEntry: %v", gerr)
+	}
+	if gr.Msg.Entry.Name != "url-skill" {
+		t.Errorf("name changed despite rejected update: got %q", gr.Msg.Entry.Name)
+	}
+	// The bundle ingest path (sp-mwco.1.4) seeds Description from the discovered member, so the
+	// baseline here is the ingest-time description -- what matters is that the rejected update did
+	// not overwrite it with "new desc".
+	if gr.Msg.Entry.Description != "test description" {
+		t.Errorf("description changed despite rejected update: got %q", gr.Msg.Entry.Description)
+	}
+	if len(gr.Msg.Entry.Content) != 0 {
+		t.Errorf("content changed despite rejected update: got %q", gr.Msg.Entry.Content)
+	}
+}
+
+func TestUpdateCatalogEntry_InlineRowStillUpdatable(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "inline-skill")
+
+	_, err := s.UpdateCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
+		CatalogId:   catID,
+		Name:        "inline-renamed",
+		Description: "inline new desc",
+		Content:     []byte("inline new content"),
+	}))
+	if err != nil {
+		t.Fatalf("UpdateCatalogEntry on inline row: %v", err)
+	}
+
+	gr, gerr := s.GetCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catID}))
+	if gerr != nil {
+		t.Fatalf("GetCatalogEntry: %v", gerr)
+	}
+	if gr.Msg.Entry.Name != "inline-renamed" {
+		t.Errorf("expected inline row to update, got name %q", gr.Msg.Entry.Name)
+	}
+}
+
+func TestUpdateCatalogEntry_URLIngestedRow_NonCreator_PermissionDenied(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	result := makeCannedResult("url-skill-2")
+	fakeStore := skillstore.NewFakeSkillStore()
+	s.SetSkillIngest(&fakeFetcher{result: result}, fakeStore, skillfetch.DefaultPlainTarCapBytes)
+
+	ingestResp, err := s.IngestSkillFromURL(aliceCtx(), connect.NewRequest(&cpv1.IngestSkillFromURLRequest{
+		Url: "testowner/testrepo",
+	}))
+	if err != nil {
+		t.Fatalf("IngestSkillFromURL: %v", err)
+	}
+	catID := ingestResp.Msg.CatalogId
+
+	_, err = s.UpdateCatalogEntry(bobCtx(), connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
+		CatalogId: catID, Name: "hijacked", Content: []byte("bad"),
+	}))
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("expected PermissionDenied (ownership checked before immutability), got %v", err)
+	}
+}
+
 // --- DeleteCatalogEntry -------------------------------------------------------
 
 func TestDeleteCatalogEntry_Happy(t *testing.T) {
@@ -299,12 +430,13 @@ func TestDeleteCatalogEntry_NotFound(t *testing.T) {
 
 // --- SetCatalogListing -------------------------------------------------------
 
-func TestSetCatalogListing_Happy(t *testing.T) {
+// TestSetCatalogListing_CreatorCanUnlist verifies the creator may unlist (idempotent — the entry
+// is already unlisted by default, D1) without needing to be an admin.
+func TestSetCatalogListing_CreatorCanUnlist(t *testing.T) {
 	s, _, _ := newTestServer(t)
 
 	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
 
-	// Delist.
 	_, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
 		CatalogId: catID, Listed: false,
 	}))
@@ -316,18 +448,36 @@ func TestSetCatalogListing_Happy(t *testing.T) {
 	if gr.Msg.Entry.Listed {
 		t.Error("expected listed=false after SetCatalogListing(false)")
 	}
+}
 
-	// Relist.
-	_, err = s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+// TestSetCatalogListing_Relist_RequiresAdmin verifies §4.6 D4: listed=true via the legacy verb
+// is admin-only — otherwise it is a trivial bypass of PublishCatalogEntry's admin gate.
+func TestSetCatalogListing_Relist_RequiresAdmin(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	s.SetAdminOwners([]string{"admin"})
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "my-skill")
+
+	// Non-admin creator cannot relist via the legacy verb.
+	if _, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
 		CatalogId: catID, Listed: true,
-	}))
-	if err != nil {
-		t.Fatalf("SetCatalogListing true: %v", err)
+	})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("expected PermissionDenied for non-admin relist, got %v", err)
 	}
 
-	gr, _ = s.GetCatalogEntry(aliceCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catID}))
+	// Admin can.
+	if _, err := s.SetCatalogListing(adminCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+		CatalogId: catID, Listed: true,
+	})); err != nil {
+		t.Fatalf("SetCatalogListing true (admin): %v", err)
+	}
+
+	gr, err := s.GetCatalogEntry(bobCtx(), connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catID}))
+	if err != nil {
+		t.Fatalf("bob GetCatalogEntry after admin relist: %v", err)
+	}
 	if !gr.Msg.Entry.Listed {
-		t.Error("expected listed=true after SetCatalogListing(true)")
+		t.Error("expected listed=true after admin relist")
 	}
 }
 
@@ -352,5 +502,105 @@ func TestSetCatalogListing_NotFound(t *testing.T) {
 	}))
 	if connect.CodeOf(err) != connect.CodeNotFound {
 		t.Errorf("expected NotFound, got %v", err)
+	}
+}
+
+// --- Guarded unlisting (sp-mwco.3.4 §4.6 D5) -----------------------------------
+
+func TestSetCatalogListing_GuardedUnlist_NoReferences_Succeeds(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "unused-skill")
+
+	resp, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+		CatalogId: catID, Listed: false, Confirm: false,
+	}))
+	if err != nil {
+		t.Fatalf("SetCatalogListing: %v", err)
+	}
+	if resp.Msg.ReferencedProfiles != 0 || resp.Msg.ReferencedOwners != 0 ||
+		resp.Msg.ReferencedBundleVersions != 0 || resp.Msg.TerminatedSpawns != 0 {
+		t.Errorf("expected all-zero counts for an unreferenced entry, got %+v", resp.Msg)
+	}
+}
+
+func TestSetCatalogListing_GuardedUnlist_References_RequiresConfirm(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "widely-used")
+
+	// 3 profiles across 2 owners.
+	pf1 := uuid.NewString()
+	createProfileForKS(t, s, pf1, "bob")
+	addCatalogRefEntryForKS(t, s, pf1, "e1", catID)
+
+	pf2 := uuid.NewString()
+	createProfileForKS(t, s, pf2, "bob")
+	addCatalogRefEntryForKS(t, s, pf2, "e2", catID)
+
+	pf3 := uuid.NewString()
+	createProfileForKS(t, s, pf3, "carol")
+	addCatalogRefEntryForKS(t, s, pf3, "e3", catID)
+
+	// A running spawn so the "would terminate N" count is exercised too.
+	makeSpawnForKS(t, s, "sp-guard-1", "bob", pf1)
+
+	// 1 bundle-version membership.
+	if err := s.st.SkillBundles().Create(context.Background(), store.SkillBundle{
+		BundleID: "bun-guard-1", CreatorID: "alice", Name: "b", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("SkillBundles().Create: %v", err)
+	}
+	if err := s.st.SkillBundles().CreateVersion(context.Background(),
+		store.SkillBundleVersion{VersionID: "ver-guard-1", BundleID: "bun-guard-1", Seq: 1, CreatedAt: 1},
+		[]store.SkillBundleMember{{SourceSubdir: "skill-a", CatalogID: catID, Position: 0}},
+	); err != nil {
+		t.Fatalf("CreateVersion: %v", err)
+	}
+
+	_, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+		CatalogId: catID, Listed: false, Confirm: false,
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "3 profile") || !strings.Contains(msg, "2 owner") || !strings.Contains(msg, "1 bundle version") {
+		t.Errorf("expected message to contain reference counts, got %q", msg)
+	}
+	// Disclosure regression (same rule as the delete path, sp-mwco.3.3 §4.3): never leak ids.
+	for _, id := range []string{pf1, pf2, pf3, "bob", "carol", "sp-guard-1"} {
+		if strings.Contains(msg, id) {
+			t.Errorf("error message leaks id %q: %q", id, msg)
+		}
+	}
+
+	// Nothing terminated before confirm=true.
+	if isDeleted(t, s, "sp-guard-1") {
+		t.Error("spawn must NOT be terminated before confirm=true")
+	}
+}
+
+func TestSetCatalogListing_GuardedUnlist_ConfirmTrue_Succeeds(t *testing.T) {
+	s, _, _ := newTestServer(t)
+
+	catID := createTestCatalogEntry(t, s, cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL, "widely-used")
+
+	pfID := uuid.NewString()
+	createProfileForKS(t, s, pfID, "bob")
+	addCatalogRefEntryForKS(t, s, pfID, "e1", catID)
+	makeSpawnForKS(t, s, "sp-guard-2", "bob", pfID)
+
+	resp, err := s.SetCatalogListing(aliceCtx(), connect.NewRequest(&cpv1.SetCatalogListingRequest{
+		CatalogId: catID, Listed: false, Confirm: true,
+	}))
+	if err != nil {
+		t.Fatalf("SetCatalogListing confirm=true: %v", err)
+	}
+	if resp.Msg.ReferencedProfiles != 1 || resp.Msg.ReferencedOwners != 1 || resp.Msg.TerminatedSpawns != 1 {
+		t.Errorf("unexpected counts: %+v", resp.Msg)
+	}
+	if !isDeleted(t, s, "sp-guard-2") {
+		t.Error("expected spawn to be terminated after confirmed unlist")
 	}
 }

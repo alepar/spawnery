@@ -5,8 +5,10 @@ package skillstore_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"os"
 	"testing"
@@ -83,6 +85,40 @@ func TestGarageSkillStore_PutIfAbsentAndPresign(t *testing.T) {
 		t.Fatalf("PutIfAbsent (second, idempotent): %v", err)
 	}
 
+	// StatObject: a present sha reports nil (sp-mwco.4.4 HEAD-before-presign gate).
+	if err := store.StatObject(ctx, sha); err != nil {
+		t.Fatalf("StatObject (present): %v", err)
+	}
+
+	// StatObject: a random, never-written sha reports ErrObjectMissing (definitively absent,
+	// not a transport/config fault).
+	randomSha := randomHexSha(t)
+	err = store.StatObject(ctx, randomSha)
+	if err == nil {
+		t.Fatalf("StatObject (random sha %s): want ErrObjectMissing, got nil", randomSha)
+	}
+	if !errors.Is(err, skillstore.ErrObjectMissing) {
+		t.Fatalf("StatObject (random sha %s): want errors.Is(..., ErrObjectMissing), got %v", randomSha, err)
+	}
+
+	// Get: a present sha returns the exact bytes stored.
+	got, err := store.Get(ctx, sha)
+	if err != nil {
+		t.Fatalf("Get (present): %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("Get (present) content mismatch: got %d bytes, want %d", len(got), len(content))
+	}
+
+	// Get: a random, never-written sha reports ErrObjectMissing.
+	_, err = store.Get(ctx, randomSha)
+	if err == nil {
+		t.Fatalf("Get (random sha %s): want ErrObjectMissing, got nil", randomSha)
+	}
+	if !errors.Is(err, skillstore.ErrObjectMissing) {
+		t.Fatalf("Get (random sha %s): want errors.Is(..., ErrObjectMissing), got %v", randomSha, err)
+	}
+
 	// Presign and GET
 	presignedURL, err := store.PresignedGet(ctx, sha)
 	if err != nil {
@@ -116,4 +152,15 @@ func TestGarageSkillStore_PutIfAbsentAndPresign(t *testing.T) {
 	}
 
 	t.Logf("PutIfAbsent + PresignedGet + GET round-trip OK (sha=%s url=%s)", sha, presignedURL)
+}
+
+// randomHexSha returns a random 64-hex-char string in the same shape as a sha256hex key, for
+// use as a sha guaranteed never to have been PutIfAbsent'd.
+func randomHexSha(t *testing.T) string {
+	t.Helper()
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	return hex.EncodeToString(b[:])
 }

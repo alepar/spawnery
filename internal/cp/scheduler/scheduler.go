@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -24,13 +25,54 @@ type spawnResult struct {
 	detail string // Status.Detail from the node (e.g. "STALE: intent is 35s old"); empty on ACTIVE
 }
 
-type Scheduler struct {
-	reg     *registry.Registry
-	rt      *router.Router
-	timeout time.Duration
+// DefaultStartStallWindow is the no-progress stall window for a spawn start: Provision fails only
+// when the node goes QUIET for this long, not because the work is legitimately slow. Exported so
+// prod (cmd/spawnery_cp/main.go) and the e2e stack (skill_ingest_e2e_test.go) share one number by
+// construction and cannot silently diverge. The node emits ResumeProgress heartbeats immediately and
+// every 10s on this path (sp-mwco.4.1/4.7) — a 3x margin against this window.
+const DefaultStartStallWindow = 30 * time.Second
 
-	mu      sync.Mutex
-	pending map[string]chan spawnResult // spawn_id -> ACTIVE/ERROR signal
+// defaultStartBackstop is the generous absolute cap on a spawn start: it fires only if a node
+// heartbeats forever without ever reaching ACTIVE/ERROR. Mirrors lifecycle.go's defaultResumeTimeout.
+const defaultStartBackstop = 10 * time.Minute
+
+// pendingStart is the in-flight bookkeeping for a spawn Provision is currently waiting on: the
+// ACTIVE/ERROR result channel, the generation Progress events must match, and a coalescing
+// (buffered cap 1) progress channel that resets Provision's stall timer.
+type pendingStart struct {
+	res      chan spawnResult
+	gen      uint64
+	progress chan struct{} // buffered cap 1; non-blocking coalescing progress signal for the stall loop
+}
+
+type Scheduler struct {
+	reg         *registry.Registry
+	rt          *router.Router
+	stallWindow time.Duration
+	backstop    time.Duration
+
+	mu       sync.Mutex
+	pending  map[string]*pendingStart // spawn_id -> in-flight start bookkeeping
+	inflight map[string]InFlightStart // spawn_id -> the node/gen Provision is currently starting it on
+}
+
+// InFlightStart is the placement Provision has picked for a spawn that has not yet reached ACTIVE.
+// This is the ONLY ownership signal available during artifact staging (sp-mwco.4.3): the live
+// container row's node_id is set by Spawns().SetActive only AFTER Provision returns ACTIVE, so
+// LiveContainer(spawnID).NodeID == nodeID is false during the exact window a re-presign can be
+// requested. Provision writes an entry right after picking a node and removes it (via the same
+// defer that clears pending) when it returns, success or failure.
+type InFlightStart struct {
+	NodeID string
+	Gen    uint64
+}
+
+// InFlightStart returns the placement Provision currently has in flight for spawnID, if any.
+func (s *Scheduler) InFlightStart(spawnID string) (InFlightStart, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fs, ok := s.inflight[spawnID]
+	return fs, ok
 }
 
 type RootfsRestore struct {
@@ -39,8 +81,14 @@ type RootfsRestore struct {
 	LocalOnly        bool
 }
 
-func New(reg *registry.Registry, rt *router.Router, timeout time.Duration) *Scheduler {
-	return &Scheduler{reg: reg, rt: rt, timeout: timeout, pending: map[string]chan spawnResult{}}
+// New builds a Scheduler. stallWindow is the no-progress stall window (see DefaultStartStallWindow);
+// the absolute backstop defaults to defaultStartBackstop and is overridden directly by in-package
+// tests.
+func New(reg *registry.Registry, rt *router.Router, stallWindow time.Duration) *Scheduler {
+	return &Scheduler{
+		reg: reg, rt: rt, stallWindow: stallWindow, backstop: defaultStartBackstop,
+		pending: map[string]*pendingStart{}, inflight: map[string]InFlightStart{},
+	}
 }
 
 // OnStatus is called by the node receive loop when a SpawnStatus arrives.
@@ -49,14 +97,32 @@ func New(reg *registry.Registry, rt *router.Router, timeout time.Duration) *Sche
 // typed Connect error containing the NACK code [AC1].
 func (s *Scheduler) OnStatus(spawnID string, phase nodev1.SpawnPhase, detail string) {
 	s.mu.Lock()
-	ch, ok := s.pending[spawnID]
+	p, ok := s.pending[spawnID]
 	s.mu.Unlock()
 	if ok && (phase == nodev1.SpawnPhase_ACTIVE || phase == nodev1.SpawnPhase_ERROR) {
 		select {
-		case ch <- spawnResult{phase: phase, detail: detail}:
+		case p.res <- spawnResult{phase: phase, detail: detail}:
 		default:
 		}
 	}
+}
+
+// Progress routes a no-progress-stall-timer reset for an in-flight spawn start, matched by spawn_id
+// AND generation. Called by the node's ResumeProgress heartbeats (sp-mwco.4.1/4.7 — the node already
+// emits these on the StartSpawn path). Stale-generation or unmatched signals are dropped (no reset).
+// Returns true if the signal matched a live, current-generation Provision call.
+func (s *Scheduler) Progress(spawnID string, gen uint64) bool {
+	s.mu.Lock()
+	p, ok := s.pending[spawnID]
+	s.mu.Unlock()
+	if !ok || p.gen != gen {
+		return false
+	}
+	select {
+	case p.progress <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // PickNodeID selects an eligible node ID for the given placement without sending any message.
@@ -87,11 +153,17 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 		cpmetrics.PlacementNoCapacity()
 		return "", connect.NewError(connect.CodeResourceExhausted, errors.New("no eligible node with capacity"))
 	}
-	ch := make(chan spawnResult, 1)
+	p := &pendingStart{res: make(chan spawnResult, 1), gen: gen, progress: make(chan struct{}, 1)}
 	s.mu.Lock()
-	s.pending[id] = ch
+	s.pending[id] = p
+	s.inflight[id] = InFlightStart{NodeID: n.ID, Gen: gen}
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.pending, id); s.mu.Unlock() }()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, id)
+		delete(s.inflight, id)
+		s.mu.Unlock()
+	}()
 
 	start := &nodev1.StartSpawn{
 		SpawnId: id, AppRef: appRef, Model: model, Name: name, AppId: appID,
@@ -115,23 +187,50 @@ func (s *Scheduler) Provision(ctx context.Context, id, appRef, model, name, appI
 	if err := n.Sender.Send(&nodev1.CPMessage{Msg: &nodev1.CPMessage_Start{Start: start}}); err != nil {
 		return "", connect.NewError(connect.CodeUnavailable, err)
 	}
-	select {
-	case res := <-ch:
-		if res.phase != nodev1.SpawnPhase_ACTIVE {
-			// Surface the node's machine-readable NACK code (e.g. "STALE: ...") as a
-			// FailedPrecondition error so lifecycle callers can classify retryable failures [AC1].
-			detail := res.detail
-			if detail == "" {
-				detail = "spawn failed to start"
+
+	// Per-heartbeat stall window: resets on each Progress event from the node. Generous absolute
+	// backstop: fires only if the stall detector fails to catch a node that heartbeats forever
+	// without ever reaching ACTIVE/ERROR. Mirrors lifecycle.go's resume stall/backstop pair.
+	stall := time.NewTimer(s.stallWindow)
+	defer stall.Stop()
+	backstop := time.After(s.backstop)
+
+	for {
+		select {
+		case res := <-p.res:
+			if res.phase != nodev1.SpawnPhase_ACTIVE {
+				// Surface the node's machine-readable NACK code (e.g. "STALE: ...") as a
+				// FailedPrecondition error so lifecycle callers can classify retryable failures [AC1].
+				detail := res.detail
+				if detail == "" {
+					detail = "spawn failed to start"
+				}
+				return "", connect.NewError(connect.CodeFailedPrecondition, errors.New(detail))
 			}
-			return "", connect.NewError(connect.CodeFailedPrecondition, errors.New(detail))
+			s.rt.Bind(id, n.ID, n.Sender)
+			cpmetrics.PlacementSuccess() // count only after Bind: the placement is committed and ACTIVE
+			return n.ID, nil
+
+		case <-p.progress:
+			// Progress from the node: reset the stall timer.
+			if !stall.Stop() {
+				select {
+				case <-stall.C:
+				default:
+				}
+			}
+			stall.Reset(s.stallWindow)
+
+		case <-stall.C:
+			return "", connect.NewError(connect.CodeDeadlineExceeded,
+				fmt.Errorf("spawn start stalled (no progress for %s)", s.stallWindow))
+
+		case <-backstop:
+			return "", connect.NewError(connect.CodeDeadlineExceeded,
+				fmt.Errorf("spawn start exceeded absolute budget of %s", s.backstop))
+
+		case <-ctx.Done():
+			return "", ctx.Err()
 		}
-		s.rt.Bind(id, n.ID, n.Sender)
-		cpmetrics.PlacementSuccess() // count only after Bind: the placement is committed and ACTIVE
-		return n.ID, nil
-	case <-time.After(s.timeout):
-		return "", connect.NewError(connect.CodeDeadlineExceeded, errors.New("spawn start timed out"))
-	case <-ctx.Done():
-		return "", ctx.Err()
 	}
 }

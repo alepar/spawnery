@@ -9,6 +9,11 @@ import {
   removeProfileEntry,
   listCatalogEntries,
   getCatalogEntry,
+  deleteCatalogEntry,
+  deleteBundle,
+  deleteBundleVersion,
+  ingestSkillFromURL,
+  connectErrorMessage,
   kindToCapKind,
   KIND_LABEL,
   type ProfileEntryKind,
@@ -89,6 +94,33 @@ describe("profiles api", () => {
     expect(profile.entries[0].customInline).toBe("test");
   });
 
+  it("getProfile decodes a BUNDLE_REF entry incl. int64-as-string seqs and memberRenames map", async () => {
+    const entry = {
+      entryId: "e3",
+      kind: "PROFILE_ENTRY_KIND_SKILL",
+      name: "superpowers",
+      source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+      bundleId: "b1",
+      versionId: "v1",
+      excludedSubdirs: ["skills/experimental"],
+      memberRenames: { "skills/a": "a2" },
+      pinnedSeq: "1",
+      latestSeq: "3",
+      memberCount: 5,
+    };
+    vi.stubGlobal("fetch", mockFetch({ profile: { profileId: "p1", name: "N", version: 3, entries: [entry] } }));
+    const profile = await getProfile("p1");
+    const e = profile.entries[0];
+    expect(e.source).toBe("PROFILE_ENTRY_SOURCE_BUNDLE_REF");
+    expect(e.bundleId).toBe("b1");
+    expect(e.versionId).toBe("v1");
+    expect(e.excludedSubdirs).toEqual(["skills/experimental"]);
+    expect(e.memberRenames).toEqual({ "skills/a": "a2" });
+    expect(e.pinnedSeq).toBe(1);
+    expect(e.latestSeq).toBe(3);
+    expect(e.memberCount).toBe(5);
+  });
+
   it("updateProfile POSTs UpdateProfile with CAS fields", async () => {
     const f = mockFetch({ version: 3 });
     vi.stubGlobal("fetch", f);
@@ -120,6 +152,37 @@ describe("profiles api", () => {
     expect(body.entry.kind).toBe("PROFILE_ENTRY_KIND_SKILL");
     expect(r.entryId).toBe("e1");
     expect(r.version).toBe(2);
+  });
+
+  it("addProfileEntry sends a BUNDLE_REF entry with no catalogId/versionId (attach always pins LATEST) and forwards overrides", async () => {
+    const f = mockFetch({ entryId: "e4", version: 3, warnings: ["skills/b auto-renamed to skills/b-2 (collision)"] });
+    vi.stubGlobal("fetch", f);
+    const r = await addProfileEntry("p1", 1, {
+      kind: "PROFILE_ENTRY_KIND_SKILL",
+      name: "superpowers",
+      source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+      bundleId: "b1",
+      excludedSubdirs: ["skills/experimental"],
+      memberRenames: { "skills/a": "a2" },
+    });
+    const body = JSON.parse((f.mock.calls[0][1] as any).body);
+    expect(body.entry.bundleId).toBe("b1");
+    expect(body.entry.catalogId).toBeUndefined();
+    expect(body.entry.versionId).toBeUndefined();
+    expect(body.entry.excludedSubdirs).toEqual(["skills/experimental"]);
+    expect(body.entry.memberRenames).toEqual({ "skills/a": "a2" });
+    expect(r.warnings).toEqual(["skills/b auto-renamed to skills/b-2 (collision)"]);
+  });
+
+  it("addProfileEntry normalizes an absent warnings array to []", async () => {
+    vi.stubGlobal("fetch", mockFetch({ entryId: "e5", version: 4 }));
+    const r = await addProfileEntry("p1", 1, {
+      kind: "PROFILE_ENTRY_KIND_SKILL",
+      name: "My Skill",
+      source: "PROFILE_ENTRY_SOURCE_CATALOG_REF",
+      catalogId: "cat1",
+    });
+    expect(r.warnings).toEqual([]);
   });
 
   it("addProfileEntry base64-encodes customInline for proto bytes wire field", async () => {
@@ -170,12 +233,146 @@ describe("profiles api", () => {
     expect(await listCatalogEntries()).toEqual([]);
   });
 
+  it("listCatalogEntries provenance survives the unary decode", async () => {
+    const f = mockFetch({
+      entries: [{
+        catalogId: "c1",
+        kind: "PROFILE_ENTRY_KIND_SKILL",
+        name: "Skill1",
+        sourceUrl: "https://github.com/obra/superpowers",
+        sourceRef: "main",
+        sourceSubdir: "skills/x",
+        sourceCommit: "1111111111111111111111111111111111aaaa",
+        sha256: "2222222222222222222222222222222222222222222222222222222222bbbb",
+        size: "4096",
+        bundleMember: true,
+      }],
+    });
+    vi.stubGlobal("fetch", f);
+    const entries = await listCatalogEntries();
+    expect(entries[0].sourceUrl).toBe("https://github.com/obra/superpowers");
+    expect(entries[0].sourceRef).toBe("main");
+    expect(entries[0].sourceSubdir).toBe("skills/x");
+    expect(entries[0].sourceCommit).toBe("1111111111111111111111111111111111aaaa");
+    expect(entries[0].sha256).toBe("2222222222222222222222222222222222222222222222222222222222bbbb");
+    expect(entries[0].size).toBe("4096");
+    expect(entries[0].bundleMember).toBe(true);
+  });
+
   it("getCatalogEntry POSTs GetCatalogEntry with catalogId", async () => {
     const f = mockFetch({ entry: { catalogId: "c1", kind: "PROFILE_ENTRY_KIND_MCP", name: "My MCP", content: "..." } });
     vi.stubGlobal("fetch", f);
     const entry = await getCatalogEntry("c1");
     expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1" });
     expect(entry.catalogId).toBe("c1");
+  });
+
+  it("getCatalogEntry provenance survives the unary decode", async () => {
+    const f = mockFetch({
+      entry: {
+        catalogId: "c1",
+        kind: "PROFILE_ENTRY_KIND_SKILL",
+        name: "Skill1",
+        sourceUrl: "https://github.com/obra/superpowers",
+        sourceRef: "main",
+        sourceSubdir: "skills/x",
+        sourceCommit: "1111111111111111111111111111111111aaaa",
+        sha256: "2222222222222222222222222222222222222222222222222222222222bbbb",
+        size: "4096",
+        bundleMember: true,
+      },
+    });
+    vi.stubGlobal("fetch", f);
+    const entry = await getCatalogEntry("c1");
+    expect(entry.sourceUrl).toBe("https://github.com/obra/superpowers");
+    expect(entry.sourceRef).toBe("main");
+    expect(entry.sourceSubdir).toBe("skills/x");
+    expect(entry.sourceCommit).toBe("1111111111111111111111111111111111aaaa");
+    expect(entry.sha256).toBe("2222222222222222222222222222222222222222222222222222222222bbbb");
+    expect(entry.size).toBe("4096");
+    expect(entry.bundleMember).toBe(true);
+  });
+
+  it("deleteCatalogEntry POSTs DeleteCatalogEntry with force defaulting to false", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteCatalogEntry("c1");
+    expect(f).toHaveBeenCalledWith("/cp.v1.SpawnService/DeleteCatalogEntry", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1", force: false });
+  });
+
+  it("deleteCatalogEntry sends force:true when requested", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteCatalogEntry("c1", { force: true });
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ catalogId: "c1", force: true });
+  });
+
+  it("deleteCatalogEntry surfaces a FailedPrecondition counts-only message verbatim via connectErrorMessage", async () => {
+    const f = mockFetch(
+      { code: "failed_precondition", message: "catalog entry c1 is referenced by 3 profile(s) across 2 owner(s); re-run with force=true to delete anyway" },
+      false,
+    );
+    vi.stubGlobal("fetch", f);
+    let caught: unknown;
+    try {
+      await deleteCatalogEntry("c1");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(connectErrorMessage(caught)).toBe(
+      "catalog entry c1 is referenced by 3 profile(s) across 2 owner(s); re-run with force=true to delete anyway",
+    );
+  });
+
+  it("ingestSkillFromURL POSTs IngestSkillFromURL and defaults absent bundle/array/bool fields", async () => {
+    const f = mockFetch({ catalogId: "c1" });
+    vi.stubGlobal("fetch", f);
+    const r = await ingestSkillFromURL({ url: "https://github.com/owner/repo" });
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ url: "https://github.com/owner/repo" });
+    expect(r.catalogId).toBe("c1");
+    expect(r.bundleId).toBe("");
+    expect(r.versionId).toBe("");
+    expect(r.memberCatalogIds).toEqual([]);
+    expect(r.skippedEntries).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(r.changed).toBe(false);
+  });
+
+  it("ingestSkillFromURL preserves a full multi-skill bundle response", async () => {
+    vi.stubGlobal("fetch", mockFetch({
+      catalogId: "c1",
+      bundleId: "b1",
+      versionId: "v1",
+      memberCatalogIds: ["c1", "c2"],
+      skippedEntries: ["AGENTS.md (symlink)"],
+      warnings: ["nested skill at skills/a/sub ignored"],
+      changed: true,
+    }));
+    const r = await ingestSkillFromURL({ url: "https://github.com/owner/repo" });
+    expect(r.bundleId).toBe("b1");
+    expect(r.versionId).toBe("v1");
+    expect(r.memberCatalogIds).toEqual(["c1", "c2"]);
+    expect(r.skippedEntries).toEqual(["AGENTS.md (symlink)"]);
+    expect(r.warnings).toEqual(["nested skill at skills/a/sub ignored"]);
+    expect(r.changed).toBe(true);
+  });
+
+  it("deleteBundle POSTs DeleteBundle with bundleId and force", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteBundle("b1", { force: true });
+    expect(f).toHaveBeenCalledWith("/cp.v1.SpawnService/DeleteBundle", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ bundleId: "b1", force: true });
+  });
+
+  it("deleteBundleVersion POSTs DeleteBundleVersion with versionId and force defaulting to false", async () => {
+    const f = mockFetch({});
+    vi.stubGlobal("fetch", f);
+    await deleteBundleVersion("v1");
+    expect(f).toHaveBeenCalledWith("/cp.v1.SpawnService/DeleteBundleVersion", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ versionId: "v1", force: false });
   });
 });
 

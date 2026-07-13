@@ -2,15 +2,19 @@ package cp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/cp/skillstore"
 	"spawnery/internal/cp/store"
 )
 
@@ -21,6 +25,15 @@ const (
 	maxArtifactInlineBytes = 1 << 20 // 1 MiB per artifact
 	maxArtifactsTotalBytes = 3 << 20 // 3 MiB total
 )
+
+// skillStatParallelism bounds the number of concurrent StatObject calls the HEAD-before-presign
+// gate (statSkillObjects) issues at once.
+const skillStatParallelism = 8
+
+// skillStatTimeout bounds the aggregate wall time of one statSkillObjects call, across every
+// distinct sha it checks. A package var (not a const) so tests can shrink it; production code
+// must never override it.
+var skillStatTimeout = 10 * time.Second
 
 // validateAndMergeArtifacts merges publisher manifest-declared defaults with owner-supplied
 // per-spawn artifacts (owner overrides by id), validates the union, and returns store rows.
@@ -158,9 +171,11 @@ func confineDestPath(p string) error {
 // storeToNodeArtifacts converts persisted artifacts to the node wire form for StartSpawn.
 // Sensitive artifacts are relayed metadata-only (empty inline) — their values arrive via
 // the separate SealedSecret/DeliverSecrets channel keyed by env_var_name.
-// By-ref artifacts (ObjectKey != "") populate Objectref; PresignedUrl is left empty here
-// and filled by presignNodeArtifacts before the node RPC.
-func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
+// By-ref artifacts (ObjectKey != "") populate Objectref, stamped with plainTarCap
+// (MaxPlainTarBytes — sp-mwco.4.6: the CP is the single source of truth for the node's
+// decoded-tar cap; the node uses this verbatim); PresignedUrl is left empty here and filled by
+// presignNodeArtifacts before the node RPC. Inline specs never get an Objectref.
+func storeToNodeArtifacts(in []store.Artifact, plainTarCap int64) []*nodev1.ArtifactSpec {
 	if len(in) == 0 {
 		return nil
 	}
@@ -178,8 +193,9 @@ func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
 		}
 		if a.ObjectKey != "" {
 			spec.Objectref = &nodev1.ObjectRef{
-				ObjectKey: a.ObjectKey,
-				Sha256:    a.ObjectSHA256,
+				ObjectKey:        a.ObjectKey,
+				Sha256:           a.ObjectSHA256,
+				MaxPlainTarBytes: plainTarCap,
 				// PresignedUrl left empty; presignNodeArtifacts fills it at start.
 			}
 		}
@@ -188,7 +204,84 @@ func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
 	return out
 }
 
-// presignNodeArtifacts fills PresignedUrl on every by-ref spec in specs.
+// denylistGate is the real-revocation kill switch (sp-mwco.3.2 §4.2): delete removes only the
+// customization_catalog row, never the Garage object, and an already-bound spawn replays from
+// its own persisted spawn_artifacts row (object_key + sha) at resume/fork WITHOUT re-consulting
+// the catalog — so a deleted skill would otherwise stay fetchable by every spawn that ever bound
+// it. This gate closes that gap: it is called as the FIRST statement of presignNodeArtifacts
+// (before the nil-skillStore check), so a denial is reported even when Garage is unconfigured,
+// and it is NEVER cached/memoized — unlike s.skillPresent's positive-only presence memo, a
+// denylist memo would reintroduce exactly the revocation gap this closes.
+//
+// Fails closed (D4): a DB error on the lookup returns CodeUnavailable, never a silent pass.
+// A denied sha returns CodeFailedPrecondition naming the object key and recorded reason (D5) —
+// never a presigned URL or signature (sp-mwco.4.2's leak rule). Skipped, with no store query at
+// all, when specs has no by-ref entries.
+func (s *Server) denylistGate(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	type shaInfo struct {
+		key        string
+		artifactID string
+	}
+	byRefShas := make(map[string]shaInfo)
+	var order []string
+	for _, spec := range specs {
+		if spec.Objectref == nil {
+			continue
+		}
+		sha := spec.Objectref.Sha256
+		if _, seen := byRefShas[sha]; !seen {
+			byRefShas[sha] = shaInfo{key: spec.Objectref.ObjectKey, artifactID: spec.Id}
+			order = append(order, sha)
+		}
+	}
+	if len(byRefShas) == 0 {
+		return nil
+	}
+
+	shas := make([]string, 0, len(byRefShas))
+	for sha := range byRefShas {
+		shas = append(shas, sha)
+	}
+	denied, err := s.st.SkillDenylist().Denied(ctx, shas)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("skill denylist unavailable: %w", err))
+	}
+	if len(denied) == 0 {
+		return nil
+	}
+
+	// Deterministic "first" pick: earliest sha in spec order that is denied.
+	var firstSha string
+	for _, sha := range order {
+		if _, ok := denied[sha]; ok {
+			firstSha = sha
+			break
+		}
+	}
+	info := byRefShas[firstSha]
+	reason := denied[firstSha].Reason
+	slog.Warn("denylistGate: skill object revoked",
+		"sha256", firstSha, "artifact", info.artifactID, "denied_count", len(denied))
+	if len(denied) > 1 {
+		return connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("skill object revoked: %s (reason: %s) (and %d more)", info.key, reason, len(denied)-1))
+	}
+	return connect.NewError(connect.CodeFailedPrecondition,
+		fmt.Errorf("skill object revoked: %s (reason: %s)", info.key, reason))
+}
+
+// presignNodeArtifacts fills PresignedUrl on every by-ref spec in specs. Called by
+// nodeArtifactsForStart AFTER statSkillObjects, so by the time this runs every by-ref sha has
+// already been confirmed present (or memoized present from an earlier gate pass) — a presign
+// failure here is therefore a live Garage/config fault, not a missing-object condition.
+//
+// The FIRST statement is the denylist gate (sp-mwco.3.2 §4.2, see denylistGate): unconditional,
+// never cached, and run before the nil-skillStore check so a revoked sha is reported even when
+// Garage is unconfigured. Because every start path (create/resume/fork/recreate/migrate) and the
+// sp-mwco.4.3 re-presign handler all funnel through this one function, revocation cannot be
+// forgotten on a new start path.
+//
 // Returns CodeFailedPrecondition if any by-ref spec is present but skillStore is nil
 // (Garage not configured). Returns CodeUnavailable if PresignedGet fails (signs an HMAC
 // offline, so this indicates a config error rather than a live Garage connection failure).
@@ -198,6 +291,9 @@ func storeToNodeArtifacts(in []store.Artifact) []*nodev1.ArtifactSpec {
 // (resume/fork skip it when journal snapshot captures skill files). Until then, this is called
 // on every start unconditionally.
 func (s *Server) presignNodeArtifacts(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	if err := s.denylistGate(ctx, specs); err != nil {
+		return err
+	}
 	for _, spec := range specs {
 		if spec.Objectref == nil {
 			continue
@@ -217,11 +313,127 @@ func (s *Server) presignNodeArtifacts(ctx context.Context, specs []*nodev1.Artif
 	return nil
 }
 
-// nodeArtifactsForStart converts persisted artifacts to node wire form and presigns
-// any by-ref specs. It is the single call site for all four start paths
-// (CreateSpawn/ResumeSpawn/RecreateSpawn/ForkSpawn).
+// statSkillObjects is the HEAD-before-presign gate (sp-mwco.4.4): before a spawn start hands
+// by-ref artifacts to a node, it confirms every DISTINCT referenced object actually exists in
+// the skill store, failing fast (FailedPrecondition) rather than letting the node discover a
+// 404 mid-provisioning. Applied UNIFORMLY to every by-ref spec on the spawn — no size carve-out
+// (a bundle, the flagship multi-artifact case, is exactly where this matters most).
+//
+// StatObject calls run in a bounded parallel pool (skillStatParallelism in-flight) over
+// distinct shas only — a bundle may reuse one payload sha across several artifacts, so it is
+// HEAD'd once. Confirmed-present shas are memoized in s.skillPresent (POSITIVE ONLY: objects
+// are immutable and content-addressed, so "present" never goes stale, but "missing" must never
+// be cached — a later ingest can make an object present that wasn't a moment ago).
+//
+// Error split, transport WINS over missing (this is the acceptance property — a Garage
+// brownout must never mass-report "skill object missing"): if ANY stat returns a
+// transport/timeout error, the whole gate fails CodeUnavailable; only when EVERY failing stat
+// is skillstore.ErrObjectMissing does it fail CodeFailedPrecondition, naming the first missing
+// object key (and the total missing count, if more than one). Neither message embeds a
+// presigned URL or signature (sp-mwco.4.2's leak rule).
+//
+// Skipped when there are no by-ref specs, and when s.skillStore is nil — the nil-store
+// precondition ("Garage skill storage is not configured") is reported by presignNodeArtifacts,
+// which runs immediately after this gate; statSkillObjects must not pre-empt that error with a
+// nil-deref or a different code.
+func (s *Server) statSkillObjects(ctx context.Context, specs []*nodev1.ArtifactSpec) error {
+	if s.skillStore == nil {
+		return nil
+	}
+
+	// Distinct shas only, skipping any already memoized present.
+	keyBySha := make(map[string]string)
+	for _, spec := range specs {
+		if spec.Objectref == nil {
+			continue
+		}
+		sha := spec.Objectref.Sha256
+		if _, known := s.skillPresent.Load(sha); known {
+			continue
+		}
+		if _, seen := keyBySha[sha]; !seen {
+			keyBySha[sha] = spec.Objectref.ObjectKey
+		}
+	}
+	if len(keyBySha) == 0 {
+		return nil
+	}
+
+	statCtx, cancel := context.WithTimeout(ctx, skillStatTimeout)
+	defer cancel()
+
+	type statResult struct {
+		sha string
+		key string
+		err error
+	}
+	results := make(chan statResult, len(keyBySha))
+	sem := make(chan struct{}, skillStatParallelism)
+	var wg sync.WaitGroup
+	for sha, key := range keyBySha {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(sha, key string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results <- statResult{sha: sha, key: key, err: s.skillStore.StatObject(statCtx, sha)}
+		}(sha, key)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var (
+		transportErr error
+		missingCount int
+		firstMissing string
+	)
+	for res := range results {
+		switch {
+		case res.err == nil:
+			s.skillPresent.Store(res.sha, struct{}{})
+		case errors.Is(res.err, skillstore.ErrObjectMissing):
+			missingCount++
+			if firstMissing == "" {
+				firstMissing = res.key
+			}
+		default:
+			if transportErr == nil {
+				transportErr = res.err
+			}
+		}
+	}
+
+	if transportErr != nil {
+		slog.Warn("statSkillObjects: skill object storage unavailable",
+			"distinct_shas", len(keyBySha), "missing_count", missingCount)
+		return connect.NewError(connect.CodeUnavailable,
+			fmt.Errorf("skill object storage unavailable: %w", transportErr))
+	}
+	if missingCount > 0 {
+		slog.Debug("statSkillObjects: skill object missing",
+			"missing_count", missingCount, "first_missing_key", firstMissing)
+		if missingCount > 1 {
+			return connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("skill object missing: %s (and %d more)", firstMissing, missingCount-1))
+		}
+		return connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("skill object missing: %s", firstMissing))
+	}
+	return nil
+}
+
+// nodeArtifactsForStart converts persisted artifacts to node wire form, runs the
+// HEAD-before-presign gate (statSkillObjects), and presigns any by-ref specs. It is the single
+// call site for all four start paths (CreateSpawn/ResumeSpawn/RecreateSpawn/ForkSpawn) — the
+// gate therefore runs on every start, and is skipped exactly where re-materialize would be
+// skipped (sp-mwco.4.5, not yet implemented).
 func (s *Server) nodeArtifactsForStart(ctx context.Context, arts []store.Artifact) ([]*nodev1.ArtifactSpec, error) {
-	out := storeToNodeArtifacts(arts)
+	out := storeToNodeArtifacts(arts, s.effectiveSkillPlainTarCap())
+	if err := s.statSkillObjects(ctx, out); err != nil {
+		return nil, err
+	}
 	if err := s.presignNodeArtifacts(ctx, out); err != nil {
 		return nil, err
 	}

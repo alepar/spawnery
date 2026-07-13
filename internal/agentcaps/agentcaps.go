@@ -3,6 +3,11 @@
 // relay path, the launch/resume argv, and a display label — so spawnery can derive
 // web rendering and spawnctl behavior per spawn. See
 // docs/superpowers/specs/2026-06-06-tmux-terminal-mode-design.md.
+//
+// agentcaps also owns the runnable/binary -> agentinstall EMITTER vocabulary (the
+// installer's registry key, e.g. "claude", "goose" — see internal/agentinstall.Registry):
+// see emitter.go for EmitterForBinary / EmitterForRunnable, the single reconciliation point
+// between the two vocabularies.
 package agentcaps
 
 // Mode is the run mode a runnable produces. It is the (protocol, multiclient-broker)

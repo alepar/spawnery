@@ -61,6 +61,10 @@ service SpawnService {
   rpc DeleteProfile(DeleteProfileRequest)               returns (DeleteProfileResponse);
   rpc AddProfileEntry(AddProfileEntryRequest)           returns (AddProfileEntryResponse);
   rpc RemoveProfileEntry(RemoveProfileEntryRequest)     returns (RemoveProfileEntryResponse);
+  // UpdateProfileEntry is a scoping-only, CAS-fenced mutation (sp-mwco.2.8 §4.6): targets and the
+  // disabled off-switch, in place, preserving entry_id. kind/name/source/catalog_id/bundle pin
+  // are immutable through it — not even present in the request.
+  rpc UpdateProfileEntry(UpdateProfileEntryRequest)     returns (UpdateProfileEntryResponse);
   rpc AddProfileSecretRef(AddProfileSecretRefRequest)   returns (AddProfileSecretRefResponse);
   rpc RemoveProfileSecretRef(RemoveProfileSecretRefRequest) returns (RemoveProfileSecretRefResponse);
   // User secrets catalog CRUD (sp-7h6.1.1): owner-scoped sealed secret metadata + opaque envelope bytes.
@@ -77,12 +81,74 @@ service SpawnService {
   rpc UpdateCatalogEntry(UpdateCatalogEntryRequest)     returns (UpdateCatalogEntryResponse);
   rpc DeleteCatalogEntry(DeleteCatalogEntryRequest)     returns (DeleteCatalogEntryResponse);
   rpc SetCatalogListing(SetCatalogListingRequest)       returns (SetCatalogListingResponse);
+  // Admin-only catalog publish/unpublish (sp-mwco.3.4 — listing policy §4.6). New rows (both
+  // inline and URL-ingested) are created unlisted (creator-visible only); these RPCs are the
+  // sole door onto the global catalog. Unpublish shares SetCatalogListing(listed=false)'s
+  // guarded-unlist semantics (reference-count confirmation + kill-switch), gated to admins.
+  rpc PublishCatalogEntry(PublishCatalogEntryRequest)     returns (PublishCatalogEntryResponse);
+  rpc UnpublishCatalogEntry(UnpublishCatalogEntryRequest) returns (UnpublishCatalogEntryResponse);
+  // PublishBundle lists every member of every version of a bundle — not just the latest, since a
+  // profile may pin an older version and must still be able to resolve it.
+  rpc PublishBundle(PublishBundleRequest) returns (PublishBundleResponse);
+  // DeleteBundle / DeleteBundleVersion (sp-mwco.3.3 §4.3): creator-only, reference-checked delete
+  // for bundles/versions. A version or bundle referenced by a bundle_ref profile entry is
+  // rejected with FailedPrecondition (counts-only message) unless force=true. DeleteBundle
+  // cascades to its versions and their members but does NOT delete the member catalog rows
+  // (content-identity dedup — a row may be shared across bundles/versions).
+  rpc DeleteBundle(DeleteBundleRequest) returns (DeleteBundleResponse);
+  rpc DeleteBundleVersion(DeleteBundleVersionRequest) returns (DeleteBundleVersionResponse);
   // IngestSkillFromURL fetches a skill tarball from a GitHub repo URL, validates a top-level
   // SKILL.md, canonically repacks to a deterministic tar, zstd-compresses it, stores it
   // content-addressed in the skills Garage bucket, and writes a catalog row with provenance.
   // Idempotent on (creator, sha256): returns the existing catalog_id on conflict.
   // Requires Garage to be configured; returns FailedPrecondition when not.
   rpc IngestSkillFromURL(IngestSkillFromURLRequest) returns (IngestSkillFromURLResponse);
+  // ReingestBundle re-fetches a bundle's upstream source, conditionally (If-None-Match on the
+  // bundle's stored etag — §4.8) and against a CP-wide refetch budget shared across all owners
+  // (GitHub's ~60/hr rate limit is per source IP, and the CP egresses from one IP). Idempotent on
+  // an unchanged upstream (changed=false, no new version); a 304 short-circuits to "up to date"
+  // (not_modified=true) without a repack/DB write. On a real change it cuts a new version and
+  // mints a diff_token that GetBundleDiff must be called with before a re-pin is permitted
+  // (§4.9 — the diff IS the supply-chain gate on re-pin). Creator-only.
+  rpc ReingestBundle(ReingestBundleRequest) returns (ReingestBundleResponse);
+  // ListBundles lists the caller's own bundles (creator-only; bundles are unlisted by default —
+  // publishing via PublishBundle is the admin door onto the global catalog).
+  rpc ListBundles(ListBundlesRequest) returns (ListBundlesResponse);
+  // GetBundle returns one bundle's provenance, every version (seq ASC), and its latest version's
+  // members. Creator-only.
+  rpc GetBundle(GetBundleRequest) returns (GetBundleResponse);
+  // GetBundleDiff computes a per-member diff between two versions of a bundle, including SKILL.md
+  // body diffs for added/changed members (§4.9 — an un-diffed one-click update channel is the same
+  // outcome as the silent-update channel this design rejects). Marks any matching ReingestBundle
+  // diff_token as viewed. Creator-only.
+  rpc GetBundleDiff(GetBundleDiffRequest) returns (GetBundleDiffResponse);
+  // RepinProfileBundle re-pins a bundle_ref profile entry onto a newer version of its bundle
+  // (sp-mwco.1.8 §4.4/§4.9). Gated on diff_token: the caller must have minted a token via
+  // ReingestBundle and viewed it via GetBundleDiff for the SAME (bundle_id, pinned_version,
+  // version_id) pair — an un-diffed re-pin is rejected with FailedPrecondition. version_id's seq
+  // must be strictly greater than the entry's currently pinned seq (no rollback). Exclude/rename
+  // overrides are rebased onto the new member set (a dropped override for a removed member and an
+  // auto-resolved name collision are both reported as warnings, never a hard failure).
+  rpc RepinProfileBundle(RepinProfileBundleRequest) returns (RepinProfileBundleResponse);
+  // Real revocation (sp-mwco.3.2 §4.2): a sha256 kill switch consulted by presignNodeArtifacts on
+  // EVERY start path (create/resume/fork/recreate/migrate) and by the sp-mwco.4.3 re-presign
+  // handler. Delete removes only the customization_catalog row — the Garage object is never
+  // removed, and an already-bound spawn replays from its own persisted spawn_artifacts row
+  // (object_key + sha) at resume/fork WITHOUT re-consulting the catalog, so a deleted skill would
+  // otherwise stay fetchable by every spawn that ever bound it. Denying does NOT terminate
+  // already-running spawns (that is the separate kill-switch/terminate path, spec §4.4); its
+  // contract is exactly that the object cannot be re-materialized on any subsequent start.
+  // Admin-only (requireAdmin), keyed by sha256 (content identity), not catalog_id — the same
+  // object can be reachable from many catalog rows / bundle members / owners.
+  rpc DenySkillObject(DenySkillObjectRequest) returns (DenySkillObjectResponse);
+  // AllowSkillObject un-denies a sha (e.g. an admin typo) — without it a mis-typed sha
+  // permanently bricks a legitimate skill for every spawn. NotFound when the sha is not
+  // currently denied. Admin-only.
+  rpc AllowSkillObject(AllowSkillObjectRequest) returns (AllowSkillObjectResponse);
+  // ListSkillObjectDenials surfaces the recorded reason for every denial (§4.2's "reason
+  // recorded and surfaced"), ordered created_at DESC. Admin-only; backs the spawnctl CLI
+  // (sp-q2qm) and the §4.9 admin UI read path.
+  rpc ListSkillObjectDenials(ListSkillObjectDenialsRequest) returns (ListSkillObjectDenialsResponse);
 }
 
 // The durable spawn lifecycle, surfaced to clients (mirrors the DAO status machine).
@@ -208,6 +274,31 @@ message SpawnSummary {
   // Persisted terminal failure (survives CP restart; non-empty only for ERROR spawns). sp-m859.3.
   string error_step   = 20;
   string error_detail = 21;
+  // skill_installs (field 22): per-skill install status from the node's latest SkillInstallReport
+  // (sp-mwco.2.7). Ephemeral, in-memory (mirrors provision_step*) — empty on CP restart; the
+  // fatal all-or-nothing-bundle-failure case survives restart anyway via error_step/error_detail.
+  repeated SkillInstall skill_installs = 22;
+}
+
+// SkillInstallStatus mirrors node.v1.SkillInstallStatus (this proto does not import node.proto;
+// the CP server converts at the boundary).
+enum SkillInstallStatus {
+  SKILL_INSTALL_STATUS_UNSPECIFIED = 0;
+  SKILL_INSTALL_STATUS_APPLIED     = 1;
+  SKILL_INSTALL_STATUS_SKIPPED     = 2;
+  SKILL_INSTALL_STATUS_FAILED      = 3;
+  SKILL_INSTALL_STATUS_UNKNOWN     = 4;
+}
+
+// SkillInstall is the per (artifact x agent) install outcome surfaced on SpawnSummary, mirroring
+// node.v1.SkillInstallEntry.
+message SkillInstall {
+  string agent  = 1;
+  string kind   = 2;
+  string name   = 3;
+  SkillInstallStatus status = 4;
+  string reason = 5;
+  string bundle = 6; // bundle_ref group id, or "" for a standalone artifact
 }
 // Owner is resolved from the auth context server-side (no field needed), like CreateSpawn/StopSpawn.
 message ListSpawnsRequest  {}
@@ -572,6 +663,7 @@ enum ProfileEntrySource {
   PROFILE_ENTRY_SOURCE_UNSPECIFIED  = 0;
   PROFILE_ENTRY_SOURCE_CATALOG_REF  = 1;
   PROFILE_ENTRY_SOURCE_CUSTOM       = 2;
+  PROFILE_ENTRY_SOURCE_BUNDLE_REF   = 3;
 }
 
 // ProfileEntry carries one customization item (skill, MCP server, config, or plugin).
@@ -584,6 +676,42 @@ message ProfileEntry {
   bytes             custom_inline   = 6; // set when source=CUSTOM (inline MVP; by-ref deferred)
   repeated string   targets         = 7; // spawn targets; empty → ["all"]
   repeated string   mcp_secret_refs = 8; // env-var names for MCP secret bindings
+  // bundle_ref fields (sp-mwco.1.8 §4.4): set when source=BUNDLE_REF. bundle_id/version_id pin
+  // the entry to a skill_bundle_version resolved to LATEST at attach time — re-ingestion never
+  // touches an existing profile; RepinProfileBundle is the only way to move the pin.
+  string            bundle_id        = 9;
+  string            version_id       = 10;
+  // excluded_subdirs/member_renames are per-member overrides keyed by the bundle member's
+  // source_subdir (the stable member identity across versions — see skill_bundle_member).
+  // Caller-supplied on AddProfileEntry (validated against the pinned version's members);
+  // member_renames may also be server-populated with an implicit warn-and-rename entry chosen to
+  // resolve a directory-name collision with another profile entry.
+  repeated string   excluded_subdirs = 11;
+  map<string, string> member_renames = 12;
+  // pinned_seq/latest_seq/member_count are read-only, server-populated by GetProfile (the "update
+  // available" badge — derivable client-side as latest_seq > pinned_seq; post-exclude member
+  // count). Zero for non-BUNDLE_REF entries.
+  int64             pinned_seq       = 13;
+  int64             latest_seq       = 14;
+  int32             member_count     = 15;
+  // disabled is the per-entry off switch (sp-mwco.2.8 §4.6): a disabled entry is skipped
+  // entirely at profile assembly — no manifest artifact, no payload, installed nowhere, for any
+  // agent. Orthogonal to targets: disabling does not clear/rewrite targets, so re-enabling
+  // restores the entry's prior per-agent scope.
+  bool              disabled         = 16;
+  // provenance is OUTPUT-ONLY: server-filled by GetProfile from the entry's catalog row (a
+  // catalog_ref skill entry only; empty for custom/bundle_ref entries), ignored on write. Empty
+  // when the referenced catalog row has no source (inline entry) or is missing.
+  SkillProvenance   provenance       = 17;
+}
+
+// SkillProvenance is the untrusted-external provenance of a skill, surfaced to the profile owner
+// (sp-mwco.2.8 §4.6). Empty/zero for operator-authored (custom/inline) content.
+message SkillProvenance {
+  string source_url    = 1;
+  string source_ref    = 2;
+  string source_commit = 3;
+  string source_subdir = 4;
 }
 
 // Profile is the full profile view including its entries and attached secret ids.
@@ -620,13 +748,21 @@ message UpdateProfileResponse { uint64 version = 1; }
 message DeleteProfileRequest  { string profile_id = 1; }
 message DeleteProfileResponse {}
 
-// AddProfileEntry adds an entry to a profile, CAS-fenced by expected_version.
+// AddProfileEntry adds an entry to a profile, CAS-fenced by expected_version. For a BUNDLE_REF
+// entry, warnings reports any implicit collision auto-renames chosen at attach (§4.4) — the entry
+// still attaches successfully; a spawn-creation abort is never the outcome of a name collision.
 message AddProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; ProfileEntry entry = 3; }
-message AddProfileEntryResponse { string entry_id = 1; uint64 version = 2; }
+message AddProfileEntryResponse { string entry_id = 1; uint64 version = 2; repeated string warnings = 3; }
 
 // RemoveProfileEntry removes an entry by entry_id, CAS-fenced.
 message RemoveProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; string entry_id = 3; }
 message RemoveProfileEntryResponse { uint64 version = 1; }
+
+// UpdateProfileEntry CAS-updates an entry's targets + disabled off-switch in place, preserving
+// entry_id (sp-mwco.2.8 §4.6). Scoping-only: kind/name/source/catalog_id/bundle pin are not in
+// the request and are never touched.
+message UpdateProfileEntryRequest  { string profile_id = 1; uint64 expected_version = 2; string entry_id = 3; repeated string targets = 4; bool disabled = 5; }
+message UpdateProfileEntryResponse { uint64 version = 1; }
 
 // AddProfileSecretRef attaches a secret reference to the profile, CAS-fenced.
 message AddProfileSecretRefRequest  { string profile_id = 1; uint64 expected_version = 2; string secret_id = 3; }
@@ -713,6 +849,15 @@ message CustomizationCatalogEntry {
   bool             listed       = 7;
   int64            created_at   = 8;
   int64            updated_at   = 9;
+
+  // Provenance (sp-mwco.3.1). Empty/zero for inline (non-URL) entries.
+  string source_url    = 10; // resolvable https URL of the source repo (server-normalized)
+  string source_ref    = 11; // branch/tag/commit ref requested at ingest; "" => repo default branch
+  string source_subdir = 12; // path within the repo; "" at repo root
+  string source_commit = 13; // upstream git commit the content came from (identity for updates)
+  string sha256        = 14; // hex sha256 of the canonical plain tar — CONTENT hash, NOT a git commit
+  int64  size          = 15; // plain tar size in bytes
+  bool   bundle_member = 16; // true => row is a member of a skill bundle, not a standalone skill
 }
 
 // CatalogEntrySummary is the lightweight list view (omits content).
@@ -721,6 +866,15 @@ message CatalogEntrySummary {
   ProfileEntryKind kind        = 2;
   string           name        = 3;
   string           description = 4;
+
+  // Provenance (sp-mwco.3.1). Empty/zero for inline (non-URL) entries.
+  string source_url    = 5;  // resolvable https URL of the source repo (server-normalized)
+  string source_ref    = 6;  // branch/tag/commit ref requested at ingest; "" => repo default branch
+  string source_subdir = 7;  // path within the repo; "" at repo root
+  string source_commit = 8;  // upstream git commit the content came from (identity for updates)
+  string sha256        = 9;  // hex sha256 of the canonical plain tar — CONTENT hash, NOT a git commit
+  int64  size          = 10; // plain tar size in bytes
+  bool   bundle_member = 11; // true => row is a member of a skill bundle, not a standalone skill
 }
 
 message CreateCatalogEntryRequest  { ProfileEntryKind kind = 1; string name = 2; string description = 3; bytes content = 4; }
@@ -735,11 +889,51 @@ message ListCatalogEntriesResponse { repeated CatalogEntrySummary entries = 1; }
 message UpdateCatalogEntryRequest  { string catalog_id = 1; string name = 2; string description = 3; bytes content = 4; }
 message UpdateCatalogEntryResponse {}
 
-message DeleteCatalogEntryRequest  { string catalog_id = 1; }
+// DeleteCatalogEntryRequest.force overrides the profile-reference check (never the
+// bundle-membership check — a catalog entry that is a bundle-version member is rejected outright,
+// force or not; delete the bundle version instead). See DeleteCatalogEntry's doc comment.
+message DeleteCatalogEntryRequest  { string catalog_id = 1; bool force = 2; }
 message DeleteCatalogEntryResponse {}
 
-message SetCatalogListingRequest  { string catalog_id = 1; bool listed = 2; }
-message SetCatalogListingResponse {}
+// SetCatalogListingRequest.confirm gates listed=false (unlist) when the entry is referenced
+// (sp-mwco.3.4 §4.6 D5): a referenced entry with confirm=false is rejected with
+// FailedPrecondition; confirm=true proceeds and runs the kill-switch. listed=true is
+// unaffected by confirm (no kill, no guard) but requires the caller to be an admin (D4).
+message SetCatalogListingRequest  { string catalog_id = 1; bool listed = 2; bool confirm = 3; }
+// referenced_* / terminated_spawns are populated on a listed=false response (zero on listed=true)
+// so a client can display the blast radius after a confirmed unlist.
+message SetCatalogListingResponse {
+  int32 referenced_profiles        = 1;
+  int32 referenced_owners          = 2;
+  int32 referenced_bundle_versions = 3;
+  int32 terminated_spawns          = 4;
+}
+
+message PublishCatalogEntryRequest  { string catalog_id = 1; }
+message PublishCatalogEntryResponse {}
+
+// UnpublishCatalogEntryRequest.confirm has the same guarded-unlist semantics as
+// SetCatalogListingRequest.confirm; the response carries the same blast-radius counts.
+message UnpublishCatalogEntryRequest  { string catalog_id = 1; bool confirm = 2; }
+message UnpublishCatalogEntryResponse {
+  int32 referenced_profiles        = 1;
+  int32 referenced_owners          = 2;
+  int32 referenced_bundle_versions = 3;
+  int32 terminated_spawns          = 4;
+}
+
+message PublishBundleRequest  { string bundle_id = 1; }
+message PublishBundleResponse {}
+
+// DeleteBundleRequest.force overrides the bundle-ref reference check (a profile pinning any
+// version of this bundle). Creator-only; see the service doc comment.
+message DeleteBundleRequest  { string bundle_id = 1; bool force = 2; }
+message DeleteBundleResponse {}
+
+// DeleteBundleVersionRequest.force overrides the bundle-ref reference check (a profile pinned to
+// this specific version). Creator-only; see the service doc comment.
+message DeleteBundleVersionRequest  { string version_id = 1; bool force = 2; }
+message DeleteBundleVersionResponse {}
 
 // IngestSkillFromURLRequest ingests a skill from a GitHub repo URL.
 message IngestSkillFromURLRequest {
@@ -749,4 +943,156 @@ message IngestSkillFromURLRequest {
   string name        = 4; // optional; defaults from SKILL.md frontmatter name, sanitized to one path segment
   string description = 5; // optional
 }
-message IngestSkillFromURLResponse { string catalog_id = 1; }
+// IngestSkillFromURLResponse.catalog_id keeps its historical meaning: the first member (the
+// bundle-of-one case, by far the common one, is unchanged). The bundle_id/version_id/
+// member_catalog_ids fields let a caller resolve the full bundle for a multi-skill repo.
+message IngestSkillFromURLResponse {
+  string catalog_id                  = 1; // first member (bundle-of-one: today's behaviour, unchanged)
+  string bundle_id                   = 2;
+  string version_id                  = 3;
+  repeated string member_catalog_ids = 4; // position order
+  repeated string skipped_entries    = 5; // symlinks/devices skipped, never fetched
+  repeated string warnings           = 6; // nested-skill warnings, cap hints
+  bool   changed                     = 7; // false => a re-paste that cut no new version
+}
+
+// BundleMember is one member of one bundle version, as surfaced by GetBundle.
+message BundleMember {
+  string catalog_id     = 1;
+  string source_subdir  = 2;
+  string name           = 3;
+  string description    = 4;
+  string sha256         = 5;
+  int32  position        = 6;
+}
+
+// BundleVersion is one version cut of a bundle, as surfaced by GetBundle.
+message BundleVersion {
+  string version_id    = 1;
+  int64  seq           = 2;
+  string source_commit = 3;
+  int64  created_at    = 4;
+}
+
+// BundleSummary is a bundle's provenance card (§4.7), as surfaced by ListBundles/GetBundle.
+message BundleSummary {
+  string bundle_id         = 1;
+  string name               = 2;
+  string source_url         = 3;
+  string source_ref         = 4;
+  string source_subdir      = 5;
+  int64  created_at         = 6;
+  int64  updated_at         = 7;
+  string latest_version_id  = 8;
+  int64  latest_seq         = 9;
+  int32  member_count       = 10;
+}
+
+// ReingestBundleRequest re-fetches bundle_id's upstream source (§4.8). Creator-only.
+message ReingestBundleRequest { string bundle_id = 1; }
+// ReingestBundleResponse.diff_token is set iff changed=true; GetBundleDiff must be called with it
+// before a re-pin onto version_id is permitted (§4.9). not_modified=true means the upstream
+// returned HTTP 304 — no fetch body was read and no work was done.
+message ReingestBundleResponse {
+  string version_id        = 1; // the new version, or the pinned/latest one when !changed
+  bool   changed            = 2;
+  repeated string added_subdirs   = 3; // member source_subdirs
+  repeated string updated_subdirs = 4;
+  repeated string removed_subdirs = 5;
+  string diff_token         = 6; // set iff changed; GetBundleDiff must be called before re-pin
+  string from_version_id    = 7; // the version compared against (empty on a first cut)
+  bool   not_modified       = 8; // upstream returned 304 — no fetch body, no work
+  repeated string warnings  = 9;
+}
+
+message ListBundlesRequest  {}
+message ListBundlesResponse { repeated BundleSummary bundles = 1; }
+
+message GetBundleRequest { string bundle_id = 1; }
+// GetBundleResponse.members is the latest version's members only; use GetBundleDiff to compare
+// across versions.
+message GetBundleResponse {
+  BundleSummary bundle            = 1;
+  repeated BundleVersion versions = 2;
+  repeated BundleMember members   = 3;
+}
+
+message GetBundleDiffRequest {
+  string bundle_id    = 1;
+  string from_version = 2;
+  string to_version   = 3;
+}
+
+// MemberDiff is one member's diff between two bundle versions (§4.9 — the diff IS the
+// supply-chain gate on re-pin). old_skill_md/new_skill_md are capped at 64 KiB each and fetched
+// ONLY for ADDED/CHANGED members (never for the unchanged majority). body_unavailable=true means
+// the underlying Garage object is gone; the diff is still viewable, just without that body.
+message MemberDiff {
+  string source_subdir = 1;
+  enum Change {
+    CHANGE_UNSPECIFIED = 0;
+    ADDED              = 1;
+    REMOVED            = 2;
+    CHANGED            = 3;
+  }
+  Change change          = 2;
+  string name             = 3;
+  string old_sha256       = 4;
+  string new_sha256       = 5;
+  string old_skill_md     = 6;
+  string new_skill_md     = 7;
+  bool   old_truncated    = 8;
+  bool   new_truncated    = 9;
+  bool   body_unavailable = 10;
+}
+
+// GetBundleDiffResponse.diff_token echoes and marks-viewed the token minted by ReingestBundle for
+// (bundle_id, from_version, to_version), if any — the seam a re-pin RPC checks via
+// assertDiffViewed before honoring a version bump (§4.9).
+message GetBundleDiffResponse {
+  repeated MemberDiff members = 1;
+  string from_commit           = 2;
+  string to_commit             = 3;
+  string diff_token            = 4;
+}
+
+// RepinProfileBundleRequest re-pins entry_id (must be a BUNDLE_REF entry of profile_id) onto
+// version_id. diff_token must be a token minted by ReingestBundle for (bundle_id, pinned_version,
+// version_id) and marked viewed by GetBundleDiff for the same pair (§4.9).
+message RepinProfileBundleRequest {
+  string profile_id       = 1;
+  string entry_id         = 2;
+  string version_id       = 3;
+  string diff_token       = 4;
+  uint64 expected_version = 5;
+}
+// RepinProfileBundleResponse.warnings reports overrides dropped for members removed in the new
+// version and any implicit collision auto-renames — the re-pin still succeeds.
+message RepinProfileBundleResponse {
+  uint64 version           = 1;
+  repeated string warnings = 2;
+}
+
+// DenySkillObjectRequest.sha256 is normalized (lowercased, trimmed) server-side and must match
+// ^[0-9a-f]{64}$ after normalization; reason is required — an unexplained kill switch is
+// unauditable. Deny is an upsert: re-denying an already-denied sha updates reason/denied_by/
+// created_at, no error.
+message DenySkillObjectRequest  { string sha256 = 1; string reason = 2; }
+message DenySkillObjectResponse {}
+
+// AllowSkillObjectRequest.sha256 is normalized the same way as DenySkillObjectRequest.
+message AllowSkillObjectRequest  { string sha256 = 1; }
+message AllowSkillObjectResponse {}
+
+message ListSkillObjectDenialsRequest {}
+// SkillObjectDenial mirrors store.SkillObjectDenial: one recorded kill-switch row.
+message SkillObjectDenial {
+  string sha256     = 1;
+  string reason     = 2;
+  string denied_by  = 3;
+  int64  created_at = 4;
+}
+// ListSkillObjectDenialsResponse.denials is ordered created_at DESC (newest first).
+message ListSkillObjectDenialsResponse {
+  repeated SkillObjectDenial denials = 1;
+}

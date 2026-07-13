@@ -19,19 +19,29 @@ import (
 	"spawnery/internal/cp/store"
 )
 
-// resolvedEntry pairs a profile entry with its resolved content bytes.
-// For URL-ingested skills (by-ref delivery), sha256 is the hex sha256 of the canonical
-// plain tar and content is nil. For inline skills, sha256 is empty and content holds bytes.
-type resolvedEntry struct {
-	entry   store.ProfileEntry
-	content []byte
-	sha256  string // non-empty => by-ref skill (catalog entry with SHA256 provenance)
+// resolvedItem is one emitted artifact: for a catalog_ref/custom entry there is exactly one
+// resolvedItem per ProfileEntry; for a bundle_ref entry there is one resolvedItem per pinned
+// bundle member (sp-mwco.1.5 §4.4/§4.5). For URL-ingested skills (by-ref delivery), sha256 is
+// the hex sha256 of the canonical plain tar and content is nil. For inline skills, sha256 is
+// empty and content holds bytes.
+type resolvedItem struct {
+	entry      store.ProfileEntry // owning entry: Kind, Targets, EntryID
+	artifactID string             // entry.EntryID, or entry.EntryID+"/"+catalogID for a bundle member
+	name       string             // manifest Artifact.Name — the on-disk skill directory name
+	content    []byte
+	sha256     string // non-empty => by-ref skill (catalog entry with SHA256 provenance)
+	// source is the untrusted-external provenance of a skill item (sp-mwco.2.8 §4.6), from the
+	// catalog row already in hand at resolution time — nil for an inline/custom skill, or a
+	// non-skill kind. Rides into the manifest as spec.SkillPayload.Source without a second
+	// catalog fetch; for a bundle member this is THAT member's own catalog row.
+	source *spec.SkillSource
 }
 
 // assembleProfileArtifacts resolves a profile's non-secret entries into wire ArtifactSpecs:
-// a manifest.json BYTES artifact + one TAR payload artifact per skill. Sensitive/secret
-// artifacts are OUT of scope (sp-nrzf.4). Returns (nil, nil) when the profile has no
-// non-secret entries (secrets-only / empty profile => no manifest, which is valid).
+// a manifest.json BYTES artifact + one TAR payload artifact per skill (a bundle_ref entry expands
+// to one payload per pinned bundle member). Sensitive/secret artifacts are OUT of scope
+// (sp-nrzf.4). Returns (nil, nil) when the profile has no non-secret entries (secrets-only / empty
+// profile => no manifest, which is valid).
 func (s *Server) assembleProfileArtifacts(ctx context.Context, _ store.Profile, entries []store.ProfileEntry) ([]*cpv1.ArtifactSpec, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -44,47 +54,43 @@ func (s *Server) assembleProfileArtifacts(ctx context.Context, _ store.Profile, 
 		targetNames[name] = true
 	}
 
-	// Resolve content per entry and collect skill dir names for duplicate detection.
-	items := make([]resolvedEntry, 0, len(entries))
-	skillDirNames := make(map[string]bool)
+	// Expand each entry into one or more resolvedItems — a bundle_ref entry yields one item per
+	// pinned bundle member; catalog_ref/custom entries yield exactly one. A disabled entry
+	// (sp-mwco.2.8 §4.6) is skipped entirely, BEFORE resolution, so a disabled entry with a
+	// dangling catalog/bundle ref cannot fail assembly.
+	var items []resolvedItem
 	for _, entry := range entries {
-		// Duplicate skill directory name check (sp-nrzf.3.14.5 §4.10).
-		// The entry.Name becomes ~/.claude/skills/<Name>/ on disk; two skills sharing a name
-		// in one profile would silently overwrite/merge at install.
-		if entry.Kind == store.ProfileEntrySkill {
-			if skillDirNames[entry.Name] {
-				return nil, connect.NewError(connect.CodeInvalidArgument,
-					fmt.Errorf("profile has duplicate skill directory name %q", entry.Name))
-			}
-			skillDirNames[entry.Name] = true
+		if entry.Disabled {
+			continue
 		}
+		expanded, err := s.resolveProfileEntry(ctx, entry)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, expanded...)
+	}
+	// A profile whose every entry is disabled assembles to (nil, nil) — the same contract as an
+	// empty profile.
+	if len(items) == 0 {
+		return nil, nil
+	}
 
-		var content []byte
-		var sha256 string
-		switch entry.SourceKind {
-		case store.ProfileSourceCatalog:
-			ce, err := s.st.CustomizationCatalog().Get(ctx, entry.CatalogID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					return nil, connect.NewError(connect.CodeInvalidArgument,
-						fmt.Errorf("entry %q: unknown catalog ref %q", entry.Name, entry.CatalogID))
-				}
-				return nil, connect.NewError(connect.CodeInternal, err)
-			}
-			// URL-ingested skills carry SHA256 provenance (sp-nrzf.3.14.4); Content is nil.
-			// Inline catalog entries carry Content; SHA256 is nil.
-			if ce.SHA256 != nil && *ce.SHA256 != "" {
-				sha256 = *ce.SHA256
-			} else {
-				content = ce.Content
-			}
-		case store.ProfileSourceCustom:
-			content = entry.CustomInline
-		default:
-			return nil, connect.NewError(connect.CodeInternal,
-				fmt.Errorf("entry %q: unknown source kind %q", entry.Name, entry.SourceKind))
+	// Duplicate skill directory name check (sp-nrzf.3.14.5 §4.10; sp-mwco.1.5 §4.5). Runs over
+	// the FULLY EXPANDED item set, on item.name — the on-disk directory name a skill will land
+	// in (~/.claude/skills/<name>/). For a bundle member this is the member's own catalog Name,
+	// NOT the owning bundle entry's display Name; checking entry.Name here would let a colliding
+	// bundle sail through assembly and merge payloads on the node at install (unpackTar does not
+	// wipe its destination).
+	skillDirNames := make(map[string]bool)
+	for _, item := range items {
+		if item.entry.Kind != store.ProfileEntrySkill {
+			continue
 		}
-		items = append(items, resolvedEntry{entry: entry, content: content, sha256: sha256})
+		if skillDirNames[item.name] {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("profile has duplicate skill directory name %q", item.name))
+		}
+		skillDirNames[item.name] = true
 	}
 
 	manifest, payloadSpecs, err := buildManifestAndPayloads(items, targetNames)
@@ -108,11 +114,144 @@ func (s *Server) assembleProfileArtifacts(ctx context.Context, _ store.Profile, 
 	return append([]*cpv1.ArtifactSpec{manifestSpec}, payloadSpecs...), nil
 }
 
-// buildManifestAndPayloads turns resolved (entry, contentBytes) pairs into the canonical
-// Manifest + TAR payload specs; targetNames is agentinstall.NewRegistry(env).Names().
-// Returns the Manifest struct and only the skill TAR payload ArtifactSpecs (the caller
-// is responsible for JSON-encoding the manifest and prepending it as a BYTES spec).
-func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool) (spec.Manifest, []*cpv1.ArtifactSpec, error) {
+// resolveProfileEntry expands one ProfileEntry into its resolvedItems: exactly one for
+// catalog_ref/custom, one per pinned bundle member for bundle_ref.
+func (s *Server) resolveProfileEntry(ctx context.Context, entry store.ProfileEntry) ([]resolvedItem, error) {
+	switch entry.SourceKind {
+	case store.ProfileSourceCatalog:
+		ce, err := s.st.CustomizationCatalog().Get(ctx, entry.CatalogID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("entry %q: unknown catalog ref %q", entry.Name, entry.CatalogID))
+			}
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		content, sha256 := catalogContent(ce)
+		return []resolvedItem{{entry: entry, artifactID: entry.EntryID, name: entry.Name, content: content, sha256: sha256, source: catalogSkillSource(ce)}}, nil
+
+	case store.ProfileSourceCustom:
+		return []resolvedItem{{entry: entry, artifactID: entry.EntryID, name: entry.Name, content: entry.CustomInline}}, nil
+
+	case store.ProfileSourceBundle:
+		return s.resolveBundleEntry(ctx, entry)
+
+	default:
+		return nil, connect.NewError(connect.CodeInternal,
+			fmt.Errorf("entry %q: unknown source kind %q", entry.Name, entry.SourceKind))
+	}
+}
+
+// resolveBundleEntry expands a bundle_ref entry into one resolvedItem per member of its pinned
+// skill_bundle_version (sp-mwco.1.5 §4.4).
+func (s *Server) resolveBundleEntry(ctx context.Context, entry store.ProfileEntry) ([]resolvedItem, error) {
+	if entry.VersionID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("entry %q: bundle_ref entry has no pinned version", entry.Name))
+	}
+	v, err := s.st.SkillBundles().GetVersion(ctx, entry.VersionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("entry %q: unknown bundle version %q", entry.Name, entry.VersionID))
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	if entry.BundleID != "" && entry.BundleID != v.BundleID {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("entry %q: pinned version %q does not belong to bundle %q", entry.Name, entry.VersionID, entry.BundleID))
+	}
+
+	members, err := s.st.SkillBundles().Members(ctx, v.VersionID)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	if len(members) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("entry %q: pinned bundle version has no members", entry.Name))
+	}
+
+	excludeSet := make(map[string]bool, len(entry.ExcludeSubdirs))
+	for _, subdir := range entry.ExcludeSubdirs {
+		excludeSet[subdir] = true
+	}
+
+	items := make([]resolvedItem, 0, len(members))
+	for _, m := range members {
+		// Excluded members (sp-mwco.1.8 §4.4) emit no artifact and no manifest entry.
+		if excludeSet[m.SourceSubdir] {
+			continue
+		}
+		ce, err := s.st.CustomizationCatalog().Get(ctx, m.CatalogID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("entry %q: bundle member %q: unknown catalog ref %q", entry.Name, m.SourceSubdir, m.CatalogID))
+			}
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		if store.ProfileEntryKind(ce.Kind) != store.ProfileEntrySkill {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("entry %q: bundle member %q: not a skill (kind %q)", entry.Name, m.SourceSubdir, ce.Kind))
+		}
+		content, sha256 := catalogContent(ce)
+		items = append(items, resolvedItem{
+			entry:      entry,
+			artifactID: entry.EntryID + "/" + ce.CatalogID,
+			name:       memberDirName(entry, m, ce),
+			content:    content,
+			sha256:     sha256,
+			source:     catalogSkillSource(ce),
+		})
+	}
+	if len(items) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("entry %q: all bundle members excluded", entry.Name))
+	}
+	return items, nil
+}
+
+// memberDirName returns the on-disk skill directory name for a bundle member: the member's
+// per-member rename override (entry.RenameSubdirs[m.SourceSubdir]) if set, else the member's own
+// catalog Name (sp-mwco.1.8 §4.4).
+func memberDirName(entry store.ProfileEntry, m store.SkillBundleMember, ce store.CustomizationCatalogEntry) string {
+	if name, ok := entry.RenameSubdirs[m.SourceSubdir]; ok {
+		return name
+	}
+	return ce.Name
+}
+
+// catalogContent picks content vs. by-ref sha256 for a catalog entry: URL-ingested skills carry
+// SHA256 provenance (sp-nrzf.3.14.4) and nil Content; inline catalog entries carry Content and a
+// nil/empty SHA256.
+func catalogContent(ce store.CustomizationCatalogEntry) (content []byte, sha256 string) {
+	if ce.SHA256 != nil && *ce.SHA256 != "" {
+		return nil, *ce.SHA256
+	}
+	return ce.Content, ""
+}
+
+// catalogSkillSource derives the untrusted-external provenance (sp-mwco.2.8 §4.6) an installed
+// skill's manifest artifact carries, from the catalog row already resolved. nil for an inline
+// (non-URL-ingested) catalog entry — its SourceURL is "" — so an operator-authored/curated inline
+// skill gets no provenance banner at install time.
+func catalogSkillSource(ce store.CustomizationCatalogEntry) *spec.SkillSource {
+	if ce.SourceURL == "" {
+		return nil
+	}
+	return &spec.SkillSource{
+		URL:    ce.SourceURL,
+		Ref:    ce.SourceRef,
+		Commit: ce.SourceCommit,
+		Subdir: ce.SourceSubdir,
+	}
+}
+
+// buildManifestAndPayloads turns resolvedItems into the canonical Manifest + TAR payload specs;
+// targetNames is agentinstall.NewRegistry(env).Names(). Returns the Manifest struct and only the
+// skill TAR payload ArtifactSpecs (the caller is responsible for JSON-encoding the manifest and
+// prepending it as a BYTES spec).
+func buildManifestAndPayloads(items []resolvedItem, targetNames map[string]bool) (spec.Manifest, []*cpv1.ArtifactSpec, error) {
 	// Build the union of forbidden config keys across all agent layouts.
 	reg := agentinstall.NewRegistry(agentinstall.MapEnviron{})
 	forbiddenKeys := make(map[string]bool)
@@ -124,6 +263,14 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 
 	var artifacts []spec.Artifact
 	var payloadSpecs []*cpv1.ArtifactSpec
+	// Disjointness assertion (sp-mwco.1.5 §4.5): the last line of defence in front of
+	// unpackTar, which does not wipe its destination — two payloads sharing a DestPath would
+	// silently merge on the node. A collision here is an assembly invariant violation, not a
+	// caller input error (the duplicate-name check above should have already caught any
+	// same-named skills; this also catches a same-content-dedup catalog_id reused by two
+	// distinct bundle members with different display names).
+	seenIDs := make(map[string]bool)
+	seenDest := make(map[string]bool)
 
 	for _, item := range items {
 		entry := item.entry
@@ -133,26 +280,36 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 		targets, err := translateTargets(entry.Targets, targetNames)
 		if err != nil {
 			return spec.Manifest{}, nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("entry %q: %w", entry.Name, err))
+				fmt.Errorf("entry %q: %w", item.name, err))
 		}
 
 		a := spec.Artifact{
-			Name:    entry.Name,
+			Name:    item.name,
 			Kind:    spec.Kind(entry.Kind),
 			Targets: targets,
+		}
+		if entry.SourceKind == store.ProfileSourceBundle {
+			a.Bundle = entry.EntryID
 		}
 
 		switch entry.Kind {
 		case store.ProfileEntrySkill:
-			payloadPath := "payloads/" + entry.EntryID
-			a.Skill = &spec.SkillPayload{Dir: payloadPath}
+			payloadPath := "payloads/" + item.artifactID
+			if seenIDs[item.artifactID] || seenDest[payloadPath] {
+				return spec.Manifest{}, nil, connect.NewError(connect.CodeInternal,
+					fmt.Errorf("assembly produced duplicate artifact destination %q", payloadPath))
+			}
+			seenIDs[item.artifactID] = true
+			seenDest[payloadPath] = true
+
+			a.Skill = &spec.SkillPayload{Dir: payloadPath, Source: item.source}
 			a.Payload = payloadPath
 			if item.sha256 != "" {
 				// By-ref delivery path: URL-ingested skill stored in Garage (sp-nrzf.3.14.5).
 				// Skip validateSkillTar — validation was done at ingest time.
 				// PresignedUrl is left empty here; the CP fills it at StartSpawn via presignNodeArtifacts.
 				payloadSpecs = append(payloadSpecs, &cpv1.ArtifactSpec{
-					Id:              entry.EntryID,
+					Id:              item.artifactID,
 					ContentType:     cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR,
 					TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
 					DestPath:        payloadPath,
@@ -163,11 +320,11 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 				})
 			} else {
 				// Inline delivery path: legacy catalog skill with Content bytes, or custom inline.
-				if err := validateSkillTar(content, entry.Name); err != nil {
+				if err := validateSkillTar(content, item.name); err != nil {
 					return spec.Manifest{}, nil, err
 				}
 				payloadSpecs = append(payloadSpecs, &cpv1.ArtifactSpec{
-					Id:              entry.EntryID,
+					Id:              item.artifactID,
 					Inline:          content,
 					ContentType:     cpv1.ArtifactContentType_ARTIFACT_CONTENT_TYPE_TAR,
 					TargetContainer: cpv1.ArtifactTarget_ARTIFACT_TARGET_AGENT,
@@ -179,7 +336,7 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 			var payload spec.MCPPayload
 			if err := json.Unmarshal(content, &payload); err != nil {
 				return spec.Manifest{}, nil, connect.NewError(connect.CodeInvalidArgument,
-					fmt.Errorf("entry %q: malformed MCP content: %w", entry.Name, err))
+					fmt.Errorf("entry %q: malformed MCP content: %w", item.name, err))
 			}
 			// Thread MCPSecretRefs from the entry metadata.
 			payload.SecretRefs = entry.MCPSecretRefs
@@ -189,9 +346,9 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 			var payload spec.ConfigPayload
 			if err := json.Unmarshal(content, &payload); err != nil {
 				return spec.Manifest{}, nil, connect.NewError(connect.CodeInvalidArgument,
-					fmt.Errorf("entry %q: malformed Config content: %w", entry.Name, err))
+					fmt.Errorf("entry %q: malformed Config content: %w", item.name, err))
 			}
-			if err := validateConfigPayload(entry.Name, &payload, forbiddenKeys); err != nil {
+			if err := validateConfigPayload(item.name, &payload, forbiddenKeys); err != nil {
 				return spec.Manifest{}, nil, err
 			}
 			a.Config = &payload
@@ -200,13 +357,13 @@ func buildManifestAndPayloads(items []resolvedEntry, targetNames map[string]bool
 			var payload spec.PluginPayload
 			if err := json.Unmarshal(content, &payload); err != nil {
 				return spec.Manifest{}, nil, connect.NewError(connect.CodeInvalidArgument,
-					fmt.Errorf("entry %q: malformed Plugin content: %w", entry.Name, err))
+					fmt.Errorf("entry %q: malformed Plugin content: %w", item.name, err))
 			}
 			a.Plugin = &payload
 
 		default:
 			return spec.Manifest{}, nil, connect.NewError(connect.CodeInternal,
-				fmt.Errorf("entry %q: unknown kind %q", entry.Name, entry.Kind))
+				fmt.Errorf("entry %q: unknown kind %q", item.name, entry.Kind))
 		}
 
 		artifacts = append(artifacts, a)

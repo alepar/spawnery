@@ -28,10 +28,24 @@ const (
 	KindPlugin Kind = "plugin"
 )
 
+// SkillSource is the untrusted-external provenance of an installed skill (sp-mwco.2.8 §4.6):
+// URL-ingested from the customization catalog. Nil/absent for operator-authored (custom/inline)
+// skills — those are not untrusted external content, so they carry no source and get no
+// provenance banner at install time.
+type SkillSource struct {
+	URL    string `json:"url,omitempty"`
+	Ref    string `json:"ref,omitempty"`
+	Commit string `json:"commit,omitempty"`
+	Subdir string `json:"subdir,omitempty"`
+}
+
 // SkillPayload is the skill artifact payload.
 type SkillPayload struct {
 	// Dir is the path within the staging payloads directory to the skill directory tree.
 	Dir string `json:"dir"`
+	// Source is the untrusted-external provenance of this skill, or nil for operator-authored
+	// content. Injected into the installed SKILL.md as a provenance banner (sp-mwco.2.8 §4.6).
+	Source *SkillSource `json:"source,omitempty"`
 }
 
 // MCPTransportStdio is a stdio MCP transport configuration.
@@ -90,6 +104,12 @@ type Artifact struct {
 	Kind    Kind     `json:"kind"`
 	Name    string   `json:"name"`
 	Targets []string `json:"targets"`
+
+	// Bundle is the bundle_ref entry id this artifact belongs to, or "" for a standalone
+	// (non-bundle) artifact. Populated at profile assembly (sp-mwco.1.5); empty until then, in
+	// which case the all-or-nothing bundle verdict (spec.BuildApplyReport) is inert (no bundle
+	// groups to enforce). Members of the same bundle_ref share the same Bundle value.
+	Bundle string `json:"bundle,omitempty"`
 
 	// Exactly one of Skill, MCP, Config, or Plugin is set (matching Kind).
 	Skill  *SkillPayload  `json:"skill,omitempty"`

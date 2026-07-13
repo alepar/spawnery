@@ -28,6 +28,8 @@ telemetry: "telemetry/events.jsonl"   # JSONL sink path; empty disables
 max_spawns_per_owner: 5
 shutdown_grace: 30s            # graceful-shutdown drain timeout on SIGTERM/SIGINT
 
+admin_owners: ""  # comma-separated account ids allowed to publish to the global catalog; empty = nobody
+
 evaluator:                     # CP-side metric evaluators (disabled by default)
   quota_suspend_mb: 0          # >0 enables quota-based suspend
   idle_enabled: false          # enable idle-only evaluation
@@ -55,3 +57,15 @@ skills:
   bucket: "spawnery-skills"  # pre-provisioned skills bucket name
   github_token: ""       # optional GitHub Bearer token (raises rate limit 60→5000/hr per IP)
   zstd_level: 3          # zstd compression level 1–19 (3 = fast, good ratio)
+
+  # skillfetch caps (sp-mwco.4.6). Defaults below equal the pre-config-surfaced hardcoded values.
+  # plain_tar_cap_bytes is ALSO stamped onto every by-ref ObjectRef.MaxPlainTarBytes at StartSpawn
+  # (internal/cp/artifacts.go) — the node obeys THIS value verbatim, so raising it here raises the
+  # node's effective cap too, without a node redeploy. Any raise is bounded by the CP's own memory
+  # budget + ingest semaphore (sp-mwco.1). The host allowlist is NOT here — deliberately a code
+  # constant (internal/cp/skillfetch/fetch.go allowedHosts); see that file's comment.
+  wire_cap_bytes: 20971520          # 20 MiB — max compressed tarball size over the wire
+  decompressed_cap_bytes: 52428800  # 50 MiB — max decompressed size before tar parsing
+  plain_tar_cap_bytes: 52428800     # 50 MiB — max plain-tar size after canonical repack
+  file_count_cap: 10000             # max tarball entry count
+  http_timeout: 60s                 # per-fetch HTTP deadline

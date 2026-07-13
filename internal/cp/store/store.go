@@ -219,6 +219,15 @@ type ProfileRepo interface {
 	Delete(ctx context.Context, profileID string) error
 	// AddEntry CAS-adds an entry to the profile. Returns ErrNotFound or ErrConflict.
 	AddEntry(ctx context.Context, profileID string, expectedVersion uint64, e ProfileEntry, now int64) (newVersion uint64, err error)
+	// UpdateEntryPin CAS-repins a bundle_ref entry onto a new version_id + bundle_overrides JSON
+	// (sp-mwco.1.8 — RepinProfileBundle's store call). Returns ErrNotFound when the entry row is
+	// absent, or ErrConflict when expectedVersion is stale.
+	UpdateEntryPin(ctx context.Context, profileID string, expectedVersion uint64, entryID, versionID, overridesJSON string, now int64) (newVersion uint64, err error)
+	// UpdateEntry CAS-updates an entry's targets + disabled in place, preserving entry_id and
+	// every other column (kind/name/source/catalog_id/bundle pin) — a scoping-only mutation
+	// (sp-mwco.2.8 §4.6, UpdateProfileEntry's store call). Returns ErrNotFound when the entry row
+	// is absent, or ErrConflict when expectedVersion is stale.
+	UpdateEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, targets []string, disabled bool, now int64) (newVersion uint64, err error)
 	// RemoveEntry CAS-removes an entry. Returns ErrNotFound or ErrConflict.
 	RemoveEntry(ctx context.Context, profileID string, expectedVersion uint64, entryID string, now int64) (newVersion uint64, err error)
 	// AddSecretRef CAS-adds a secret reference. Returns ErrNotFound or ErrConflict.
@@ -229,6 +238,31 @@ type ProfileRepo interface {
 	// pointing to the given catalogID. Returns an empty slice (not an error) when none match.
 	// Used by the kill-switch (sp-nrzf.3.9) to resolve profiles affected by a catalog revoke.
 	ListProfileIDsByCatalogRef(ctx context.Context, catalogID string) ([]string, error)
+	// ListProfileIDsByBundleVersions returns distinct profile_ids that contain a bundle_ref
+	// entry pinned to one of the given versionIDs. Returns an empty slice (not an error) when
+	// versionIDs is empty or none match. Used by the kill-switch (sp-mwco.1.6) to resolve
+	// profiles affected by a catalog revoke through bundle-version membership.
+	ListProfileIDsByBundleVersions(ctx context.Context, versionIDs []string) ([]string, error)
+	// CountRefsByCatalogRef returns the number of distinct profiles, and the number of distinct
+	// owners of those profiles, that contain a catalog_ref entry pointing to catalogID. Zero refs
+	// returns (0, 0, nil). Used by the guarded-unlist reference check (sp-mwco.3.4 §4.6 D5) — the
+	// counts (never profile/owner ids) drive the FailedPrecondition warning message.
+	CountRefsByCatalogRef(ctx context.Context, catalogID string) (profiles, owners int, err error)
+	// ListProfileIDsByBundleRef returns distinct profile_ids that contain a bundle_ref entry
+	// pinned to the given bundleID. Empty slice (not an error) when none match. Local bundle-aware
+	// spawn resolution (sp-mwco.3.3, until sp-mwco.1.6's bundle-aware resolveAffectedSpawns lands).
+	ListProfileIDsByBundleRef(ctx context.Context, bundleID string) ([]string, error)
+	// ListProfileIDsByBundleVersionRef returns distinct profile_ids that contain a bundle_ref
+	// entry pinned to the given versionID. Empty slice (not an error) when none match.
+	ListProfileIDsByBundleVersionRef(ctx context.Context, versionID string) ([]string, error)
+	// CountBundleRefs returns the number of distinct profiles, and the number of distinct owners
+	// of those profiles, that contain a bundle_ref entry pinned to bundleID. Zero refs returns
+	// (0, 0, nil). Backs DeleteBundle's counts-only reference-check message (sp-mwco.3.3 §4.3).
+	CountBundleRefs(ctx context.Context, bundleID string) (profiles, owners int, err error)
+	// CountBundleVersionRefs returns the number of distinct profiles, and the number of distinct
+	// owners of those profiles, that contain a bundle_ref entry pinned to versionID. Zero refs
+	// returns (0, 0, nil). Backs DeleteBundleVersion's counts-only reference-check message.
+	CountBundleVersionRefs(ctx context.Context, versionID string) (profiles, owners int, err error)
 }
 
 // CustomizationCatalogRepo manages curated catalog entries.
@@ -242,12 +276,20 @@ type CustomizationCatalogRepo interface {
 	Get(ctx context.Context, catalogID string) (CustomizationCatalogEntry, error)
 	// List returns only listed=true entries, ordered by name ASC.
 	List(ctx context.Context) ([]CustomizationCatalogEntry, error)
+	// ListVisibleTo returns every entry visible to ownerID — listed=true UNION ownerID's own
+	// (including unlisted) — ordered by name ASC (sp-mwco.3.4 §4.6 D2: "listed OR mine").
+	ListVisibleTo(ctx context.Context, ownerID string) ([]CustomizationCatalogEntry, error)
 	// ListByCreator returns all entries for the given creator (including unlisted), ordered by name ASC.
 	ListByCreator(ctx context.Context, creatorID string) ([]CustomizationCatalogEntry, error)
 	// Update replaces name, description, and content for an entry. ErrNotFound when absent.
 	Update(ctx context.Context, catalogID string, name, description string, content []byte, now int64) error
 	// SetListed sets the listing visibility of an entry. ErrNotFound when absent.
 	SetListed(ctx context.Context, catalogID string, listed bool) error
+	// LockRow takes an exclusive lock on the catalog row for the remainder of the enclosing tx.
+	// MUST be called inside WithTx (returns an error otherwise). ErrNotFound when the row is gone
+	// — it doubles as the existence check. The mutex that serializes DeleteCatalogEntry against a
+	// concurrent AddProfileEntry on the same catalog_id (sp-mwco.3.3 §2).
+	LockRow(ctx context.Context, catalogID string) error
 	// Delete removes an entry. ErrNotFound when absent.
 	Delete(ctx context.Context, catalogID string) error
 	// GetByCreatorSHA returns the entry for (creatorID, sha256hex). ErrNotFound when absent.
@@ -259,6 +301,72 @@ type CustomizationCatalogRepo interface {
 	CreateSkill(ctx context.Context, e CustomizationCatalogEntry) error
 }
 
+// SkillBundleRepo manages skill bundles: a bundle is one ingested repo/ref/subdir, cut into
+// versions whose members are customization_catalog rows tagged bundle_member=true.
+type SkillBundleRepo interface {
+	// Create inserts a new bundle. Maps a unique-constraint violation on
+	// (creator_id, source_url, source_ref, source_subdir) to ErrConflict.
+	Create(ctx context.Context, b SkillBundle) error
+	// Get returns the bundle for bundleID. ErrNotFound when absent.
+	Get(ctx context.Context, bundleID string) (SkillBundle, error)
+	// GetByKey returns the bundle for (creatorID, url, ref, subdir) — the re-paste lookup.
+	// ErrNotFound when absent.
+	GetByKey(ctx context.Context, creatorID, url, ref, subdir string) (SkillBundle, error)
+	// ListByCreator returns all bundles for the given creator, ordered by name ASC.
+	ListByCreator(ctx context.Context, creatorID string) ([]SkillBundle, error)
+	// CreateVersion inserts a version and its members atomically. seq is assumed already set by
+	// the caller. Maps a unique-constraint violation — on (bundle_id, seq) or on a duplicate
+	// member source_subdir within the version — to ErrConflict.
+	CreateVersion(ctx context.Context, v SkillBundleVersion, members []SkillBundleMember) error
+	// LatestVersion returns the version with the highest seq for bundleID. ErrNotFound when the
+	// bundle has no versions.
+	LatestVersion(ctx context.Context, bundleID string) (SkillBundleVersion, error)
+	// GetVersion returns the version for versionID. ErrNotFound when absent.
+	GetVersion(ctx context.Context, versionID string) (SkillBundleVersion, error)
+	// ListVersions returns all versions of bundleID, ordered by seq ASC.
+	ListVersions(ctx context.Context, bundleID string) ([]SkillBundleVersion, error)
+	// Members returns the members of versionID, ordered by position ASC.
+	Members(ctx context.Context, versionID string) ([]SkillBundleMember, error)
+	// MemberVersionIDs returns every version_id referencing catalogID as a member — the
+	// kill-switch (sp-mwco.1.6) and delete reference-check (sp-mwco.3.3) query.
+	MemberVersionIDs(ctx context.Context, catalogID string) ([]string, error)
+	// SetETag updates the bundle's conditional-refetch etag (§4.8). ErrNotFound when absent.
+	SetETag(ctx context.Context, bundleID, etag string, now int64) error
+	// LockBundle takes an exclusive lock on the bundle row for the remainder of the enclosing tx.
+	// MUST be called inside WithTx (returns an error otherwise). ErrNotFound when the row is gone.
+	// Same self-assignment-UPDATE idiom as CustomizationCatalogRepo.LockRow (sp-mwco.3.3 §2).
+	LockBundle(ctx context.Context, bundleID string) error
+	// LockVersion takes an exclusive lock on the version row for the remainder of the enclosing
+	// tx. MUST be called inside WithTx (returns an error otherwise). ErrNotFound when the row is
+	// gone. skill_bundle_version has no updated_at column, so the self-assignment target is seq.
+	LockVersion(ctx context.Context, versionID string) error
+	// DeleteBundle removes a bundle. FK ON DELETE CASCADE removes its versions and their member
+	// rows, but NOT the member customization_catalog rows (content-identity dedup means a row can
+	// be shared across bundles/versions — deleting it here could break another bundle's
+	// membership). ErrNotFound when absent.
+	DeleteBundle(ctx context.Context, bundleID string) error
+	// DeleteBundleVersion removes one version and, via cascade, its member rows — sibling versions
+	// of the same bundle are untouched. Member catalog rows survive, same as DeleteBundle.
+	// ErrNotFound when absent.
+	DeleteBundleVersion(ctx context.Context, versionID string) error
+}
+
+// SkillDenylistRepo manages the sha256 kill-switch for real revocation (sp-mwco.3.2 §4.2):
+// keyed by content sha, not catalog_id — see SkillObjectDenial's doc comment.
+type SkillDenylistRepo interface {
+	// Deny upserts a denial: re-denying an already-denied sha updates reason/denied_by/
+	// created_at and returns no error — the kill switch must be idempotent under a retry.
+	Deny(ctx context.Context, d SkillObjectDenial) error
+	// Allow removes a denial. ErrNotFound when the sha is not currently denied.
+	Allow(ctx context.Context, sha256 string) error
+	// List returns every denial, ordered created_at DESC (newest first).
+	List(ctx context.Context) ([]SkillObjectDenial, error)
+	// Denied looks up which of the given shas are currently denied, keyed by sha256. Shas absent
+	// from the denylist are simply absent from the result map — this is not an error. Denied(nil)
+	// or Denied([]) returns an empty map and issues no query.
+	Denied(ctx context.Context, shas []string) (map[string]SkillObjectDenial, error)
+}
+
 type Store interface {
 	Owners() OwnerRepo
 	Apps() AppRepo
@@ -268,6 +376,8 @@ type Store interface {
 	Secrets() SecretRepo
 	Profiles() ProfileRepo
 	CustomizationCatalog() CustomizationCatalogRepo
+	SkillBundles() SkillBundleRepo
+	SkillDenylist() SkillDenylistRepo
 	// WithTx runs fn in a transaction. If called inside an existing WithTx, fn runs in the
 	// SAME transaction (flat composition — no savepoints; an inner error rolls back the whole tx).
 	WithTx(ctx context.Context, fn func(tx Store) error) error
