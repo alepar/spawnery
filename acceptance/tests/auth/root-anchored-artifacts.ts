@@ -35,6 +35,10 @@ export interface DestructiveVMAuthConfig extends VMAuthConfig {
 }
 
 type DestructiveSSH = (cfg: DestructiveVMAuthConfig, command: string) => Promise<string>;
+export type SPABundlePublisher = (
+  cfg: DestructiveVMAuthConfig,
+  bundleDir: string,
+) => Promise<void>;
 
 function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -239,6 +243,35 @@ export async function assertDisposableVM(
 ): Promise<void> {
   const verified = await executeSSH(cfg, vmRunMarkerVerificationCommand(cfg.vmRunId));
   if (verified !== "verified") throw new Error("disposable VM run marker did not verify");
+}
+
+async function publishSPABundle(
+  cfg: DestructiveVMAuthConfig,
+  bundleDir: string,
+): Promise<void> {
+  const source = bundleDir.replace(/\/+$/, "");
+  if (!source) throw new Error("alternate SPA bundle directory is required");
+  await execFileP("rsync", [
+    "-a",
+    "--delete",
+    "-e",
+    `ssh -i ${posixShellQuote(cfg.sshKey)} -o BatchMode=yes -o StrictHostKeyChecking=no`,
+    "--rsync-path",
+    "sudo rsync",
+    `${source}/`,
+    `${cfg.sshUser}@${cfg.ip}:/var/www/spawnery/`,
+  ], { maxBuffer: 4 * 1024 * 1024 });
+}
+
+/** Replace the VM's deployed SPA with a local alternate bundle. */
+export async function deployAlternateSPABundle(
+  cfg: DestructiveVMAuthConfig,
+  bundleDir: string,
+  publish: SPABundlePublisher = publishSPABundle,
+  executeSSH: DestructiveSSH = ssh,
+): Promise<void> {
+  await assertDisposableVM(cfg, executeSSH);
+  await publish(cfg, bundleDir);
 }
 
 export async function setCPAuthMode(

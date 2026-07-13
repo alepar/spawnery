@@ -5,6 +5,7 @@ import {
   assertDisposableVM,
   cpAuthModePlan,
   cpAuthModeReadinessCommand,
+  deployAlternateSPABundle,
   deployCurrentRevocation,
   loadDestructiveVMAuthConfig,
   loadVMAuthConfig,
@@ -142,6 +143,45 @@ describe("destructive VM identity", () => {
 
     await expect(deployCurrentRevocation(cfg, 1, executeSSH)).rejects.toThrow("did not verify");
     expect(commands).toEqual([vmRunMarkerVerificationCommand("run-123")]);
+  });
+
+  it("does not publish an alternate SPA bundle when the disposable marker fails", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const publications: string[] = [];
+    const publish = async (_cfg: typeof cfg, bundleDir: string) => {
+      publications.push(bundleDir);
+    };
+    const executeSSH = async () => "wrong-run";
+
+    await expect(deployAlternateSPABundle(
+      cfg,
+      "/tmp/stale-crl-web-dist",
+      publish,
+      executeSSH,
+    )).rejects.toThrow("did not verify");
+    expect(publications).toEqual([]);
+  });
+
+  it("stops revocation deployment when the disposable marker changes after artifact generation", async () => {
+    const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const commands: string[] = [];
+    const marker = vmRunMarkerVerificationCommand("run-123");
+    let markerChecks = 0;
+    const executeSSH = async (_cfg: typeof cfg, command: string) => {
+      commands.push(command);
+      if (command === marker) {
+        markerChecks++;
+        return markerChecks === 1 ? "verified" : "wrong-run";
+      }
+      if (command.includes("signer-revocation")) return "wire";
+      return "";
+    };
+
+    await expect(deployCurrentRevocation(cfg, 1, executeSSH)).rejects.toThrow("did not verify");
+    expect(markerChecks).toBe(2);
+    expect(commands.some((command) => command.includes("signer-revocation"))).toBe(true);
+    expect(commands.some((command) => command.includes("signer-revocations.artifact"))).toBe(false);
+    expect(commands.some((command) => command.includes("systemctl restart"))).toBe(false);
   });
 
   it("rechecks the disposable marker immediately before installing revocation state", async () => {
