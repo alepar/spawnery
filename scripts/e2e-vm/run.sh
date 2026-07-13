@@ -45,9 +45,30 @@ DBOX_GOCACHE="$RD/go-cache"
 dbox() { "$DBOX_BIN" enter --root dev-spawnery -- bash -lc "export GOCACHE='$DBOX_GOCACHE'; cd '$REPO_ROOT' && $*"; }
 
 build_web() {
-  local public_dir="$1" root_b64
+  local public_dir="$1" root_b64 crl_bundle crl_bundle_b64
+  for public_file in \
+    root.pem \
+    cloud-intermediate.pem \
+    cloud-node.crl.pem \
+    self-hosted-intermediate.pem \
+    self-hosted-node.crl.pem
+  do
+    test -s "$public_dir/$public_file" || die "missing public web trust input: $public_file"
+  done
   root_b64="$(base64 -w0 "$public_dir/root.pem")"
-  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' VITE_ROOT_CA_PEM=\"\$(printf '%s' '$root_b64' | base64 -d)\" VITE_TRUST_DOMAIN='prod.spawnery.internal' VITE_CLOUD_ACCOUNT_ID='spawnery-system' npm run build && PATH='$REPO_ROOT/sdk/ts/node_modules/.bin':\"\$PATH\" ../deploy/web/forbidden-scan.sh dist && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
+  # These CRLs are immutable SPA inputs. Rotating an issuer CRL, or replacing one before expiry,
+  # requires a fresh web build and rollout; the browser has no runtime CRL refresh fallback.
+  crl_bundle="$(jq -n \
+    --rawfile cloud_issuer "$public_dir/cloud-intermediate.pem" \
+    --rawfile cloud_crl "$public_dir/cloud-node.crl.pem" \
+    --rawfile self_hosted_issuer "$public_dir/self-hosted-intermediate.pem" \
+    --rawfile self_hosted_crl "$public_dir/self-hosted-node.crl.pem" \
+    '[
+      {class: "cloud", issuerPEM: $cloud_issuer, crlPEM: $cloud_crl},
+      {class: "self-hosted", issuerPEM: $self_hosted_issuer, crlPEM: $self_hosted_crl}
+    ]')"
+  crl_bundle_b64="$(printf '%s' "$crl_bundle" | base64 -w0)"
+  dbox "cd web && npm ci && VITE_CP_ORIGIN='$WEB_ORIGIN' VITE_AS_ORIGIN='$WEB_ORIGIN' VITE_ROOT_CA_PEM=\"\$(printf '%s' '$root_b64' | base64 -d)\" VITE_TRUST_DOMAIN='prod.spawnery.internal' VITE_CLOUD_ACCOUNT_ID='spawnery-system' VITE_NODE_CRL_BUNDLE_JSON=\"\$(printf '%s' '$crl_bundle_b64' | base64 -d)\" npm run build && PATH='$REPO_ROOT/sdk/ts/node_modules/.bin':\"\$PATH\" ../deploy/web/forbidden-scan.sh dist && rm -rf '$STAGE/web-dist' && cp -rf dist '$STAGE/web-dist'"
   test -d "$STAGE/web-dist"
   test -f "$STAGE/web-dist/index.html"
 }
@@ -77,6 +98,10 @@ cp -f "$REPO_ROOT/scripts/e2e-vm/provision/env/"*.env "$STAGE/provision/env/"
 if [ "${E2E_RUN_BUILD_ONLY:-0}" = 1 ]; then
   TEST_PUBLIC="$RD/test-public"; mkdir -p "$TEST_PUBLIC"
   printf '%s\n' 'test-public-root' > "$TEST_PUBLIC/root.pem"
+  printf '%s\n' 'test-public-cloud-issuer' > "$TEST_PUBLIC/cloud-intermediate.pem"
+  printf '%s\n' 'test-public-cloud-crl' > "$TEST_PUBLIC/cloud-node.crl.pem"
+  printf '%s\n' 'test-public-self-hosted-issuer' > "$TEST_PUBLIC/self-hosted-intermediate.pem"
+  printf '%s\n' 'test-public-self-hosted-crl' > "$TEST_PUBLIC/self-hosted-node.crl.pem"
   build_web "$TEST_PUBLIC"
   exit 0
 fi

@@ -85,6 +85,26 @@ rg -q 'sdk/ts/node_modules/.bin' "$TMP/pins.out" || {
   echo "run.sh did not make the workspace tsx available to the release scanner" >&2
   exit 1
 }
+rg -q 'VITE_NODE_CRL_BUNDLE_JSON' "$TMP/pins.out" || {
+  echo "run.sh did not pass the generated issuer/CRL bundle to the fresh web build" >&2
+  exit 1
+}
+for public_binding in \
+  '--rawfile cloud_issuer "$public_dir/cloud-intermediate.pem"' \
+  '--rawfile cloud_crl "$public_dir/cloud-node.crl.pem"' \
+  '--rawfile self_hosted_issuer "$public_dir/self-hosted-intermediate.pem"' \
+  '--rawfile self_hosted_crl "$public_dir/self-hosted-node.crl.pem"'
+do
+  rg -Fq -- "$public_binding" "$ROOT/scripts/e2e-vm/run.sh" || {
+    echo "run.sh lacks structured public CRL bundle binding: ${public_binding}" >&2
+    exit 1
+  }
+done
+if rg -n 'VITE_NODE_CRL_(URL|ENDPOINT)|NODE_CRL_URL|fetch\([^)]*[Cc][Rr][Ll]' \
+    "$ROOT/scripts/e2e-vm/run.sh" "$ROOT/web/src/auth/crl.ts"; then
+  echo "run.sh/web CRL verification contains a runtime refresh fallback" >&2
+  exit 1
+fi
 for required in 'getent ahosts' 'E2E_HOSTS_MODE=hosts'; do
   rg -q "$required" "$ROOT/scripts/e2e-vm/run.sh" || {
     echo "run.sh lacks required production-lane wiring: $required" >&2

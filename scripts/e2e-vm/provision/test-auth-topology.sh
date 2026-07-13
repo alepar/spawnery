@@ -27,6 +27,7 @@ fi
 runner="$REPO/scripts/e2e-vm/run.sh"
 for required in \
   VITE_ROOT_CA_PEM \
+  VITE_NODE_CRL_BUNDLE_JSON \
   VITE_TRUST_DOMAIN \
   VITE_CLOUD_ACCOUNT_ID \
   ACC_ROOT_CA_PEM \
@@ -41,6 +42,38 @@ do
     exit 1
   }
 done
+
+for public_binding in \
+  '--rawfile cloud_issuer "$public_dir/cloud-intermediate.pem"' \
+  '--rawfile cloud_crl "$public_dir/cloud-node.crl.pem"' \
+  '--rawfile self_hosted_issuer "$public_dir/self-hosted-intermediate.pem"' \
+  '--rawfile self_hosted_crl "$public_dir/self-hosted-node.crl.pem"'
+do
+  rg -Fq -- "$public_binding" "$runner" || {
+    echo "run.sh does not construct the web CRL bundle from ${public_binding}" >&2
+    exit 1
+  }
+done
+rg -Fq "jq -n" "$runner" || {
+  echo "run.sh does not construct the web CRL bundle as structured JSON" >&2
+  exit 1
+}
+for node_class in cloud self-hosted; do
+  rg -Fq "class: \"${node_class}\"" "$runner" || {
+    echo "run.sh CRL bundle is missing ${node_class} issuer topology" >&2
+    exit 1
+  }
+done
+
+runtime_crl_fallback='VITE_NODE_CRL_(URL|ENDPOINT)|NODE_CRL_URL|NODE_CERTIFICATE_REVOCATION_URLS|fetch\([^)]*[Cc][Rr][Ll]|curl[^\n]*[Cc][Rr][Ll]'
+if rg -n "$runtime_crl_fallback" "$runner" "$REPO/web/src/auth/crl.ts"; then
+  echo "web node-certificate revocation has a forbidden runtime URL/fetch fallback" >&2
+  exit 1
+fi
+if rg -n 'VITE_NODE_CRL_BUNDLE_JSON[^\n]*(key|private)' "$runner"; then
+  echo "web CRL bundle wiring includes private key material" >&2
+  exit 1
+fi
 
 rg -Fq 'provision/reconcile-gitea-env.sh" "$STAGE/provision/' "$runner" || {
   echo "run.sh does not stage the versioned Gitea environment reconciler" >&2
