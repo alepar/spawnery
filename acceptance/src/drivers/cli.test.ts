@@ -8,7 +8,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 const identity: Identity = { token: "tok-123", owner: "acc-owner-1" };
-const cfg = { cpEndpoint: "https://cp.example", spawnctlBin: "spawnctl", nodeAddr: "http://node.example:9092" };
+const cfg = { cpEndpoint: "https://cp.example", spawnctlBin: "spawnctl" };
 
 describe("buildArgs", () => {
   it("puts -cp/-token as leading root flags for the no-subcommand create form", () => {
@@ -53,14 +53,12 @@ describe("buildArgs", () => {
 });
 
 describe("buildExecArgs", () => {
-  it("targets the node (-addr), not the CP, with -spawn and a -- terminator before the command", () => {
+  it("targets the CP relay with -spawn and a -- terminator before the command", () => {
     const argv = buildExecArgs(cfg, identity, "s1", ["cat", "/workspace/marker.txt"]);
     expect(argv).toEqual([
       "exec",
       "-spawn",
       "s1",
-      "-addr",
-      "http://node.example:9092",
       "-cp",
       "https://cp.example",
       "-token",
@@ -79,9 +77,14 @@ describe("buildExecArgs", () => {
     expect(argv.slice(dashDash + 1)).toEqual(["sh", "-c", "exit 3"]);
   });
 
-  it("omits an explicit CP bearer when stored OAuth state is configured", () => {
-    expect(buildExecArgs({ ...cfg, authArgs: [], configHome: "/run/cli-auth" }, identity, "s1", ["true"]))
-      .not.toContain("-token");
+  it("uses stored custody and public trust without a direct node address", () => {
+		const argv = buildExecArgs({ ...cfg, authArgs: [], configHome: "/run/cli-auth", trust: {
+			rootCAPath: "/run/root.pem", trustDomain: "prod.spawnery.internal", crlStatePath: "/run/crl.json",
+			crlIssuerPaths: ["/run/issuer.pem"], crlPaths: ["/run/current.crl"],
+		} }, identity, "s1", ["true"]);
+		expect(argv).not.toContain("-token");
+		expect(argv).not.toContain("-addr");
+		expect(argv).toContain("--root-ca");
   });
 });
 

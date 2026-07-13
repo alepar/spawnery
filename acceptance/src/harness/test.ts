@@ -139,7 +139,6 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     await use(new CliDriver({
       cpEndpoint: target.cpEndpoint,
       spawnctlBin: target.spawnctlBin,
-      nodeAddr: target.nodeAddr,
       authArgs: prepared.authArgs,
       configHome: prepared.configHome,
       trust: target.rootCAPath ? {

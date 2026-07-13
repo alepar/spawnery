@@ -102,7 +102,7 @@ func main() {
 		// Terminal control plane (around CP for now): a small inbound listener so `spawnctl tmux`
 		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data
 		// plane goes straight to this node. (CP-routed terminal control is sp-wsu.2.)
-		if taddr := cfg.Node.TerminalAddr; taddr != "" {
+		if taddr := cfg.Node.TerminalAddr; taddr != "" && directTerminalAllowed(*cfg) {
 			// Bind synchronously and FAIL FAST: a port-in-use here almost always means another
 			// spawnlet is already running. Two nodes with the same NODE_ID corrupt the CP's routing
 			// (it keys nodes by id) and flip spawns to UNREACHABLE — so refuse to start a duplicate.
@@ -219,6 +219,10 @@ func main() {
 	spawnletH2Srv := &http2.Server{}
 	h2keepalive.ConfigureServer(spawnletH2Srv)
 	log.Fatal(http.ListenAndServe(addr, h2c.NewHandler(mux, spawnletH2Srv)))
+}
+
+func directTerminalAllowed(cfg Spawnlet) bool {
+	return cfg.CP.Addr == "" || cfg.Node.AuthMode == "insecure"
 }
 
 // gracefulStopAll tears down every spawn this node still runs, on a fresh (signal-independent) context

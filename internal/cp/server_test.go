@@ -159,6 +159,83 @@ func TestSessionRequiresAndPreservesNodeAuthorization(t *testing.T) {
 	t.Fatal("SessionOpen not emitted")
 }
 
+func TestSessionRelaysExplicitExecBind(t *testing.T) {
+	s, _, rt := newTestServer(t)
+	seedSpawn(t, context.Background(), s, "alice")
+	sender := &capSender{}
+	rt.Bind("sp-ws-alice", "n1", sender)
+	_, handler := cpv1connect.NewSpawnServiceHandler(s)
+	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(auth.WithOwner(r.Context(), "alice"))
+		handler.ServeHTTP(w, r)
+	})
+	ts := httptest.NewServer(h2c.NewHandler(wrapper, &http2.Server{}))
+	defer ts.Close()
+	client := cpv1connect.NewSpawnServiceClient(sessionH2CClient(), ts.URL, connect.WithGRPC())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stream := client.Session(ctx)
+	req := &authv1.ExecRequest{Argv: []string{"sh", "-lc", "exit 7"}}
+	if err := stream.Send(&cpv1.Frame{
+		SpawnId: "sp-ws-alice", SessionId: "exec-123", ExecRequest: req,
+		SessionAuth: &authv1.AuthEnvelope{AccessToken: "node-token", Intent: &authv1.SignedIntent{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if opens := sender.sessionOpens(); len(opens) > 0 {
+			open := opens[0]
+			if open.GetSessionId() != "exec-123" || !proto.Equal(open.GetExecRequest(), req) {
+				t.Fatalf("exec bind changed in CP relay: %+v", open)
+			}
+			if err := stream.Send(&cpv1.Frame{SessionId: "exec-substitution", Data: []byte("ignored")}); err != nil {
+				t.Fatal(err)
+			}
+			_ = stream.CloseRequest()
+			_, err := stream.Receive()
+			if connect.CodeOf(err) != connect.CodeInvalidArgument {
+				t.Fatalf("post-bind selector error = %v (code %v), want InvalidArgument", err, connect.CodeOf(err))
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("exec SessionOpen not emitted")
+}
+
+func TestSessionRejectsExecWithoutExplicitSessionID(t *testing.T) {
+	s, _, rt := newTestServer(t)
+	seedSpawn(t, context.Background(), s, "alice")
+	sender := &capSender{}
+	rt.Bind("sp-ws-alice", "n1", sender)
+	_, handler := cpv1connect.NewSpawnServiceHandler(s)
+	wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(auth.WithOwner(r.Context(), "alice"))
+		handler.ServeHTTP(w, r)
+	})
+	ts := httptest.NewServer(h2c.NewHandler(wrapper, &http2.Server{}))
+	defer ts.Close()
+	client := cpv1connect.NewSpawnServiceClient(sessionH2CClient(), ts.URL, connect.WithGRPC())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stream := client.Session(ctx)
+	if err := stream.Send(&cpv1.Frame{
+		SpawnId: "sp-ws-alice", ExecRequest: &authv1.ExecRequest{Argv: []string{"true"}},
+		SessionAuth: &authv1.AuthEnvelope{AccessToken: "node-token", Intent: &authv1.SignedIntent{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.CloseRequest()
+	_, err := stream.Receive()
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("Session error = %v (code %v), want InvalidArgument", err, connect.CodeOf(err))
+	}
+	if len(sender.sessionOpens()) != 0 {
+		t.Fatal("SessionOpen emitted without explicit exec session id")
+	}
+}
+
 func sessionH2CClient() *http.Client {
 	return &http.Client{Transport: &http2.Transport{
 		AllowHTTP: true,

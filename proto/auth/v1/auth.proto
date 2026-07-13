@@ -125,7 +125,7 @@ message MountRef {
 // correspondence check compares exactly the fields it is about to execute.
 //
 // Domain tags: spawnery/intent/<op>/v1 for op ∈ {create-spawn, resume-spawn,
-// recreate-spawn, migrate-spawn, session-open, session-reauth}.
+// recreate-spawn, migrate-spawn, session-open, session-reauth, exec-open}.
 message IntentBody {
   string jti            = 1;  // unique intent id (UUID); node caches to detect replay
   int64  issued_at      = 2;  // unix seconds; node enforces freshness window ±skew
@@ -141,6 +141,13 @@ message IntentBody {
   repeated MountRef mounts = 12; // create/resume: mount bindings
   repeated string attached_secret_ids = 13; // canonical complete startup secret-id set
   string new_token_id = 14; // session-reauth: verified replacement node-token id
+  bytes request_sha256 = 15; // exec-open: SHA-256 of deterministic ExecRequest protobuf bytes
+}
+
+// ExecRequest is the exact command selected by an exec-open intent. Its deterministic protobuf
+// encoding is hashed into IntentBody.request_sha256; the relay carries this message unchanged.
+message ExecRequest {
+  repeated string argv = 1;
 }
 
 // SignedIntent carries a client-signed per-operation intent [AC1][AM11].

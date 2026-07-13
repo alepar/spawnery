@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import {
   buildIntentBodyBytes,
+  execRequestSha256,
   buildSignedIntent,
   buildSessionReauthSignedIntentB64,
   pollAndSign,
@@ -56,6 +57,17 @@ test("buildIntentBodyBytes matches the committed golden vector (no mounts)", () 
     mounts: [],
   });
   assert.equal(toHex(bytes), vectors.body_bytes_hex);
+});
+
+test("execRequestSha256 hashes deterministic protobuf bytes and preserves argv order", async () => {
+  assert.equal(
+    toHex(await execRequestSha256(["echo", "hi"])),
+    "a6fc6bffc6a7e1bb8f0a94b0001045229f5b06d8bac491ed81aaeba05c75934d",
+  );
+  assert.notEqual(
+    toHex(await execRequestSha256(["echo", "hi"])),
+    toHex(await execRequestSha256(["hi", "echo"])),
+  );
 });
 
 test("buildSessionReauthSignedIntentB64 signs the verified session tuple and replacement token ID", async () => {

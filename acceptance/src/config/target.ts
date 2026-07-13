@@ -32,13 +32,9 @@ export interface TargetConfig {
   crlStatePath?: string;
   crlIssuerPaths?: string[];
   crlPaths?: string[];
-  /** nodeAddr is the node's terminal/exec endpoint (spawnctl exec -addr / `spawnctl exec`/attach/shell
-   * dial this directly, not the CP). Only Phase-5 injection observation and @agent `exec` scenarios
-   * need it; co-located/tunneled dev default assumes the CP and node run together. */
-  nodeAddr: string;
   /** seedSkillAppId is a registered app whose agent installs skills (claude or codex), needed only
    * by tests/customization/injection.spec.ts to observe profile-attached skill materialization.
-   * No default — unlike nodeAddr, there's no safe assumption for "which app"; the scenario fails
+   * No default because there's no safe assumption for "which app"; the scenario fails
    * loud (never skips) when this is unset. */
   seedSkillAppId?: string;
   tokenBudget: number;
@@ -118,7 +114,6 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
     crlStatePath: env.ACC_CRL_STATE || undefined,
     crlIssuerPaths: (env.ACC_CRL_ISSUERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     crlPaths: (env.ACC_CRLS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
-    nodeAddr: env.ACC_NODE_ADDR ?? "http://127.0.0.1:9092",
     seedSkillAppId: env.ACC_SEED_SKILL_APP_ID || undefined,
     tokenBudget: Number(env.ACC_TOKEN_BUDGET ?? "200000"),
     wallclockMs: Number(env.ACC_WALLCLOCK_MS ?? "1800000"),

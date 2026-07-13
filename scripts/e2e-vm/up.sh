@@ -76,8 +76,6 @@ export E2E_VM_HOST='$HOST'
 export ACC_WEB_ORIGIN='https://$HOST'
 export ACC_CP_ENDPOINT='https://$HOST'
 export ACC_AS_ORIGIN='https://$HOST'
-export ACC_NODE_ADDR='http://$IP:9092'
-export ACC_NODE_TERMINAL_ADDR='http://$IP:9092'
 export ACC_NONPROD_HOSTS='$HOST,.$E2E_DOMAIN_SUFFIX'
 export ACC_ENV='vm-$PROFILE'
 EOF

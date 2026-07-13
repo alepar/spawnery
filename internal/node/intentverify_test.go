@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -109,6 +110,70 @@ func goodStartBody(spawnID, nodeID string, gen uint64, now time.Time) *authv1.In
 		AppRef:       "app/ref@sha256:abc",
 		Image:        "img@sha256:def",
 		Model:        "claude-3",
+	}
+}
+
+func execRequestHash(t *testing.T, req *authv1.ExecRequest) []byte {
+	t.Helper()
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(b)
+	return h[:]
+}
+
+func TestVerifyExecBindsExactRequestAndSession(t *testing.T) {
+	now := time.Unix(1_770_000_000, 0)
+	asPriv, artifacts := genASKey(t)
+	sessionKey := genECDSA(t)
+	baseReq := &authv1.ExecRequest{Argv: []string{"sh", "-lc", "printf exact"}}
+	baseFields := ExecFields{
+		SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: baseReq,
+	}
+	makeEnv := func(jti string, mutate func(*authv1.IntentBody)) *authv1.AuthEnvelope {
+		body := &authv1.IntentBody{
+			Jti: jti, IssuedAt: now.Unix(), SpawnId: "sp-exec", Generation: 7,
+			TargetNodeId: "node-1", SessionId: "exec-1", Op: string(intent.OpExecOpen),
+			RequestSha256: execRequestHash(t, baseReq),
+		}
+		if mutate != nil {
+			mutate(body)
+		}
+		return buildIntentEnvelope(t, asPriv, artifacts, sessionKey, "alice", now, body, intent.OpExecOpen)
+	}
+
+	t.Run("valid then replay", func(t *testing.T) {
+		v := makeVerifier(t, artifacts, "", "node-1", false, func() time.Time { return now })
+		env := makeEnv("exec-valid", nil)
+		if _, nack, detail := v.VerifyExec(env, baseFields); nack != "" {
+			t.Fatalf("valid exec rejected: %s: %s", nack, detail)
+		}
+		if _, nack, _ := v.VerifyExec(env, baseFields); nack != NACKReplay {
+			t.Fatalf("replay nack = %s, want %s", nack, NACKReplay)
+		}
+	})
+
+	tests := []struct {
+		name   string
+		fields ExecFields
+		mutate func(*authv1.IntentBody)
+		want   NACKCode
+	}{
+		{name: "missing request", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice"}, want: NACKCorrespondence},
+		{name: "missing request hash", fields: baseFields, mutate: func(b *authv1.IntentBody) { b.RequestSha256 = nil }, want: NACKCorrespondence},
+		{name: "argv substituted", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: &authv1.ExecRequest{Argv: []string{"sh", "-lc", "printf evil"}}}, want: NACKCorrespondence},
+		{name: "argv reordered", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: &authv1.ExecRequest{Argv: []string{"-lc", "sh", "printf exact"}}}, want: NACKCorrespondence},
+		{name: "generation mismatch", fields: ExecFields{SpawnID: "sp-exec", Generation: 8, SessionID: "exec-1", AssertedOwner: "alice", Request: baseReq}, want: NACKCorrespondence},
+		{name: "owner mismatch", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "mallory", Request: baseReq}, want: NACKOwnerMismatch},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := makeVerifier(t, artifacts, "", "node-1", false, func() time.Time { return now })
+			if _, nack, _ := v.VerifyExec(makeEnv(fmt.Sprintf("exec-bad-%d", i), tt.mutate), tt.fields); nack != tt.want {
+				t.Fatalf("nack = %s, want %s", nack, tt.want)
+			}
+		})
 	}
 }
 

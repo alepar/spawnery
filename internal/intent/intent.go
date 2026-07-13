@@ -69,6 +69,7 @@ const (
 	DomainForkSpawn     = "spawnery/intent/fork-spawn/v1"
 	DomainSessionOpen   = "spawnery/intent/session-open/v1"
 	DomainSessionReauth = "spawnery/intent/session-reauth/v1"
+	DomainExecOpen      = "spawnery/intent/exec-open/v1"
 )
 
 // Op identifies which lifecycle operation an intent covers.
@@ -82,6 +83,7 @@ const (
 	OpForkSpawn     Op = "fork-spawn"
 	OpSessionOpen   Op = "session-open"
 	OpSessionReauth Op = "session-reauth"
+	OpExecOpen      Op = "exec-open"
 )
 
 // DomainFor returns the domain-separation tag for op.
@@ -101,9 +103,24 @@ func DomainFor(op Op) string {
 		return DomainSessionOpen
 	case OpSessionReauth:
 		return DomainSessionReauth
+	case OpExecOpen:
+		return DomainExecOpen
 	default:
 		return "spawnery/intent/" + string(op) + "/v1"
 	}
+}
+
+// ExecRequestSHA256 returns the SHA-256 of req's deterministic protobuf encoding.
+func ExecRequestSHA256(req *authv1.ExecRequest) ([]byte, error) {
+	if req == nil {
+		return nil, errors.New("exec request is required")
+	}
+	b, err := (proto.MarshalOptions{Deterministic: true}).Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.Sum256(b)
+	return h[:], nil
 }
 
 // Build marshals body, signs domain || body_bytes with priv (P-256 P1363), and returns a

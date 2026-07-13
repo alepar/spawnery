@@ -5,9 +5,51 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	nodev1 "spawnery/gen/node/v1"
 )
+
+func TestExecRequestRelayContract(t *testing.T) {
+	req := &authv1.ExecRequest{Argv: []string{"echo", "hi"}}
+	frame := &cpv1.Frame{
+		SpawnId:     "sp1",
+		SessionId:   "exec-1",
+		ExecRequest: req,
+		SessionAuth: &authv1.AuthEnvelope{},
+	}
+	b, err := proto.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got cpv1.Frame
+	if err := proto.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.GetSessionId() != "exec-1" || got.GetExecRequest().GetArgv()[0] != "echo" {
+		t.Fatalf("exec bind fields lost on CP round-trip: %+v", &got)
+	}
+
+	open := &nodev1.SessionOpen{
+		SpawnId: "sp1", SessionId: "exec-1", ExecRequest: req,
+	}
+	b, err = proto.Marshal(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotOpen nodev1.SessionOpen
+	if err := proto.Unmarshal(b, &gotOpen); err != nil {
+		t.Fatal(err)
+	}
+	if gotOpen.GetSessionId() != "exec-1" || len(gotOpen.GetExecRequest().GetArgv()) != 2 {
+		t.Fatalf("exec request lost on node round-trip: %+v", &gotOpen)
+	}
+
+	ordinary := &cpv1.Frame{SpawnId: "sp1", SessionAuth: &authv1.AuthEnvelope{}}
+	if ordinary.GetSessionId() != "" || ordinary.GetExecRequest() != nil {
+		t.Fatalf("ordinary session bind unexpectedly selects exec: %+v", ordinary)
+	}
+}
 
 func TestNodeContractFields(t *testing.T) {
 	// generation threaded onto every CP->node command + onto SpawnStatus

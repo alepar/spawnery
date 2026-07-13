@@ -120,6 +120,9 @@ func (s Spawnlet) Validate() error {
 	default:
 		return fmt.Errorf("node.auth_mode must be one of insecure or enforced")
 	}
+	if s.CP.Addr != "" && s.Node.AuthMode == "enforced" && s.Node.TerminalAddr != "" {
+		return fmt.Errorf("node.terminal_addr is forbidden for enforced CP-attached nodes")
+	}
 	if s.Node.AuthMode == "enforced" || s.CP.Addr != "" {
 		if s.Node.Environment == "" {
 			return fmt.Errorf("node.environment is required for client authorization")

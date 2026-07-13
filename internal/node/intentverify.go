@@ -15,6 +15,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"slices"
 	"time"
@@ -123,6 +124,15 @@ type ReauthFields struct {
 	AssertedOwner string
 }
 
+// ExecFields is the exact relayed command and session tuple covered by an exec-open intent.
+type ExecFields struct {
+	SpawnID       string
+	Generation    uint64
+	SessionID     string
+	AssertedOwner string
+	Request       *authv1.ExecRequest
+}
+
 // VerifyStart runs the full A4 verification chain for a StartSpawn.
 func (v *IntentVerifier) VerifyStart(env *authv1.AuthEnvelope, fields StartFields) (Authorization, NACKCode, string) {
 	return v.verify(env, fields.AssertedOwner, fields.Op, func(body *authv1.IntentBody, auth Authorization) (NACKCode, string) {
@@ -144,6 +154,31 @@ func (v *IntentVerifier) VerifyReauth(env *authv1.AuthEnvelope, fields ReauthFie
 		}
 		if body.GetNewTokenId() != auth.TokenID {
 			return NACKCorrespondence, fmt.Sprintf("new_token_id: intent=%q token=%q", body.GetNewTokenId(), auth.TokenID)
+		}
+		return "", ""
+	})
+}
+
+// VerifyExec runs the full A4 chain and binds the deterministic hash of the exact relayed argv.
+func (v *IntentVerifier) VerifyExec(env *authv1.AuthEnvelope, fields ExecFields) (Authorization, NACKCode, string) {
+	return v.verify(env, fields.AssertedOwner, intent.OpExecOpen, func(body *authv1.IntentBody, auth Authorization) (NACKCode, string) {
+		if nack, detail := v.checkOpenCorrespondence(body, OpenFields{
+			SpawnID: fields.SpawnID, Generation: fields.Generation, SessionID: fields.SessionID,
+		}); nack != "" {
+			return nack, detail
+		}
+		if fields.Request == nil || len(fields.Request.GetArgv()) == 0 || fields.Request.GetArgv()[0] == "" {
+			return NACKCorrespondence, "exec request requires non-empty argv"
+		}
+		if len(body.GetRequestSha256()) != sha256.Size {
+			return NACKCorrespondence, "exec intent requires request_sha256"
+		}
+		got, err := intent.ExecRequestSHA256(fields.Request)
+		if err != nil {
+			return NACKCorrespondence, "hash exec request: " + err.Error()
+		}
+		if !bytes.Equal(body.GetRequestSha256(), got) {
+			return NACKCorrespondence, "exec request hash mismatch"
 		}
 		return "", ""
 	})

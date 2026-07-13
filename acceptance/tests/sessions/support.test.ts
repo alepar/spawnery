@@ -61,7 +61,6 @@ describe("agentAppId / agentModel", () => {
     tokenBudget: 200000,
     wallclockMs: 1800000,
     staleTtlMs: 3600000,
-    nodeAddr: "http://127.0.0.1:9092",
   };
 
   it("throws naming ACC_AGENT_APP_ID when absent", () => {

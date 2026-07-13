@@ -66,10 +66,6 @@ export interface CliTrustConfig {
 export interface CliConfig {
   cpEndpoint: string;
   spawnctlBin: string;
-  /** Node terminal endpoint for `spawnctl exec` (-addr) — optional because most CliDriver verbs
-   * (create/list/set-model/...) dial the CP, not the node; only exec() needs it. Defaults to the
-   * co-located node terminal endpoint, mirroring TargetConfig.nodeAddr's default. */
-  nodeAddr?: string;
   /** Undefined preserves the dev-token behavior; [] selects stored spawnctl login state. */
   authArgs?: string[];
   /** Isolated XDG_CONFIG_HOME containing spawnctl's real auth.json. */
@@ -77,13 +73,9 @@ export interface CliConfig {
   trust?: CliTrustConfig;
 }
 
-const DEFAULT_NODE_ADDR = "http://127.0.0.1:9092";
-
 /**
- * buildExecArgs builds the argv for `spawnctl exec`, which dials the NODE directly (-addr), not
- * the CP — the mosh/exec data plane bypasses the control plane entirely (execcmd.go/
- * terminalcmd.go). -cp/-token are exec's own local flags (used only if it ever needs to resolve a
- * spawn interactively) and, per buildArgs' convention, are placed after the subcommand name.
+ * buildExecArgs builds the argv for authenticated `spawnctl exec` through the CP relay.
+ * Public trust inputs let spawnctl verify the target node before signing the exec-open intent.
  * `--` terminates flag parsing so the inner command's own flags aren't swallowed by spawnctl.
  */
 export function buildExecArgs(cfg: CliConfig, identity: Identity, id: SpawnId, cmd: string[]): string[] {
@@ -91,11 +83,10 @@ export function buildExecArgs(cfg: CliConfig, identity: Identity, id: SpawnId, c
     "exec",
     "-spawn",
     id,
-    "-addr",
-    cfg.nodeAddr ?? DEFAULT_NODE_ADDR,
     "-cp",
     cfg.cpEndpoint,
     ...authArgs(cfg, identity),
+    ...trustArgs(cfg),
     "--",
     ...cmd,
   ];

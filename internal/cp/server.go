@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -1750,6 +1751,21 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn has no live episode"))
 	}
 	generation := uint64(container.Generation)
+	sessionID := first.GetSessionId()
+	execRequest := first.GetExecRequest()
+	if execRequest != nil {
+		if sessionID == "" {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exec_request requires explicit session_id"))
+		}
+		if len(execRequest.GetArgv()) == 0 || execRequest.GetArgv()[0] == "" {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exec_request requires non-empty argv"))
+		}
+		if len(first.GetData()) != 0 {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exec bind frame must not contain data"))
+		}
+	} else if sessionID == "" {
+		sessionID = "0"
+	}
 	sessionEnv := first.GetSessionAuth()
 	if sessionEnv == nil || sessionEnv.GetAccessToken() == "" || sessionEnv.GetIntent() == nil {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_auth with node access token and signed intent required"))
@@ -1795,18 +1811,24 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	cs := &clientStream{stream: stream, spawnID: spawnID}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, lease, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0, generation)
+	var done <-chan struct{}
+	var lease router.AttachmentLease
+	if execRequest != nil {
+		done, lease, err = s.rt.AttachExecClient(spawnID, sessionID, clientID, sp.OwnerID, sessionEnv, execRequest, cs, 0, generation)
+	} else {
+		done, lease, err = s.rt.AttachClient(spawnID, sessionID, clientID, sp.OwnerID, sessionEnv, cs, 0, generation)
+	}
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	defer func() {
-		s.rt.DetachClient(spawnID, "0", clientID, lease)
+		s.rt.DetachClient(spawnID, sessionID, clientID, lease)
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	}()
 
 	if len(first.Data) > 0 {
-		_ = s.rt.FromClient(spawnID, "0", clientID, first.Data)
+		_ = s.rt.FromClient(spawnID, sessionID, clientID, first.Data)
 	}
 	recvErr := make(chan error, 1)
 	go func() {
@@ -1857,13 +1879,17 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 					recvErr <- connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_reauth requires node access token and signed intent"))
 					return
 				}
-				if rerr := s.rt.ReauthenticateClient(spawnID, "0", clientID, lease, generation, sp.OwnerID, env); rerr != nil {
+				if rerr := s.rt.ReauthenticateClient(spawnID, sessionID, clientID, lease, generation, sp.OwnerID, env); rerr != nil {
 					recvErr <- rerr
 					return
 				}
 				continue
 			}
-			if ferr := s.rt.FromClient(spawnID, "0", clientID, f.Data); ferr != nil {
+			if f.GetSessionId() != "" || f.GetExecRequest() != nil || f.GetSessionAuth() != nil {
+				recvErr <- connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_id, exec_request, and session_auth are bind-only"))
+				return
+			}
+			if ferr := s.rt.FromClient(spawnID, sessionID, clientID, f.Data); ferr != nil {
 				recvErr <- ferr
 				return
 			}
@@ -1872,8 +1898,11 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	select {
 	case <-done:
 		return nil
-	case <-recvErr:
-		return nil
+	case err := <-recvErr:
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
 	case <-sessCtx.Done():
 		return nil
 	case <-ctx.Done():
