@@ -203,3 +203,30 @@ func TestRevocationConsumerInvalidTailDoesNotAdvance(t *testing.T) {
 		t.Fatal("invalid batch advanced state")
 	}
 }
+
+func TestRevocationConsumerFansOutRenamedCheckpointBeforeReportingPoison(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	store, err := OpenUserRevocationStore(filepath.Join(t.TempDir(), "state", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.afterRename = func() error { return errors.New("directory sync failed") }
+	raw, _ := json.Marshal([]map[string]any{signedRevocation(t, fixture, 2, "alice", "family", []string{"old"})})
+	consumer, err := NewRevocationConsumer(revocationDoer(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
+	}), "https://as/revocations", fixture.verifier, store, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer.now = func() time.Time { return now }
+	var calls atomic.Int32
+	err = consumer.pollOnce(t.Context(), func([]VerifiedUserRevocation) { calls.Add(1) })
+	if !errors.Is(err, ErrUserRevocationStorePoisoned) {
+		t.Fatalf("poll err=%v", err)
+	}
+	if store.Checkpoint() != 2 || calls.Load() != 1 {
+		t.Fatalf("checkpoint=%d callbacks=%d", store.Checkpoint(), calls.Load())
+	}
+}

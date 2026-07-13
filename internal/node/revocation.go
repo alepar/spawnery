@@ -476,11 +476,12 @@ func (c *RevocationConsumer) pollOnce(ctx context.Context, onApplied func([]Veri
 		}
 		batch = append(batch, VerifiedUserRevocation{Seq: verified.Seq, AccountID: verified.AccountID, FamilyID: verified.FamilyID, TokenIDs: ids, RevokedAt: verified.RevokedAt})
 	}
-	if err := c.store.ApplyBatch(batch); err != nil {
-		return err
-	}
-	if onApplied != nil {
+	beforeApply := c.store.Checkpoint()
+	applyErr := c.store.ApplyBatch(batch)
+	afterApply := c.store.Checkpoint()
+	applied := afterApply > beforeApply && afterApply == batch[len(batch)-1].Seq
+	if applied && onApplied != nil {
 		onApplied(batch)
 	}
-	return nil
+	return applyErr
 }
