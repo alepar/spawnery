@@ -18,12 +18,13 @@ GOLDEN_IMAGE=/var/lib/libvirt/images/spawnery-golden.qcow2 \
 ```
 
 `run.sh` does, all namespaced by a per-run `E2E_RUNID` (branch+sha+nonce):
-0. **build** fresh `spawnery_cp`/`authsvc`/`spawnlet`/`spawnctl` + sidecar/agent images + web bundle
-   (in the `dev-spawnery` distrobox) into a per-run staging dir,
+0. **build** fresh `spawnery_cp`/`authsvc`/`spawnlet`/`spawnctl` + sidecar/agent images (in the
+   `dev-spawnery` distrobox) into a per-run staging dir,
 1. **`up.sh`** — boot a fresh VM on a per-run qcow2 overlay of the golden image, on the `spawnery-e2e`
    NAT network (routable per-VM IP), hostname `<runid>.e2e.test`,
-2. **`roll.sh`** — copy the fresh code in (binaries + images + web + config — *not just `bin/`*),
-   restart the units, wait app-ready (AS health, CP up, **node mTLS re-registration**, Caddy/web),
+2. **`roll.sh`** — copy the fresh code in, generate the per-run PKI, restart the units, and wait
+   app-ready. `run.sh` then copies only the public root/intermediates/CRLs back, stamps and scans a
+   fresh web build with those pins, and publishes it to the VM,
 3. run `acceptance/` (`npm run test:accept`) against `https://<runid>.e2e.test`, with a per-run
    Playwright output dir.
 
@@ -77,13 +78,27 @@ covers every run.
 `GOLDEN_IMAGE` (required), `E2E_NET`, `E2E_DOMAIN_SUFFIX`, `E2E_VM_MEM_MB`, `E2E_VM_VCPUS`,
 `E2E_HOSTS_MODE`, `E2E_SSH_KEY`, `E2E_SSH_USER`, `LIBVIRT_URI`, `E2E_STATE_ROOT`.
 
+## Production authorization lane
+
+The fake profile replaces GitHub with the deterministic fake IdP; it does not replace production
+authorization. The browser completes the real OAuth flow and keeps its non-extractable P-256 key in
+IndexedDB. Each CLI worker runs real `spawnctl login --device` in an isolated config home, then uses
+the stored CP/node credential pair and private key. The runner supplies only the per-run public root,
+trust domain, cloud account, issuing intermediates, signed CRLs, and a fresh CRL checkpoint.
+
+The ordinary matrix proves distinct `aud=cp`/`aud=node` credentials, lifecycle intent signing,
+ACP/MOSH session open and successor-token reauthentication, exact node NACKs, logout closure, and
+signed-token expiry during AS outage. This topology has one cloud node: CLI migration to `node-1`
+is a same-node generation replacement; the web must show the explicit no-target state. Cross-node
+web migration belongs to the later multi-node lane.
+
+The current-signer revocation test runs last. Only that destructive fixture temporarily restarts CP
+with the fake profile's isolated dev token so it can clean up and prove the next signer. No ordinary
+web, CLI, or oracle path uses it. The older unmerged `.2.7` rollout work is not part of this lane;
+`/node-token`, exported intent keys, injected node tokens, raw AS signer pins, and CP signing
+shortcuts are forbidden by `provision/test-auth-topology.sh`.
+
 ## Known gaps / next
 
-- **RECONCILE the spawnery systemd env** (`provision/provision.sh` `/etc/spawnery/env.d/common.env`)
-  with the `Justfile` `authsvc-github`/`cp-github`/`node-github` recipes — the exact var set (esp.
-  `AS_GITHUB_TOKEN_ENC_KEY`, RPC secrets, `AS_FAKE_GITHUB*` / `GITHUB_CLIENT_ID`) is the single source.
-- Verify `spawnery-ca dev`'s actual output filenames vs what `gen-pki.sh` / `common.env` reference.
-- `node-list` in `roll.sh` assumes a `spawnctl node-list` verb for the mTLS-registration gate — verify
-  the actual CP node-list surface.
 - `github` profile needs the real-GitHub seeded-`storageState` suite auth path (`sp-te3y.7`) +
   provisioning (`sp-tq0t.10`).

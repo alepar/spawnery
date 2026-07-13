@@ -30,8 +30,9 @@ from several branches at once**). It:
 1. **boots** a fresh VM on a copy-on-write overlay of the golden image (`up.sh`);
 2. **rolls** the fresh code in and restarts the stack, waiting until it is app-ready — AS health, CP
    up, **node re-registered over enforced mTLS**, Caddy/web serving (`roll.sh`);
-3. **runs** `acceptance/` against `https://<runid>.e2e.test` with the validated env (dev-token auth
-   wired to the fake-GitHub identity pool, demo app/model, longer active-timeout, the golden CA).
+3. copies only the generated public PKI material out, rebuilds/scans the SPA with the exact root,
+   trust-domain, and cloud-account pins, publishes it, then **runs** `acceptance/` with real paired
+   OAuth credentials for the fake-GitHub identities and public CRL verification inputs.
 
 The VM is **always torn down on exit** (`--keep` leaves it up for debugging). Failure artifacts
 (journald, containerd/runsc, Postgres, the Playwright report) are captured **before** teardown under
@@ -101,8 +102,14 @@ see `scripts/e2e-vm/run.sh`):
 
 ```bash
 set -a; . ~/.local/state/spawnery-e2e/<runid>/acc.env; set +a
-export ACC_AUTH_MODE=dev-token \
-  ACC_IDENTITY_POOL="devtoken1=acc-owner-1,devtoken2=acc-owner-2,devtoken3=acc-owner-3" \
+PUBLIC=~/.local/state/spawnery-e2e/<runid>/public-pki
+export ACC_AUTH_MODE=oauth-pop \
+  ACC_IDENTITY_POOL="acc-owner-1=acc-owner-1,acc-owner-2=acc-owner-2" \
+  ACC_ROOT_CA_PEM="$PUBLIC/root.pem" ACC_TRUST_DOMAIN=prod.spawnery.internal \
+  ACC_CLOUD_ACCOUNT_ID=spawnery-system ACC_CRL_STATE="$PUBLIC/crl-state.json" \
+  ACC_CRL_ISSUERS="$PUBLIC/service-intermediate.pem,$PUBLIC/cloud-intermediate.pem,$PUBLIC/self-hosted-intermediate.pem" \
+  ACC_CRLS="$PUBLIC/service.crl.pem,$PUBLIC/cloud-node.crl.pem,$PUBLIC/self-hosted-node.crl.pem" \
+  ACC_DESTRUCTIVE_DEV_TOKEN=devtoken1 \
   ACC_TARGET_REF=vm ACC_BUILD_REF=vm ACC_SPAWNCTL_BIN="$PWD/bin/spawnctl" \
   ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app \
   ACC_AGENT_APP_ID=spawnery/secret-app ACC_APP_ID=spawnery/secret-app \
@@ -114,10 +121,10 @@ export ACC_AUTH_MODE=dev-token \
 
 ## Auth profiles
 
-- **`--profile fake`** (default, fully headless): the AS stubs GitHub (`AS_FAKE_GITHUB`, reachable
-  multi-user) and the CP runs **dev-token** auth (`CP_DEV_TOKENS` → the identity pool). Covers
-  Phases 0–6. The node is still **`NODE_AUTH_MODE=enforced`**, so spawn creation still requires real
-  A4 intent-signing — the acceptance oracle and `spawnctl` both sign.
+- **`--profile fake`** (default, fully headless): the AS stubs only the GitHub identity provider.
+  Browser, oracle, and CLI still obtain real AS-issued paired credentials. The browser owns a
+  non-extractable session key; `spawnctl` performs real device login and retains its private key and
+  paired state in a per-worker `0600` config directory. CP and node validate root-anchored artifacts.
 - **`--profile github`** (not yet wired end-to-end): real GitHub App, session linked fresh per run.
   Needs the seeded-`storageState` suite auth path + provisioning (deferred; see the design spec).
 
@@ -130,8 +137,8 @@ The suite drives the stack through **layered drivers** and asserts the *real* re
   lacks (`rename`/`suspend`/`stop`/`delete`) are **failing stubs** — the parity gap shows as red by
   design.
 - **the SDK oracle** (`acceptance/src/drivers/oracle.ts`, over `@spawnery/client`) — an independent
-  Connect cross-check that **signs** (so it can create spawns on the enforced node) and reads
-  `ListSpawns`/status to confirm what a surface did.
+  Connect cross-check supplied atomically with its persistent session key, node credential provider,
+  and strict VM target verifier.
 
 Scenario coverage (`acceptance/tests/`):
 
@@ -145,10 +152,21 @@ Scenario coverage (`acceptance/tests/`):
 | `customization/` | profiles, catalog, and **secrets** CRUD (secrets is the api-only surface), and a profile-attached spawn (injection). |
 | `marketplace/` | app-version register, browse, listing, and **spawn-from-a-market-app**. |
 
-Because the target is the prod-mode stack, passing these also transitively verifies: **A4
-intent-signing** end-to-end (create/resume/fork), **enforced mTLS** node registration, **runsc/gVisor**
-pod isolation, the **Postgres** CP store, **Caddy TLS** at a fixed hostname, and dev-token (or, when
-wired, OAuth-PoP) auth.
+The authorization specs additionally require exact `MISSING_INTENT`, `WRONG_AUDIENCE`,
+`CNF_MISMATCH`, `BAD_SIG`, `OWNER_MISMATCH`, `CORRESPONDENCE`, `STALE`, `SKEW`, and `REPLAY` evidence,
+with no CRI pod for rejected provisioning. Logout closes active ACP/MOSH attachments and AS outage
+cannot extend a session beyond signed node-token expiry. The one-node VM proves same-node CLI move
+by a generation increase; the web proves that the current node is excluded by showing no targets.
+
+The destructive signer-revocation project runs last and alone. It may temporarily enable the fake
+profile's exact dev token only after the active signer has been revoked; ordinary tests cannot fall
+back to it. This lane deliberately excludes the unmerged `.2.7` rollout approach: no `/node-token`
+exchange, private-key export, injected node bearer, raw signer pin, or CP signing key is allowed.
+
+For normal development, start the enforced AS/CP/node stack with `just dev` (the
+`authsvc-github`/`cp-github`/`node-github` processes), sign in through the web OAuth flow, and run
+`bin/spawnctl login --device --as http://127.0.0.1:8081` before lifecycle commands. A static
+`-token` is a compatibility path, not production client-to-node authorization coverage.
 
 **Out of scope here** (owned by other, host-gated lanes): agent *answer quality* (only structural
 transcript is asserted), egress-floor/cgroup isolation internals, and — until wired — the real-GitHub
