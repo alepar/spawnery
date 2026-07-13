@@ -527,7 +527,6 @@ test("production authorization: exact node NACKs and target substitution refusal
   const countingProxy = await startCPLoopbackProxy({
     upstreamOrigin: target.cpEndpoint,
   });
-  let staticSpawnId = "";
   try {
     const staticCPBearer = await auth.cpAccessToken(identity);
     const output = await failedSpawnctl(target.spawnctlBin, emptyConfigHome, [
@@ -539,13 +538,14 @@ test("production authorization: exact node NACKs and target substitution refusal
       "-detach",
     ], { ...process.env, SPAWNERY_TOKEN: "", CP_DEV_TOKEN: "" });
     expect(output).toMatch(/node authorization requires 'spawnctl login'/);
-    expect(countingProxy.requestCounts().submitIntent).toBe(0);
-    [staticSpawnId = ""] = countingProxy.pendingSpawnIds();
-    expect(staticSpawnId).not.toBe("");
-    await expectNoRuntime(staticSpawnId);
+    expect(countingProxy.requestCounts()).toEqual({
+      total: 0,
+      getPendingIntent: 0,
+      submitIntent: 0,
+    });
+    expect(countingProxy.pendingSpawnIds()).toEqual([]);
   } finally {
     await countingProxy.close();
-    if (staticSpawnId) await cleanupRejectedPending(client, owner, staticSpawnId);
     await rm(emptyConfigHome, { recursive: true, force: true });
   }
 });
