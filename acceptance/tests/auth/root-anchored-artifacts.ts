@@ -219,20 +219,43 @@ export async function submitSpawn(
   return { spawnId, status, errorDetail };
 }
 
-export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Promise<void> {
+export function cpAuthModePlan(
+  cfg: Pick<VMAuthConfig, "destructiveDevToken" | "owner">,
+  mode: "prod" | "dev",
+): { configureCommand: string; expectedLog: string } {
+  const envPath = "/etc/spawnery/env.d/zz-destructive.env";
+  const dropInDir = "/etc/systemd/system/spawnery-cp.service.d";
+  const dropInPath = `${dropInDir}/zz-destructive.conf`;
   if (mode === "dev") {
     const content = `CP_AUTH_MODE=dev\nCP_DEV_TOKENS=${cfg.destructiveDevToken}=${cfg.owner}\n`;
-    await ssh(cfg, remoteArgv("sudo", "sh", "-c", `printf %s ${posixShellQuote(content)} > /etc/spawnery/env.d/zz-destructive.env`));
-  } else {
-    await ssh(cfg, "sudo rm -f /etc/spawnery/env.d/zz-destructive.env");
+    const dropIn = `[Service]\nEnvironmentFile=${envPath}\n`;
+    return {
+      configureCommand: `install -d ${dropInDir}; printf %s ${posixShellQuote(content)} > ${envPath}; printf %s ${posixShellQuote(dropIn)} > ${dropInPath}`,
+      expectedLog: "cp: auth mode=dev",
+    };
   }
-  await ssh(cfg, "sudo systemctl restart spawnery-cp");
+  return {
+    configureCommand: `rm -f ${envPath} ${dropInPath}`,
+    expectedLog: "cp: auth mode=prod",
+  };
+}
+
+export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Promise<void> {
+  const restartEpoch = Math.floor(Date.now() / 1000) - 1;
+  const plan = cpAuthModePlan(cfg, mode);
+  await ssh(cfg, remoteArgv("sudo", "sh", "-c", plan.configureCommand));
+  await ssh(cfg, "sudo systemctl daemon-reload && sudo systemctl restart spawnery-cp");
   for (let i = 0; i < 60; i++) {
-    const active = await ssh(cfg, "sudo systemctl is-active spawnery-cp || true").catch(() => "");
-    if (active === "active") return;
+    const journal = remoteArgv(
+      "sudo", "journalctl", "-u", "spawnery-cp", "--since", `@${restartEpoch}`, "--no-pager",
+    );
+    const ready = await ssh(cfg,
+      `sudo systemctl is-active spawnery-cp >/dev/null && ${journal} | grep -Fq ${posixShellQuote(plan.expectedLog)} && echo ready`,
+    ).catch(() => "");
+    if (ready === "ready") return;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`CP did not restart in ${mode} auth mode`);
+  throw new Error(`CP did not report ${mode} auth mode after restart`);
 }
 
 export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node", spki: Uint8Array): Promise<string> {

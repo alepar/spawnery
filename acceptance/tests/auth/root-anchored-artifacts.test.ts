@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { posixShellQuote } from "./root-anchored-artifacts";
+import { cpAuthModePlan, posixShellQuote } from "./root-anchored-artifacts";
 
 describe("posixShellQuote", () => {
   it.each([
@@ -13,5 +13,28 @@ describe("posixShellQuote", () => {
   ])("round-trips one literal shell argument", (value) => {
     const output = execFileSync("/bin/sh", ["-c", `printf %s ${posixShellQuote(value)}`]);
     expect(output.toString()).toBe(value);
+  });
+});
+
+describe("cpAuthModePlan", () => {
+  const cfg = {
+    destructiveDevToken: "devtoken1",
+    owner: "acc-owner-1",
+  };
+
+  it("loads the destructive dev environment through a systemd drop-in", () => {
+    expect(cpAuthModePlan(cfg, "dev")).toEqual({
+      configureCommand: "install -d /etc/systemd/system/spawnery-cp.service.d; "
+        + "printf %s 'CP_AUTH_MODE=dev\nCP_DEV_TOKENS=devtoken1=acc-owner-1\n' > /etc/spawnery/env.d/zz-destructive.env; "
+        + "printf %s '[Service]\nEnvironmentFile=/etc/spawnery/env.d/zz-destructive.env\n' > /etc/systemd/system/spawnery-cp.service.d/zz-destructive.conf",
+      expectedLog: "cp: auth mode=dev",
+    });
+  });
+
+  it("removes both overrides and requires explicit prod readiness", () => {
+    expect(cpAuthModePlan(cfg, "prod")).toEqual({
+      configureCommand: "rm -f /etc/spawnery/env.d/zz-destructive.env /etc/systemd/system/spawnery-cp.service.d/zz-destructive.conf",
+      expectedLog: "cp: auth mode=prod",
+    });
   });
 });
