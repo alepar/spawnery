@@ -27,13 +27,16 @@ vi.mock("@/api/profiles", () => ({
   }),
   updateProfile: vi.fn().mockResolvedValue({ version: 3 }),
   deleteProfile: vi.fn().mockResolvedValue(undefined),
-  addProfileEntry: vi.fn().mockResolvedValue({ entryId: "e2", version: 3 }),
+  addProfileEntry: vi.fn().mockResolvedValue({ entryId: "e2", version: 3, warnings: [] }),
   removeProfileEntry: vi.fn().mockResolvedValue({ version: 3 }),
   listCatalogEntries: vi.fn().mockResolvedValue([
     { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL", name: "My Skill", description: "A test skill" },
   ]),
   getCatalogEntry: vi.fn().mockResolvedValue({ catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL", name: "My Skill" }),
-  ingestSkillFromURL: vi.fn().mockResolvedValue({ catalogId: "cat-new" }),
+  ingestSkillFromURL: vi.fn().mockResolvedValue({
+    catalogId: "cat-new", bundleId: "b-new", versionId: "v1", memberCatalogIds: ["cat-new"],
+    skippedEntries: [], warnings: [], changed: true,
+  }),
   connectErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
   KIND_LABEL: {
     PROFILE_ENTRY_KIND_SKILL: "Skill",
@@ -52,6 +55,22 @@ vi.mock("@/api/profiles", () => ({
   },
 }));
 
+// Mock the bundles API (sp-mwco.1.9).
+vi.mock("@/api/bundles", () => ({
+  listBundles: vi.fn().mockResolvedValue([]),
+  getBundle: vi.fn().mockResolvedValue({
+    bundle: { bundleId: "b-new", name: "Deep Research", latestSeq: 1, memberCount: 1 },
+    versions: [{ versionId: "v1", seq: 1, sourceCommit: "1111111111111111111111111111111111aaaa" }],
+    members: [{ catalogId: "cat-new", sourceSubdir: "skills/deep-research", name: "Deep Research", sha256: "aaaa" }],
+  }),
+  reingestBundle: vi.fn().mockResolvedValue({
+    versionId: "v1", changed: false, addedSubdirs: [], updatedSubdirs: [], removedSubdirs: [],
+    diffToken: "", fromVersionId: "", notModified: true, warnings: [],
+  }),
+  repinProfileBundle: vi.fn().mockResolvedValue({ version: 3, warnings: [] }),
+  getBundleDiff: vi.fn().mockResolvedValue({ members: [], fromCommit: "", toCommit: "", diffToken: "" }),
+}));
+
 import {
   listProfiles,
   createProfile,
@@ -61,6 +80,7 @@ import {
   listCatalogEntries,
   ingestSkillFromURL,
 } from "@/api/profiles";
+import { listBundles, getBundle } from "@/api/bundles";
 
 import { ProfilesView } from "./ProfilesView";
 
@@ -88,8 +108,17 @@ describe("ProfilesView", () => {
       ],
       secretIds: [],
     });
-    vi.mocked(addProfileEntry).mockResolvedValue({ entryId: "e2", version: 3 });
+    vi.mocked(addProfileEntry).mockResolvedValue({ entryId: "e2", version: 3, warnings: [] });
     vi.mocked(deleteProfile).mockResolvedValue(undefined);
+    vi.mocked(listCatalogEntries).mockResolvedValue([
+      { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL", name: "My Skill", description: "A test skill" },
+    ]);
+    vi.mocked(listBundles).mockResolvedValue([]);
+    vi.mocked(getBundle).mockResolvedValue({
+      bundle: { bundleId: "b-new", name: "Deep Research", latestSeq: 1, memberCount: 1 },
+      versions: [{ versionId: "v1", seq: 1, sourceCommit: "1111111111111111111111111111111111aaaa" }],
+      members: [{ catalogId: "cat-new", sourceSubdir: "skills/deep-research", name: "Deep Research", sha256: "aaaa", position: 0 }],
+    });
   });
 
   it("renders the profiles view root with data-testid=profiles", async () => {
@@ -136,14 +165,14 @@ describe("ProfilesView", () => {
         catalogId: "cat-prov",
         kind: "PROFILE_ENTRY_KIND_SKILL",
         name: "Provenance Skill",
-        description: "a url-ingested skill",
+        description: "a url-ingested standalone skill",
         sourceUrl: "https://github.com/obra/superpowers",
         sourceRef: "main",
         sourceSubdir: "skills/x",
         sourceCommit: "1111111111111111111111111111111111aaaa",
         sha256: "2222222222222222222222222222222222222222222222222222222222bbbb",
         size: "4096",
-        bundleMember: true,
+        bundleMember: false,
       },
     ]);
     render(<ProfilesView />);
@@ -166,6 +195,22 @@ describe("ProfilesView", () => {
     expect(block.textContent).toContain("commit 111111111111");
     expect(block.textContent).toContain("content sha256 222222222222");
     expect(block.textContent).toContain("4096");
+  });
+
+  it("a bundle-member catalog row does not appear in the catalog picker", async () => {
+    vi.mocked(listCatalogEntries).mockResolvedValueOnce([
+      { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL", name: "My Skill", description: "A test skill" },
+      { catalogId: "cat-member", kind: "PROFILE_ENTRY_KIND_SKILL", name: "Member Skill", bundleMember: true },
+    ]);
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("add-catalog-btn"));
+    await userEvent.click(screen.getByTestId("add-catalog-btn"));
+    await waitFor(() => screen.getByTestId("catalog-picker"));
+
+    expect(screen.getByTestId("add-catalog-entry-cat1")).toBeTruthy();
+    expect(screen.queryByTestId("add-catalog-entry-cat-member")).toBeNull();
   });
 
   it("clicking Add in catalog picker calls addProfileEntry with catalog ref", async () => {
@@ -234,6 +279,35 @@ describe("ProfilesView", () => {
     expect(opencodeBadge.getAttribute("data-status")).toBe("supported");
   });
 
+  it("a BUNDLE_REF entry in the profile renders the chip, not the plain row", async () => {
+    vi.mocked(getProfile).mockResolvedValue({
+      profileId: "p1",
+      name: "My Profile",
+      version: 2,
+      entries: [
+        {
+          entryId: "e-bundle",
+          kind: "PROFILE_ENTRY_KIND_SKILL" as const,
+          name: "superpowers",
+          source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF" as const,
+          bundleId: "b1",
+          versionId: "v1",
+          excludedSubdirs: [],
+          memberRenames: {},
+          pinnedSeq: 1,
+          latestSeq: 1,
+          memberCount: 3,
+        },
+      ],
+      secretIds: [],
+    });
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("bundle-chip-e-bundle"));
+    expect(screen.queryByTestId("entry-e-bundle")).toBeNull();
+  });
+
   // --- Add skill from URL dialog ---
 
   it("shows Add skill from URL button after selecting a profile", async () => {
@@ -267,19 +341,7 @@ describe("ProfilesView", () => {
     expect(screen.getByTestId("skill-ingest-submit")).not.toBeDisabled();
   });
 
-  it("ingests a skill and attaches it to the profile", async () => {
-    vi.mocked(ingestSkillFromURL).mockResolvedValue({ catalogId: "cat-new" });
-    vi.mocked(listCatalogEntries)
-      .mockResolvedValueOnce([
-        // Initial load: existing cat1 only
-        { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL" as const, name: "My Skill", description: "A test skill" },
-      ])
-      .mockResolvedValueOnce([
-        // After ingest refresh: includes the new entry
-        { catalogId: "cat1", kind: "PROFILE_ENTRY_KIND_SKILL" as const, name: "My Skill", description: "A test skill" },
-        { catalogId: "cat-new", kind: "PROFILE_ENTRY_KIND_SKILL" as const, name: "Deep Research", description: "New" },
-      ]);
-
+  it("post-ingest, the dialog swaps to the attach-result panel — it does NOT auto-close and does NOT auto-attach", async () => {
     render(<ProfilesView />);
     await waitFor(() => screen.getByTestId("profile-item-p1"));
     await userEvent.click(screen.getByTestId("profile-item-p1"));
@@ -288,29 +350,65 @@ describe("ProfilesView", () => {
     await waitFor(() => screen.getByTestId("add-skill-dialog"));
 
     await userEvent.type(screen.getByTestId("skill-url-input"), "https://github.com/owner/repo");
-    await userEvent.type(screen.getByTestId("skill-ref-input"), "main");
     await userEvent.type(screen.getByTestId("skill-subdir-input"), "skills/deep-research");
-
     await userEvent.click(screen.getByTestId("skill-ingest-submit"));
 
-    await waitFor(() => {
-      expect(ingestSkillFromURL).toHaveBeenCalledWith(expect.objectContaining({
-        url: "https://github.com/owner/repo",
-        ref: "main",
-        subdir: "skills/deep-research",
-      }));
-    });
+    await waitFor(() => expect(ingestSkillFromURL).toHaveBeenCalled());
+    // The dialog is still open, showing the attach panel — not auto-attached.
+    await waitFor(() => screen.getByTestId("bundle-attach-panel-b-new"));
+    expect(screen.getByTestId("add-skill-dialog")).toBeTruthy();
+    expect(screen.getByText("skills/deep-research")).toBeTruthy();
+    expect(addProfileEntry).not.toHaveBeenCalled();
+  });
+
+  it("attaching from the result panel posts a BUNDLE_REF entry with no catalogId/versionId", async () => {
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("add-skill-url-btn"));
+    await userEvent.click(screen.getByTestId("add-skill-url-btn"));
+    await waitFor(() => screen.getByTestId("add-skill-dialog"));
+
+    await userEvent.type(screen.getByTestId("skill-url-input"), "https://github.com/owner/repo");
+    await userEvent.click(screen.getByTestId("skill-ingest-submit"));
+
+    await waitFor(() => screen.getByTestId("bundle-attach-submit"));
+    await userEvent.click(screen.getByTestId("bundle-attach-submit"));
 
     await waitFor(() => {
       expect(addProfileEntry).toHaveBeenCalledWith(
         "p1",
-        expect.any(Number),
+        2,
         expect.objectContaining({
-          source: "PROFILE_ENTRY_SOURCE_CATALOG_REF",
-          catalogId: "cat-new",
+          source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+          bundleId: "b-new",
+          name: "Deep Research",
         }),
       );
     });
+    const call = vi.mocked(addProfileEntry).mock.calls[0][2] as Record<string, unknown>;
+    expect(call.catalogId).toBeUndefined();
+    expect(call.versionId).toBeUndefined();
+  });
+
+  it("skipped entries and warnings from ingest are visible in the attach panel", async () => {
+    vi.mocked(ingestSkillFromURL).mockResolvedValueOnce({
+      catalogId: "cat-new", bundleId: "b-new", versionId: "v1", memberCatalogIds: ["cat-new"],
+      skippedEntries: ["AGENTS.md (symlink)"], warnings: ["nested skill at skills/a/sub ignored"], changed: true,
+    });
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("add-skill-url-btn"));
+    await userEvent.click(screen.getByTestId("add-skill-url-btn"));
+    await waitFor(() => screen.getByTestId("add-skill-dialog"));
+
+    await userEvent.type(screen.getByTestId("skill-url-input"), "https://github.com/owner/repo");
+    await userEvent.click(screen.getByTestId("skill-ingest-submit"));
+
+    await waitFor(() => screen.getByTestId("bundle-attach-skipped"));
+    expect(screen.getByTestId("bundle-attach-skipped").textContent).toContain("AGENTS.md (symlink)");
+    expect(screen.getByTestId("bundle-attach-warnings").textContent).toContain("nested skill at skills/a/sub ignored");
   });
 
   it("surfaces actionable error toast when ingest fails", async () => {
@@ -380,5 +478,78 @@ describe("ProfilesView", () => {
     expect(optionValues).toContain("PROFILE_ENTRY_KIND_MCP");
     expect(optionValues).toContain("PROFILE_ENTRY_KIND_CONFIG");
     expect(optionValues).toContain("PROFILE_ENTRY_KIND_PLUGIN");
+  });
+
+  it("Clone replays a BUNDLE_REF entry with no versionId and toasts when the source was behind (D7)", async () => {
+    vi.mocked(getProfile).mockResolvedValue({
+      profileId: "p1",
+      name: "My Profile",
+      version: 2,
+      entries: [
+        {
+          entryId: "e-bundle",
+          kind: "PROFILE_ENTRY_KIND_SKILL" as const,
+          name: "superpowers",
+          source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF" as const,
+          bundleId: "b1",
+          versionId: "v1",
+          excludedSubdirs: ["skills/x"],
+          memberRenames: { "skills/y": "y2" },
+          pinnedSeq: 1,
+          latestSeq: 2,
+          memberCount: 3,
+        },
+      ],
+      secretIds: [],
+    });
+    const { toast } = await import("sonner");
+    const successSpy = vi.spyOn(toast, "success");
+
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("bundle-chip-e-bundle"));
+    await userEvent.click(screen.getByTestId("profile-clone-btn"));
+
+    await waitFor(() => {
+      expect(addProfileEntry).toHaveBeenCalledWith(
+        "p3",
+        1,
+        expect.objectContaining({
+          source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+          bundleId: "b1",
+          excludedSubdirs: ["skills/x"],
+          memberRenames: { "skills/y": "y2" },
+        }),
+      );
+    });
+    const call = vi.mocked(addProfileEntry).mock.calls.find((c) => c[0] === "p3")![2] as Record<string, unknown>;
+    expect(call.versionId).toBeUndefined();
+    expect(successSpy).toHaveBeenCalledWith(expect.stringMatching(/pinned to their newer version/i));
+    successSpy.mockRestore();
+  });
+
+  // --- Bundles section in the catalog picker (sp-mwco.1.9 D3) ---
+
+  it("lists bundles as BundleCards in the catalog picker and Attach opens the attach panel", async () => {
+    vi.mocked(listBundles).mockResolvedValue([
+      { bundleId: "b1", name: "superpowers", latestSeq: 2, memberCount: 2, latestVersionId: "v2" },
+    ]);
+    vi.mocked(getBundle).mockResolvedValue({
+      bundle: { bundleId: "b1", name: "superpowers", latestSeq: 2, memberCount: 2, latestVersionId: "v2" },
+      versions: [{ versionId: "v2", seq: 2, sourceCommit: "aaaa" }],
+      members: [{ catalogId: "c1", sourceSubdir: "skills/a", name: "a", sha256: "aaa", position: 0 }],
+    });
+
+    render(<ProfilesView />);
+    await waitFor(() => screen.getByTestId("profile-item-p1"));
+    await userEvent.click(screen.getByTestId("profile-item-p1"));
+    await waitFor(() => screen.getByTestId("add-catalog-btn"));
+    await userEvent.click(screen.getByTestId("add-catalog-btn"));
+    await waitFor(() => screen.getByTestId("catalog-bundles"));
+
+    await userEvent.click(screen.getByTestId("bundle-card-attach-b1"));
+    await waitFor(() => screen.getByTestId("bundle-attach-panel-b1"));
+    expect(screen.getByText("skills/a")).toBeTruthy();
   });
 });

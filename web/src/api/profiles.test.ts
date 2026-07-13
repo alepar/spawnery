@@ -12,6 +12,7 @@ import {
   deleteCatalogEntry,
   deleteBundle,
   deleteBundleVersion,
+  ingestSkillFromURL,
   connectErrorMessage,
   kindToCapKind,
   KIND_LABEL,
@@ -93,6 +94,33 @@ describe("profiles api", () => {
     expect(profile.entries[0].customInline).toBe("test");
   });
 
+  it("getProfile decodes a BUNDLE_REF entry incl. int64-as-string seqs and memberRenames map", async () => {
+    const entry = {
+      entryId: "e3",
+      kind: "PROFILE_ENTRY_KIND_SKILL",
+      name: "superpowers",
+      source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+      bundleId: "b1",
+      versionId: "v1",
+      excludedSubdirs: ["skills/experimental"],
+      memberRenames: { "skills/a": "a2" },
+      pinnedSeq: "1",
+      latestSeq: "3",
+      memberCount: 5,
+    };
+    vi.stubGlobal("fetch", mockFetch({ profile: { profileId: "p1", name: "N", version: 3, entries: [entry] } }));
+    const profile = await getProfile("p1");
+    const e = profile.entries[0];
+    expect(e.source).toBe("PROFILE_ENTRY_SOURCE_BUNDLE_REF");
+    expect(e.bundleId).toBe("b1");
+    expect(e.versionId).toBe("v1");
+    expect(e.excludedSubdirs).toEqual(["skills/experimental"]);
+    expect(e.memberRenames).toEqual({ "skills/a": "a2" });
+    expect(e.pinnedSeq).toBe(1);
+    expect(e.latestSeq).toBe(3);
+    expect(e.memberCount).toBe(5);
+  });
+
   it("updateProfile POSTs UpdateProfile with CAS fields", async () => {
     const f = mockFetch({ version: 3 });
     vi.stubGlobal("fetch", f);
@@ -124,6 +152,37 @@ describe("profiles api", () => {
     expect(body.entry.kind).toBe("PROFILE_ENTRY_KIND_SKILL");
     expect(r.entryId).toBe("e1");
     expect(r.version).toBe(2);
+  });
+
+  it("addProfileEntry sends a BUNDLE_REF entry with no catalogId/versionId (attach always pins LATEST) and forwards overrides", async () => {
+    const f = mockFetch({ entryId: "e4", version: 3, warnings: ["skills/b auto-renamed to skills/b-2 (collision)"] });
+    vi.stubGlobal("fetch", f);
+    const r = await addProfileEntry("p1", 1, {
+      kind: "PROFILE_ENTRY_KIND_SKILL",
+      name: "superpowers",
+      source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF",
+      bundleId: "b1",
+      excludedSubdirs: ["skills/experimental"],
+      memberRenames: { "skills/a": "a2" },
+    });
+    const body = JSON.parse((f.mock.calls[0][1] as any).body);
+    expect(body.entry.bundleId).toBe("b1");
+    expect(body.entry.catalogId).toBeUndefined();
+    expect(body.entry.versionId).toBeUndefined();
+    expect(body.entry.excludedSubdirs).toEqual(["skills/experimental"]);
+    expect(body.entry.memberRenames).toEqual({ "skills/a": "a2" });
+    expect(r.warnings).toEqual(["skills/b auto-renamed to skills/b-2 (collision)"]);
+  });
+
+  it("addProfileEntry normalizes an absent warnings array to []", async () => {
+    vi.stubGlobal("fetch", mockFetch({ entryId: "e5", version: 4 }));
+    const r = await addProfileEntry("p1", 1, {
+      kind: "PROFILE_ENTRY_KIND_SKILL",
+      name: "My Skill",
+      source: "PROFILE_ENTRY_SOURCE_CATALOG_REF",
+      catalogId: "cat1",
+    });
+    expect(r.warnings).toEqual([]);
   });
 
   it("addProfileEntry base64-encodes customInline for proto bytes wire field", async () => {
@@ -265,6 +324,39 @@ describe("profiles api", () => {
     expect(connectErrorMessage(caught)).toBe(
       "catalog entry c1 is referenced by 3 profile(s) across 2 owner(s); re-run with force=true to delete anyway",
     );
+  });
+
+  it("ingestSkillFromURL POSTs IngestSkillFromURL and defaults absent bundle/array/bool fields", async () => {
+    const f = mockFetch({ catalogId: "c1" });
+    vi.stubGlobal("fetch", f);
+    const r = await ingestSkillFromURL({ url: "https://github.com/owner/repo" });
+    expect(JSON.parse((f.mock.calls[0][1] as any).body)).toEqual({ url: "https://github.com/owner/repo" });
+    expect(r.catalogId).toBe("c1");
+    expect(r.bundleId).toBe("");
+    expect(r.versionId).toBe("");
+    expect(r.memberCatalogIds).toEqual([]);
+    expect(r.skippedEntries).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(r.changed).toBe(false);
+  });
+
+  it("ingestSkillFromURL preserves a full multi-skill bundle response", async () => {
+    vi.stubGlobal("fetch", mockFetch({
+      catalogId: "c1",
+      bundleId: "b1",
+      versionId: "v1",
+      memberCatalogIds: ["c1", "c2"],
+      skippedEntries: ["AGENTS.md (symlink)"],
+      warnings: ["nested skill at skills/a/sub ignored"],
+      changed: true,
+    }));
+    const r = await ingestSkillFromURL({ url: "https://github.com/owner/repo" });
+    expect(r.bundleId).toBe("b1");
+    expect(r.versionId).toBe("v1");
+    expect(r.memberCatalogIds).toEqual(["c1", "c2"]);
+    expect(r.skippedEntries).toEqual(["AGENTS.md (symlink)"]);
+    expect(r.warnings).toEqual(["nested skill at skills/a/sub ignored"]);
+    expect(r.changed).toBe(true);
   });
 
   it("deleteBundle POSTs DeleteBundle with bundleId and force", async () => {

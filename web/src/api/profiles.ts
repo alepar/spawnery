@@ -28,7 +28,8 @@ export type ProfileEntryKind =
 
 export type ProfileEntrySource =
   | "PROFILE_ENTRY_SOURCE_CATALOG_REF"
-  | "PROFILE_ENTRY_SOURCE_CUSTOM";
+  | "PROFILE_ENTRY_SOURCE_CUSTOM"
+  | "PROFILE_ENTRY_SOURCE_BUNDLE_REF";
 
 export interface ProfileSummary {
   profileId: string;
@@ -46,6 +47,18 @@ export interface ProfileEntry {
   customInline?: string;
   targets?: string[];
   mcpSecretRefs?: string[];
+  // bundle_ref fields (sp-mwco.1.8 §4.4): set when source=BUNDLE_REF. bundleId/versionId pin
+  // this entry to one exact bundle version; excludedSubdirs/memberRenames are per-member
+  // overrides keyed by the bundle member's source_subdir. pinnedSeq/latestSeq/memberCount are
+  // read-only, server-populated by GetProfile — "update available" is latestSeq > pinnedSeq,
+  // computed client-side (there is no such wire field).
+  bundleId?: string;
+  versionId?: string;
+  excludedSubdirs?: string[];
+  memberRenames?: Record<string, string>;
+  pinnedSeq?: number;
+  latestSeq?: number;
+  memberCount?: number;
 }
 
 export interface Profile {
@@ -122,17 +135,28 @@ export async function createProfile(name: string): Promise<{ profileId: string; 
   return unary<{ profileId: string; version: number }>("CreateProfile", { name });
 }
 
+/** Wire shape of a ProfileEntry before decoding: pinnedSeq/latestSeq are proto int64, so they
+ * arrive as strings (Connect-JSON), not the `number` the app-facing ProfileEntry type declares. */
+type WireProfileEntry = Omit<ProfileEntry, "pinnedSeq" | "latestSeq"> & {
+  pinnedSeq?: string | number;
+  latestSeq?: string | number;
+};
+
 export async function getProfile(profileId: string): Promise<Profile> {
-  const r = await unary<{ profile?: Partial<Profile> & { profileId: string; name: string; version: number } }>(
-    "GetProfile", { profileId },
-  );
+  const r = await unary<{
+    profile?: Omit<Partial<Profile>, "entries"> & {
+      profileId: string; name: string; version: number; entries?: WireProfileEntry[];
+    };
+  }>("GetProfile", { profileId });
   const p = r.profile!;
-  // Decode proto `bytes` field customInline from base64 (Connect-JSON encoding) to raw string.
-  const entries = (p.entries ?? []).map((e) =>
-    e.customInline !== undefined
-      ? { ...e, customInline: base64ToUtf8(e.customInline) }
-      : e,
-  );
+  // Decode proto `bytes` field customInline from base64 (Connect-JSON encoding) to raw string,
+  // and int64 pinnedSeq/latestSeq from wire strings to numbers.
+  const entries: ProfileEntry[] = (p.entries ?? []).map((e) => ({
+    ...e,
+    customInline: e.customInline !== undefined ? base64ToUtf8(e.customInline) : e.customInline,
+    pinnedSeq: e.pinnedSeq !== undefined ? Number(e.pinnedSeq) : undefined,
+    latestSeq: e.latestSeq !== undefined ? Number(e.latestSeq) : undefined,
+  }));
   return { ...p, entries, secretIds: p.secretIds ?? [] };
 }
 
@@ -152,16 +176,17 @@ export async function addProfileEntry(
   profileId: string,
   expectedVersion: number,
   entry: Omit<ProfileEntry, "entryId">,
-): Promise<{ entryId: string; version: number }> {
+): Promise<{ entryId: string; version: number; warnings: string[] }> {
   // proto `bytes` field customInline must be base64-encoded in Connect-JSON.
   const wireEntry = entry.customInline !== undefined
     ? { ...entry, customInline: utf8ToBase64(entry.customInline) }
     : entry;
-  return unary<{ entryId: string; version: number }>("AddProfileEntry", {
+  const r = await unary<{ entryId: string; version: number; warnings?: string[] }>("AddProfileEntry", {
     profileId,
     expectedVersion,
     entry: wireEntry,
   });
+  return { ...r, warnings: r.warnings ?? [] };
 }
 
 export async function removeProfileEntry(
@@ -223,17 +248,39 @@ export interface IngestSkillFromURLInput {
   description?: string;
 }
 
+// IngestSkillFromURLResult.catalogId keeps its historical meaning: the first member (the
+// bundle-of-one case, by far the common one, is unchanged). bundleId/versionId/memberCatalogIds
+// let a caller resolve the full bundle for a multi-skill repo (sp-mwco.1.7/1.9).
+export interface IngestSkillFromURLResult {
+  catalogId: string;
+  bundleId: string;
+  versionId: string;
+  memberCatalogIds: string[];
+  skippedEntries: string[]; // symlinks/devices skipped, never fetched
+  warnings: string[];       // nested-skill warnings, cap hints
+  changed: boolean;         // false => a re-paste that cut no new version
+}
+
 /**
- * Ingest a skill from a GitHub URL into the catalog.
+ * Ingest a skill (or multi-skill bundle) from a GitHub URL into the catalog.
  * Optional fields are omitted when empty to match proto "unset" semantics.
  */
-export async function ingestSkillFromURL(input: IngestSkillFromURLInput): Promise<{ catalogId: string }> {
+export async function ingestSkillFromURL(input: IngestSkillFromURLInput): Promise<IngestSkillFromURLResult> {
   const body: Record<string, string> = { url: input.url };
   if (input.ref)         body.ref         = input.ref;
   if (input.subdir)      body.subdir      = input.subdir;
   if (input.name)        body.name        = input.name;
   if (input.description) body.description = input.description;
-  return unary<{ catalogId: string }>("IngestSkillFromURL", body);
+  const r = await unary<Partial<IngestSkillFromURLResult> & { catalogId: string }>("IngestSkillFromURL", body);
+  return {
+    catalogId: r.catalogId,
+    bundleId: r.bundleId ?? "",
+    versionId: r.versionId ?? "",
+    memberCatalogIds: r.memberCatalogIds ?? [],
+    skippedEntries: r.skippedEntries ?? [],
+    warnings: r.warnings ?? [],
+    changed: r.changed ?? false,
+  };
 }
 
 /**

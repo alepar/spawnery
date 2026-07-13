@@ -31,7 +31,19 @@ import {
   type ProfileEntryKind,
   type ProfileEntrySource,
 } from "@/api/profiles";
+import {
+  listBundles,
+  getBundle,
+  reingestBundle,
+  repinProfileBundle,
+  type BundleSummary,
+  type BundleVersion,
+  type BundleMember,
+} from "@/api/bundles";
 import { AGENTS, capabilityFor, type CapabilityStatus } from "@/api/capabilities";
+import { BundleCard } from "@/views/profiles/BundleCard";
+import { BundleAttachPanel, type BundleAttachOverrides } from "@/views/profiles/BundleAttachPanel";
+import { BundleEntryChip } from "@/views/profiles/BundleEntryChip";
 
 // --- Capability preview -------------------------------------------------------
 
@@ -64,6 +76,17 @@ function CapabilityPreview({ entry }: { entry: ProfileEntry }) {
   );
 }
 
+// --- Bundle attach panel state (shared by the ingest flow and the catalog "Attach" flow) -----
+
+interface AttachPanelState {
+  bundleId: string;
+  name: string;
+  members: BundleMember[];
+  skippedEntries: string[];
+  warnings: string[];
+  changed?: boolean;
+}
+
 // --- ProfilesView -------------------------------------------------------------
 
 export function ProfilesView() {
@@ -92,7 +115,15 @@ export function ProfilesView() {
   const [customInline, setCustomInline] = useState("");
   const [addingEntry, setAddingEntry] = useState(false);
 
-  // Add skill from URL dialog state
+  // Bundles (sp-mwco.1.9 §4.7): the catalog picker's "Bundles" section — one BundleCard per
+  // bundle, fed by ListBundles + a GetBundle per card for provenance/members.
+  const [bundles, setBundles] = useState<BundleSummary[]>([]);
+  const [bundleDetails, setBundleDetails] = useState<Record<string, { versions: BundleVersion[]; members: BundleMember[] }>>({});
+
+  // Add skill from URL dialog state — also doubles as the "Attach an existing bundle" dialog
+  // (opened from a BundleCard's Attach button): when attachPanel is set, the dialog shows
+  // BundleAttachPanel instead of the URL form (D2 — attach is an explicit second step, an
+  // ingest that discovers 40 skills must not silently attach 40).
   const [showAddSkill, setShowAddSkill] = useState(false);
   const [skillUrl, setSkillUrl] = useState("");
   const [skillRef, setSkillRef] = useState("");
@@ -100,6 +131,8 @@ export function ProfilesView() {
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
   const [ingestingSkill, setIngestingSkill] = useState(false);
+  const [attachPanel, setAttachPanel] = useState<AttachPanelState | null>(null);
+  const [attachingBundle, setAttachingBundle] = useState(false);
 
   const refreshList = async () => {
     setLoadingList(true);
@@ -126,12 +159,31 @@ export function ProfilesView() {
     }
   };
 
+  const refreshBundles = async () => {
+    try {
+      const list = await listBundles();
+      setBundles(list);
+      const entries = await Promise.all(list.map(async (b) => {
+        try {
+          const d = await getBundle(b.bundleId);
+          return [b.bundleId, { versions: d.versions, members: d.members }] as const;
+        } catch {
+          return [b.bundleId, { versions: [], members: [] }] as const;
+        }
+      }));
+      setBundleDetails(Object.fromEntries(entries));
+    } catch {
+      // best-effort, same posture as listCatalogEntries below
+    }
+  };
+
   useEffect(() => { refreshList(); }, []);
 
   useEffect(() => {
     if (selectedId) {
       refreshProfile(selectedId);
       listCatalogEntries().then(setCatalogEntries).catch(() => {});
+      refreshBundles();
     } else {
       setProfile(null);
     }
@@ -160,7 +212,26 @@ export function ProfilesView() {
       const r = await createProfile(profile.name + " copy");
       // Replay all entries from the source profile
       let version = r.version;
+      let pinnedNewer = false;
       for (const entry of profile.entries) {
+        if (entry.source === "PROFILE_ENTRY_SOURCE_BUNDLE_REF") {
+          // Clone replays a BUNDLE_REF entry with no versionId ⇒ the new profile pins LATEST
+          // (sp-mwco.1.9 D7). Dropping bundle entries from a clone would be worse than pinning
+          // newer, so we do the latter and flag it if the source was behind.
+          if ((entry.latestSeq ?? 0) > (entry.pinnedSeq ?? 0)) pinnedNewer = true;
+          const entryInput: Omit<ProfileEntry, "entryId"> = {
+            kind: entry.kind,
+            name: entry.name,
+            source: entry.source,
+            bundleId: entry.bundleId,
+            excludedSubdirs: entry.excludedSubdirs,
+            memberRenames: entry.memberRenames,
+            targets: entry.targets,
+          };
+          const added = await addProfileEntry(r.profileId, version, entryInput);
+          version = added.version;
+          continue;
+        }
         const entryInput: Omit<ProfileEntry, "entryId"> = {
           kind: entry.kind,
           name: entry.name,
@@ -172,6 +243,9 @@ export function ProfilesView() {
         };
         const added = await addProfileEntry(r.profileId, version, entryInput);
         version = added.version;
+      }
+      if (pinnedNewer) {
+        toast.success("Profile cloned — one or more bundles were pinned to their newer version");
       }
       await refreshList();
       setSelectedId(r.profileId);
@@ -264,6 +338,10 @@ export function ProfilesView() {
     }
   };
 
+  // handleUpdateTargets is remove+re-add (there is no UpdateProfileEntry RPC yet). It is never
+  // invoked for a BUNDLE_REF entry — those render BundleEntryChip, which has no target toggles
+  // (sp-mwco.1.9 D6): a re-add would silently pin the bundle to LATEST, exactly the un-diffed
+  // update channel §4.9 forbids.
   const handleUpdateTargets = async (entry: ProfileEntry, targets: string[]) => {
     if (!profile) return;
     try {
@@ -301,6 +379,16 @@ export function ProfilesView() {
     }
   };
 
+  const resetAddSkillDialog = () => {
+    setShowAddSkill(false);
+    setSkillUrl("");
+    setSkillRef("");
+    setSkillSubdir("");
+    setSkillName("");
+    setSkillDescription("");
+    setAttachPanel(null);
+  };
+
   const handleIngestSkill = async () => {
     if (!profile || !skillUrl.trim()) return;
     setIngestingSkill(true);
@@ -312,34 +400,100 @@ export function ProfilesView() {
         name: skillName.trim() || undefined,
         description: skillDescription.trim() || undefined,
       });
-      toast.success("Skill ingested");
-      // Refresh catalog to get the authoritative entry (name/kind come from the catalog row).
-      const refreshed = await listCatalogEntries();
-      setCatalogEntries(refreshed);
-      // Close and reset dialog.
-      setShowAddSkill(false);
-      setSkillUrl("");
-      setSkillRef("");
-      setSkillSubdir("");
-      setSkillName("");
-      setSkillDescription("");
-      // Find the freshly-ingested catalog entry and attach it to the profile.
-      const entry = refreshed.find((e) => e.catalogId === r.catalogId);
-      if (entry) {
-        // If already in the profile, skip to avoid duplicate attach.
-        const alreadyAttached = profile.entries.some((pe) => pe.catalogId === r.catalogId);
-        if (alreadyAttached) {
-          toast.success("Skill is already in this profile");
-        } else {
-          await handleAddCatalogEntry(entry);
-        }
-      }
+      // Every ingest yields a bundle (bundle-of-one for a single-skill repo). Attach is always
+      // BUNDLE_REF (sp-mwco.1.9 D1) and always an explicit second step (D2) — swap the dialog to
+      // the attach-result panel rather than auto-attaching, so an ingest that discovers 40
+      // skills can't silently attach 40.
+      const detail = await getBundle(r.bundleId);
+      setAttachPanel({
+        bundleId: r.bundleId,
+        name: detail.bundle.name,
+        members: detail.members,
+        skippedEntries: r.skippedEntries,
+        warnings: r.warnings,
+        changed: r.changed,
+      });
     } catch (e: unknown) {
       toast.error(connectErrorMessage(e));
     } finally {
       setIngestingSkill(false);
     }
   };
+
+  const handleOpenAttachForBundle = (bundleId: string) => {
+    const summary = bundles.find((b) => b.bundleId === bundleId);
+    const detail = bundleDetails[bundleId];
+    if (!summary || !detail) return;
+    setAttachPanel({
+      bundleId,
+      name: summary.name,
+      members: detail.members,
+      skippedEntries: [],
+      warnings: [],
+      changed: undefined,
+    });
+    setShowAddSkill(true);
+  };
+
+  const handleAttachBundle = async (overrides: BundleAttachOverrides) => {
+    if (!profile || !attachPanel) return;
+    setAttachingBundle(true);
+    try {
+      const r = await addProfileEntry(profile.profileId, profile.version, {
+        kind: "PROFILE_ENTRY_KIND_SKILL" as ProfileEntryKind,
+        name: attachPanel.name,
+        source: "PROFILE_ENTRY_SOURCE_BUNDLE_REF" as ProfileEntrySource,
+        bundleId: attachPanel.bundleId,
+        excludedSubdirs: overrides.excludedSubdirs,
+        memberRenames: overrides.memberRenames,
+      });
+      setProfile((p) => p ? { ...p, version: r.version } : p);
+      if (r.warnings.length > 0) {
+        for (const w of r.warnings) toast.warning(w);
+      } else {
+        toast.success("Bundle attached");
+      }
+      resetAddSkillDialog();
+      if (selectedId) {
+        await refreshProfile(selectedId);
+        await refreshBundles();
+      }
+    } catch (e: unknown) {
+      toast.error("Attach failed: " + connectErrorMessage(e));
+    } finally {
+      setAttachingBundle(false);
+    }
+  };
+
+  const handleBundleCheckUpdates = async (bundleId: string) => {
+    try {
+      const r = await reingestBundle(bundleId);
+      if (r.notModified || !r.changed) {
+        toast.success("Bundle is up to date");
+      } else {
+        toast.success(
+          `Bundle updated: ${r.addedSubdirs.length} added, ${r.updatedSubdirs.length} updated, ${r.removedSubdirs.length} removed`,
+        );
+      }
+      await refreshBundles();
+    } catch (e: unknown) {
+      toast.error("Check for updates failed: " + connectErrorMessage(e));
+    }
+  };
+
+  const handleRepinEntry = async (entryId: string, versionId: string, diffToken: string) => {
+    if (!profile) return;
+    const r = await repinProfileBundle(profile.profileId, entryId, versionId, diffToken, profile.version);
+    setProfile((p) => p ? { ...p, version: r.version } : p);
+    if (r.warnings.length > 0) {
+      for (const w of r.warnings) toast.warning(w);
+    } else {
+      toast.success("Bundle re-pinned");
+    }
+    if (selectedId) await refreshProfile(selectedId);
+  };
+
+  const visibleCatalogEntries = catalogEntries.filter((ce) => !ce.bundleMember);
 
   return (
     <div data-testid="profiles" className="flex h-full">
@@ -442,6 +596,14 @@ export function ProfilesView() {
               )}
 
               {profile.entries.map((entry) => (
+                entry.source === "PROFILE_ENTRY_SOURCE_BUNDLE_REF" ? (
+                  <BundleEntryChip
+                    key={entry.entryId}
+                    entry={entry}
+                    onRemove={handleRemoveEntry}
+                    onRepin={handleRepinEntry}
+                  />
+                ) : (
                 <div
                   key={entry.entryId}
                   data-testid={`entry-${entry.entryId}`}
@@ -496,6 +658,7 @@ export function ProfilesView() {
                   {/* Capability preview */}
                   <CapabilityPreview entry={entry} />
                 </div>
+                )
               ))}
             </div>
 
@@ -531,10 +694,10 @@ export function ProfilesView() {
             {showAddCatalog && (
               <div data-testid="catalog-picker" className="flex flex-col gap-2 rounded border border-border p-3">
                 <div className="text-sm font-semibold">Catalog entries</div>
-                {catalogEntries.length === 0 && (
+                {visibleCatalogEntries.length === 0 && (
                   <div className="text-xs text-muted-foreground">No catalog entries.</div>
                 )}
-                {catalogEntries.map((ce) => (
+                {visibleCatalogEntries.map((ce) => (
                   <div key={ce.catalogId} className="flex items-center justify-between gap-2">
                     <div>
                       <span className="text-sm font-medium">{ce.name}</span>
@@ -583,6 +746,22 @@ export function ProfilesView() {
                     </Button>
                   </div>
                 ))}
+
+                {bundles.length > 0 && (
+                  <div data-testid="catalog-bundles" className="mt-2 flex flex-col gap-2 border-t border-border pt-2">
+                    <div className="text-sm font-semibold">Bundles</div>
+                    {bundles.map((b) => (
+                      <BundleCard
+                        key={b.bundleId}
+                        summary={b}
+                        versions={bundleDetails[b.bundleId]?.versions ?? []}
+                        members={bundleDetails[b.bundleId]?.members ?? []}
+                        onAttach={handleOpenAttachForBundle}
+                        onCheckUpdates={handleBundleCheckUpdates}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -629,88 +808,104 @@ export function ProfilesView() {
               </div>
             )}
 
-            {/* Add skill from URL dialog */}
-            <Dialog open={showAddSkill} onOpenChange={(open) => {
-              if (!open) {
-                setShowAddSkill(false);
-                setSkillUrl("");
-                setSkillRef("");
-                setSkillSubdir("");
-                setSkillName("");
-                setSkillDescription("");
-              }
-            }}>
+            {/* Add skill from URL dialog — swaps to BundleAttachPanel once ingested, or when
+                opened directly from a BundleCard's Attach button (attachPanel set, D2). */}
+            <Dialog open={showAddSkill} onOpenChange={(open) => { if (!open) resetAddSkillDialog(); }}>
               <DialogContent data-testid="add-skill-dialog">
-                <DialogHeader>
-                  <DialogTitle>Add skill from GitHub URL</DialogTitle>
-                  <DialogDescription>
-                    Enter the GitHub repository URL for the skill. The repository must contain a SKILL.md file.
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium" htmlFor="skill-url-input">URL <span className="text-destructive">*</span></label>
-                    <Input
-                      id="skill-url-input"
-                      data-testid="skill-url-input"
-                      placeholder="https://github.com/owner/repo"
-                      value={skillUrl}
-                      onChange={(e) => setSkillUrl(e.target.value)}
+                {!attachPanel ? (
+                  <>
+                    <DialogHeader>
+                      <DialogTitle>Add skill from GitHub URL</DialogTitle>
+                      <DialogDescription>
+                        Enter the GitHub repository URL for the skill. The repository must contain a SKILL.md file.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="flex flex-col gap-3">
+                      <div className="flex flex-col gap-1">
+                        <label className="text-sm font-medium" htmlFor="skill-url-input">URL <span className="text-destructive">*</span></label>
+                        <Input
+                          id="skill-url-input"
+                          data-testid="skill-url-input"
+                          placeholder="https://github.com/owner/repo"
+                          value={skillUrl}
+                          onChange={(e) => setSkillUrl(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-sm font-medium" htmlFor="skill-ref-input">Ref (branch / tag / commit)</label>
+                        <Input
+                          id="skill-ref-input"
+                          data-testid="skill-ref-input"
+                          placeholder="main"
+                          value={skillRef}
+                          onChange={(e) => setSkillRef(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-sm font-medium" htmlFor="skill-subdir-input">Subdirectory</label>
+                        <Input
+                          id="skill-subdir-input"
+                          data-testid="skill-subdir-input"
+                          placeholder="skills/my-skill"
+                          value={skillSubdir}
+                          onChange={(e) => setSkillSubdir(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-sm font-medium" htmlFor="skill-name-input">Name override</label>
+                        <Input
+                          id="skill-name-input"
+                          data-testid="skill-name-input"
+                          placeholder="Derived from SKILL.md if blank"
+                          value={skillName}
+                          onChange={(e) => setSkillName(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-sm font-medium" htmlFor="skill-description-input">Description override</label>
+                        <Input
+                          id="skill-description-input"
+                          data-testid="skill-description-input"
+                          placeholder="Derived from SKILL.md if blank"
+                          value={skillDescription}
+                          onChange={(e) => setSkillDescription(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <DialogClose asChild>
+                        <Button variant="outline" type="button">Cancel</Button>
+                      </DialogClose>
+                      <Button
+                        data-testid="skill-ingest-submit"
+                        disabled={!skillUrl.trim() || ingestingSkill}
+                        onClick={handleIngestSkill}
+                      >
+                        {ingestingSkill ? "Ingesting…" : "Ingest skill"}
+                      </Button>
+                    </DialogFooter>
+                  </>
+                ) : (
+                  <>
+                    <DialogHeader>
+                      <DialogTitle>Attach bundle to profile</DialogTitle>
+                      <DialogDescription>
+                        Review the discovered members, then attach. Excluded members and renames
+                        are set now — changing them later means Remove + Attach again.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <BundleAttachPanel
+                      bundleId={attachPanel.bundleId}
+                      name={attachPanel.name}
+                      members={attachPanel.members}
+                      skippedEntries={attachPanel.skippedEntries}
+                      warnings={attachPanel.warnings}
+                      changed={attachPanel.changed}
+                      attaching={attachingBundle}
+                      onAttach={handleAttachBundle}
                     />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium" htmlFor="skill-ref-input">Ref (branch / tag / commit)</label>
-                    <Input
-                      id="skill-ref-input"
-                      data-testid="skill-ref-input"
-                      placeholder="main"
-                      value={skillRef}
-                      onChange={(e) => setSkillRef(e.target.value)}
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium" htmlFor="skill-subdir-input">Subdirectory</label>
-                    <Input
-                      id="skill-subdir-input"
-                      data-testid="skill-subdir-input"
-                      placeholder="skills/my-skill"
-                      value={skillSubdir}
-                      onChange={(e) => setSkillSubdir(e.target.value)}
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium" htmlFor="skill-name-input">Name override</label>
-                    <Input
-                      id="skill-name-input"
-                      data-testid="skill-name-input"
-                      placeholder="Derived from SKILL.md if blank"
-                      value={skillName}
-                      onChange={(e) => setSkillName(e.target.value)}
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-medium" htmlFor="skill-description-input">Description override</label>
-                    <Input
-                      id="skill-description-input"
-                      data-testid="skill-description-input"
-                      placeholder="Derived from SKILL.md if blank"
-                      value={skillDescription}
-                      onChange={(e) => setSkillDescription(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <DialogFooter>
-                  <DialogClose asChild>
-                    <Button variant="outline" type="button">Cancel</Button>
-                  </DialogClose>
-                  <Button
-                    data-testid="skill-ingest-submit"
-                    disabled={!skillUrl.trim() || ingestingSkill}
-                    onClick={handleIngestSkill}
-                  >
-                    {ingestingSkill ? "Ingesting…" : "Ingest skill"}
-                  </Button>
-                </DialogFooter>
+                  </>
+                )}
               </DialogContent>
             </Dialog>
           </div>
