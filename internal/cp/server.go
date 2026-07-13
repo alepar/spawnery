@@ -635,6 +635,12 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				Phase:      m.ResumeProgress.GetPhase(),
 				Detail:     m.ResumeProgress.GetDetail(),
 			})
+			// ALSO feed the scheduler's in-flight Provision stall detector (sp-mwco.4.8): the node
+			// emits these same heartbeats on the fresh-create/StartSpawn path (attach.go's
+			// startSpawn), which resume's detector never sees. The two are independent and
+			// non-consuming; on the resume path they nest and both reset on progress, harmless —
+			// lifecycle's resumeWaiters remains the one that owns the store-side failure transition.
+			s.sched.Progress(m.ResumeProgress.GetSpawnId(), m.ResumeProgress.GetGeneration())
 		case *nodev1.NodeMessage_SkillInstallReport:
 			// Per-skill install status (sp-mwco.2.7): generation-fenced (skillInstalls.set drops
 			// a report older than the currently-recorded generation for this spawn).

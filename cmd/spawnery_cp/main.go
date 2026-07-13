@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
@@ -71,7 +70,7 @@ func main() {
 
 	reg := registry.New()
 	rt := router.New()
-	sched := scheduler.New(reg, rt, 60*time.Second)
+	sched := scheduler.New(reg, rt, scheduler.DefaultStartStallWindow)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -297,7 +297,7 @@ func setupSkillIngestStack(t *testing.T, opts ...skillIngestStackOpt) skillInges
 	// --- CP ---
 	reg := registry.New()
 	rtr := router.New()
-	sched := scheduler.New(reg, rtr, 60*time.Second)
+	sched := scheduler.New(reg, rtr, scheduler.DefaultStartStallWindow)
 	tel, err := telemetry.NewJSONLSink(filepath.Join(t.TempDir(), "events.jsonl"))
 	if err != nil {
 		t.Fatal(err)
