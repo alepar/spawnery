@@ -3,7 +3,6 @@ import {
   buildSessionReauthSignedIntentB64,
   buildSessionOpenSignedIntentB64,
   cpv1,
-  exportSpkiDer,
   WebCryptoSessionSigner,
 } from "@spawnery/client";
 import { refreshOAuthSession } from "../../src/auth/oauth-session";
@@ -12,13 +11,26 @@ import {
   decodeSessionArtifact,
   establishCurrentSession,
   loadVMAuthConfig,
-  mintShortLivedNodeToken,
   ssh,
   submitSpawn,
   type VMAuthConfig,
 } from "./root-anchored-artifacts";
 
 const SOCKETS_KEY = "__spawneryRevocationSockets";
+
+interface SessionBinding {
+  clientId: string;
+}
+
+interface AuthorizationCloseRecord {
+  timestampMs: number;
+  spawnId: string;
+  generation: number;
+  sessionId: string;
+  clientId: string;
+  attachmentId: string;
+  reason: string;
+}
 
 async function waitForSession(
   cfg: VMAuthConfig,
@@ -47,7 +59,7 @@ async function bindSession(
   generation: bigint,
   targetNodeId: string,
   name: string,
-): Promise<void> {
+): Promise<SessionBinding> {
   const intent = await buildSessionOpenSignedIntentB64(
     spawnId,
     sessionId,
@@ -55,6 +67,7 @@ async function bindSession(
     targetNodeId,
     new WebCryptoSessionSigner(session.privateKey, session.publicKey),
   );
+  const clientId = `acc-revocation-${name}-${crypto.randomUUID()}`;
   const wsOrigin = cfg.webOrigin.replace(/^http/, "ws");
   await page.evaluate(async ({ wsUrl, bind, socketName, socketsKey }) => {
     const holder = window as typeof window & Record<string, Record<string, WebSocket>>;
@@ -84,12 +97,85 @@ async function bindSession(
       spawnId,
       token: session.accessToken,
       nodeAccessToken,
-      clientId: `acc-revocation-${name}-${crypto.randomUUID()}`,
+      clientId,
       sessionId,
       cursor: 0,
       signedIntent: intent,
     },
   });
+  return { clientId };
+}
+
+function textAttribute(message: string, name: string): string | undefined {
+  const match = message.match(new RegExp(`(?:^|\\s)${name}=("(?:[^"\\\\]|\\\\.)*"|\\S+)`));
+  if (!match) return undefined;
+  if (!match[1].startsWith('"')) return match[1];
+  try {
+    return JSON.parse(match[1]) as string;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseAuthorizationCloseJournal(output: string): AuthorizationCloseRecord[] {
+  const records: AuthorizationCloseRecord[] = [];
+  for (const line of output.split("\n")) {
+    if (!line.trim()) continue;
+    const journal = JSON.parse(line) as { MESSAGE?: string; __REALTIME_TIMESTAMP?: string };
+    const message = String(journal.MESSAGE ?? "");
+    let fields: Record<string, unknown>;
+    try {
+      fields = JSON.parse(message) as Record<string, unknown>;
+    } catch {
+      fields = {
+        msg: textAttribute(message, "msg"),
+        spawn_id: textAttribute(message, "spawn_id"),
+        generation: textAttribute(message, "generation"),
+        session_id: textAttribute(message, "session_id"),
+        client_id: textAttribute(message, "client_id"),
+        attachment_id: textAttribute(message, "attachment_id"),
+        reason: textAttribute(message, "reason"),
+      };
+    }
+    if (fields.msg !== "session_authorization_closed") continue;
+    records.push({
+      timestampMs: Number(journal.__REALTIME_TIMESTAMP ?? 0) / 1000,
+      spawnId: String(fields.spawn_id ?? ""),
+      generation: Number(fields.generation ?? 0),
+      sessionId: String(fields.session_id ?? ""),
+      clientId: String(fields.client_id ?? ""),
+      attachmentId: String(fields.attachment_id ?? ""),
+      reason: String(fields.reason ?? ""),
+    });
+  }
+  return records;
+}
+
+async function authorizationCloseRecords(
+  cfg: VMAuthConfig,
+  sinceEpoch: number,
+): Promise<AuthorizationCloseRecord[]> {
+  const output = await ssh(
+    cfg,
+    `sudo journalctl -u spawnery-node --since @${sinceEpoch} --output=json --no-pager`,
+  );
+  return parseAuthorizationCloseJournal(output);
+}
+
+async function expectAuthorizationClosed(
+  cfg: VMAuthConfig,
+  sinceEpoch: number,
+  expected: Omit<AuthorizationCloseRecord, "timestampMs" | "attachmentId">,
+  timeoutMs: number,
+): Promise<AuthorizationCloseRecord> {
+  const matches = async () => (await authorizationCloseRecords(cfg, sinceEpoch)).filter((record) =>
+    record.spawnId === expected.spawnId && record.generation === expected.generation &&
+    record.sessionId === expected.sessionId && record.clientId === expected.clientId &&
+    record.reason === expected.reason);
+  await expect.poll(async () => (await matches()).length, { timeout: timeoutMs }).toBe(1);
+  const [record] = await matches();
+  expect(record.attachmentId).not.toBe("");
+  return record;
 }
 
 async function expectSocketsClosed(page: Page, names: string[], timeoutMs: number): Promise<void> {
@@ -138,7 +224,7 @@ async function expectSocketsOpen(page: Page, names: string[]): Promise<void> {
 }
 
 test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot extend node expiry", async ({ page }) => {
-  test.setTimeout(10 * 60_000);
+  test.setTimeout(22 * 60_000);
   const cfg = loadVMAuthConfig();
   await page.goto(cfg.webOrigin);
   const createdSpawnIds: string[] = [];
@@ -180,9 +266,10 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     const target = await logoutCP.getSpawnNodeKey({ spawnId: live.spawnId });
     expect(target.generation).not.toBe(0n);
     expect(target.targetNodeId).not.toBe("");
-    await bindSession(page, cfg, logoutSession, logoutSession.nodeAccessToken, live.spawnId, acpSessionId,
+    const logoutJournalEpoch = Math.floor(Date.now() / 1000) - 1;
+    const logoutACP = await bindSession(page, cfg, logoutSession, logoutSession.nodeAccessToken, live.spawnId, acpSessionId,
       target.generation, target.targetNodeId, "logout-acp");
-    await bindSession(page, cfg, logoutSession, logoutSession.nodeAccessToken, live.spawnId, moshSessionId,
+    const logoutMOSH = await bindSession(page, cfg, logoutSession, logoutSession.nodeAccessToken, live.spawnId, moshSessionId,
       target.generation, target.targetNodeId, "logout-mosh");
 
     const predecessorNodeToken = logoutSession.nodeAccessToken;
@@ -204,25 +291,59 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     });
     expect(logout.status, await logout.text()).toBe(200);
     await expectSocketsClosed(page, ["logout-acp", "logout-mosh"], 30_000);
+    const logoutCloseRecords = await Promise.all([
+      expectAuthorizationClosed(cfg, logoutJournalEpoch, {
+        spawnId: live.spawnId,
+        generation: Number(target.generation),
+        sessionId: acpSessionId,
+        clientId: logoutACP.clientId,
+        reason: "node authorization revoked",
+      }, 30_000),
+      expectAuthorizationClosed(cfg, logoutJournalEpoch, {
+        spawnId: live.spawnId,
+        generation: Number(target.generation),
+        sessionId: moshSessionId,
+        clientId: logoutMOSH.clientId,
+        reason: "node authorization revoked",
+      }, 30_000),
+    ]);
+    expect(new Set(logoutCloseRecords.map((record) => record.attachmentId)).size).toBe(2);
 
     const expirySession = await establishCurrentSession(cfg);
     cleanupToken = expirySession.accessToken;
-    const spki = await exportSpkiDer(expirySession.publicKey);
     const expiryCP = cpClient(cfg, expirySession.accessToken);
     const expiryTarget = await expiryCP.getSpawnNodeKey({ spawnId: live.spawnId });
-    const expiryAccountId = decodeSessionArtifact(expirySession.nodeAccessToken).body.accountId;
-    const shortNodeToken = await mintShortLivedNodeToken(cfg, expiryAccountId, spki, 20);
-    await bindSession(page, cfg, expirySession, shortNodeToken, live.spawnId, acpSessionId,
+    const signedExpiresAtMs = Number(decodeSessionArtifact(expirySession.nodeAccessToken).body.expiresAt) * 1000;
+    expect(signedExpiresAtMs - Date.now()).toBeGreaterThan(14 * 60_000);
+    const expiryJournalEpoch = Math.floor(Date.now() / 1000) - 1;
+    const outageBinding = await bindSession(page, cfg, expirySession, expirySession.nodeAccessToken, live.spawnId, acpSessionId,
       expiryTarget.generation, expiryTarget.targetNodeId, "outage-expiry");
 
     await ssh(cfg, "sudo systemctl stop spawnery-authsvc");
     authsvcStopped = true;
     expect(await ssh(cfg, "sudo systemctl is-active spawnery-authsvc || true")).toBe("inactive");
     await expect(refreshOAuthSession({ asOrigin: cfg.asOrigin }, expirySession)).rejects.toThrow();
-    await expectSocketsClosed(page, ["outage-expiry"], 30_000);
+    await reauthenticateSocket(page, expirySession, live.spawnId, acpSessionId,
+      expiryTarget.generation, expiryTarget.targetNodeId, "outage-expiry");
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await expectSocketsOpen(page, ["outage-expiry"]);
+
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, signedExpiresAtMs + 1_000 - Date.now())));
+    await expectSocketsClosed(page, ["outage-expiry"], 20_000);
+    const expiryClose = await expectAuthorizationClosed(cfg, expiryJournalEpoch, {
+      spawnId: live.spawnId,
+      generation: Number(expiryTarget.generation),
+      sessionId: acpSessionId,
+      clientId: outageBinding.clientId,
+      reason: "node authorization expired",
+    }, 20_000);
+    expect(expiryClose.timestampMs).toBeGreaterThanOrEqual(signedExpiresAtMs - 2_000);
+    expect(expiryClose.timestampMs).toBeLessThanOrEqual(signedExpiresAtMs + 20_000);
   } finally {
     if (authsvcStopped) {
       await ssh(cfg, "sudo systemctl start spawnery-authsvc").catch(() => {});
+      const refreshedCleanup = await establishCurrentSession(cfg).catch(() => undefined);
+      if (refreshedCleanup) cleanupToken = refreshedCleanup.accessToken;
     }
     if (cleanupToken) {
       const cleanup = cpClient(cfg, cleanupToken);

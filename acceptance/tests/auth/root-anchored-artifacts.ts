@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, createPrivateKey, randomBytes, sign as nodeSign, X509Certificate } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import { promisify } from "node:util";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient } from "@connectrpc/connect";
@@ -9,6 +9,7 @@ import {
   buildSignedIntent,
   cpv1,
   createTransport,
+  derToP1363,
   WebCryptoSessionSigner,
   toBase64Url,
 } from "@spawnery/client";
@@ -105,46 +106,6 @@ export async function mintVMToken(
     `${base}/auth-signer-${signer}-key.pem`, `${base}/auth-signer-${signer}-chain.pem`,
     "prod", audience, accountId, Buffer.from(spki).toString("base64"),
   ));
-}
-
-export async function mintShortLivedNodeToken(
-  cfg: VMAuthConfig,
-  accountId: string,
-  spki: Uint8Array,
-  lifetimeSeconds: number,
-): Promise<string> {
-  if (lifetimeSeconds < 2 || lifetimeSeconds > 60) {
-    throw new Error(`short-lived node token lifetime must be between 2 and 60 seconds, got ${lifetimeSeconds}`);
-  }
-  const read = async (name: string) => Buffer.from(
-    await ssh(cfg, remoteArgv("sudo", "base64", "-w0", `/etc/spawnery/authsvc/${name}`)),
-    "base64",
-  );
-  const keyPEM = await read("auth-signer-current-key.pem");
-  const chainPEM = (await read("auth-signer-current-chain.pem")).toString("utf8");
-  const certPEMs = chainPEM.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
-  if (!certPEMs?.length) throw new Error("deployed auth signer chain contained no certificates");
-  const chain = certPEMs.map((pem) => new X509Certificate(pem));
-  const keyId = createHash("sha256").update(chain[0].publicKey.export({ format: "der", type: "spki" })).digest();
-  const now = Math.floor(Date.now() / 1000);
-  const payload = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
-    accountId,
-    tokenId: randomBytes(16).toString("hex"),
-    audience: "node",
-    issuedAt: BigInt(now),
-    expiresAt: BigInt(now + lifetimeSeconds),
-    sessionKeyHash: createHash("sha256").update(spki).digest(),
-    keyId: keyId.toString("hex"),
-  }));
-  const message = Buffer.concat([Buffer.from("spawnery/session-token/v1"), payload]);
-  const signature = nodeSign(null, message, createPrivateKey(keyPEM));
-  return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
-    artifactType: "session-token",
-    payload,
-    signature,
-    signerChain: chain.map((cert) => cert.raw),
-    keyId,
-  })));
 }
 
 export function cpClient(cfg: VMAuthConfig, bearer: string) {
@@ -263,7 +224,6 @@ export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Pr
 
 export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node", spki: Uint8Array): Promise<string> {
   const read = async (name: string) => Buffer.from(await ssh(cfg, remoteArgv("sudo", "base64", "-w0", `/etc/spawnery/node/${name}`)), "base64");
-  const keyPEM = await read("key.pem");
   const certPEM = await read("cert.pem");
   const chainPEM = await read("chain.pem");
   const leaf = new X509Certificate(certPEM);
@@ -279,7 +239,10 @@ export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node
     keyId: keyId.toString("hex"),
   }));
   const message = Buffer.concat([Buffer.from("spawnery/session-token/v1"), payload]);
-  const signature = nodeSign("sha256", message, { key: createPrivateKey(keyPEM), dsaEncoding: "ieee-p1363" });
+  const messageB64 = message.toString("base64");
+  const signatureDER = Buffer.from(await ssh(cfg,
+    `printf %s ${posixShellQuote(messageB64)} | base64 -d | sudo openssl dgst -sha256 -sign /etc/spawnery/node/key.pem | base64 -w0`), "base64");
+  const signature = derToP1363(signatureDER);
   const certDER = leaf.raw;
   const chainDER = new X509Certificate(chainPEM).raw;
   return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {

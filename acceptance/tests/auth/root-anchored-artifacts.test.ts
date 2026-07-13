@@ -1,6 +1,18 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { cpAuthModePlan, cpAuthModeReadinessCommand, posixShellQuote } from "./root-anchored-artifacts";
+
+describe("AS signer custody", () => {
+  it("has no acceptance-side short-lived token mint or AS private-key read/sign path", () => {
+    const source = readFileSync(new URL("./root-anchored-artifacts.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("export async function mintShortLivedNodeToken");
+    expect(source).not.toContain('await read("auth-signer-current-key.pem")');
+    expect(source).not.toContain("nodeSign(null, message");
+    expect(source).not.toMatch(/createPrivateKey|sign as nodeSign/);
+    expect(source).not.toContain('await read("key.pem")');
+  });
+});
 
 describe("posixShellQuote", () => {
   it.each([

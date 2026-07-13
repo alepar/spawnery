@@ -1503,6 +1503,14 @@ func (a *attacher) closeClientAuthorization(key sessionAuthKey, generation uint6
 	} else {
 		a.detachClient(key.spawnID, key.sessionID, key.clientID)
 	}
+	slog.Info("session_authorization_closed",
+		"spawn_id", key.spawnID,
+		"generation", generation,
+		"session_id", key.sessionID,
+		"client_id", key.clientID,
+		"attachment_id", attachmentID,
+		"reason", reason,
+	)
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SessionAuthClosed{SessionAuthClosed: &nodev1.SessionAuthClosed{
 		SpawnId: key.spawnID, Generation: generation, SessionId: key.sessionID, ClientId: key.clientID, Reason: reason,
 		AttachmentId: attachmentID,
