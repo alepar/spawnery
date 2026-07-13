@@ -251,6 +251,16 @@ type GitHubControlServer interface {
 	// lazily on first call, stable across calls for the same spawn). Used by sp-n7iy.5 to
 	// write the cert into the agent-visible git-env before StartAgent.
 	SpawnCACert(spawnID string) ([]byte, error)
+
+	// PushCredentials delivers the spawn's MITM CA + a live GitHub access token to the sidecar's
+	// control listener (sp-2tx8.9 §3.1 — the node pushes; the sidecar never asks). controlURL is the
+	// sidecar's /control/model URL; the implementation rewrites the path to /control/github and
+	// authenticates with controlToken (SIDECAR_CONTROL_TOKEN).
+	//
+	// It returns nil — a NO-OP, not a failure — when the spawn has no GitHub link: a spawn with no
+	// github mount has no token to push, and the sidecar rejects a token-less push with a 400.
+	// Every other error is real, and the create path is FAIL-CLOSED on it.
+	PushCredentials(ctx context.Context, spawnID, controlURL, controlToken string) error
 }
 
 // JournalKeyReceiver injects an owner-delivered Kopia repo password into the
@@ -1641,6 +1651,19 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		if probeErr := sidecarReadyProbe(ctx, h.PodIP, m.cfg.SidecarPort+1); probeErr != nil {
 			cleanupPreStoreFailure(h, floorIP)
 			return nil, fmt.Errorf("sidecar readiness gate: %w", probeErr)
+		}
+	}
+
+	// GitHub credential push (sp-2tx8.9 §3.1): the node DELIVERS the per-spawn MITM CA + a live
+	// GitHub token into the ready sidecar BEFORE the untrusted agent starts — the agent must never
+	// come up without a working proxy. FAIL-CLOSED: a failed push tears the pod down (this is the
+	// successor to the old semantics, where a failed sidecar-side FetchCA made the sidecar os.Exit(1)).
+	// A spawn with no GitHub link pushes nothing and returns nil. controlURL != "" mirrors the
+	// readiness probe's h.PodIP != "" guard (controlURL is derived from h.PodIP above).
+	if m.ghControl != nil && controlURL != "" {
+		if perr := m.ghControl.PushCredentials(ctx, id, controlURL, controlToken); perr != nil {
+			cleanupPreStoreFailure(h, floorIP)
+			return nil, fmt.Errorf("github credential push (fail-closed): %w", perr)
 		}
 	}
 

@@ -8,12 +8,25 @@ import (
 	"testing"
 )
 
-// mockGitHubControlServer records Serve/Stop/SpawnCACert calls for assertions.
+// mockGitHubControlServer records Serve/Stop/SpawnCACert/PushCredentials calls for assertions.
 type mockGitHubControlServer struct {
 	mu        sync.Mutex
 	serveArgs []ControlTransport
 	stopArgs  []string
 	serveErr  error
+
+	pushArgs []pushCall
+	pushErr  error
+	// onPush, if set, is called synchronously from PushCredentials before it returns — a test hook
+	// for asserting push-then-StartAgent ordering against the fake backend's op log.
+	onPush func()
+}
+
+// pushCall records one PushCredentials invocation.
+type pushCall struct {
+	spawnID      string
+	controlURL   string
+	controlToken string
 }
 
 func (m *mockGitHubControlServer) Serve(t ControlTransport) error {
@@ -31,6 +44,24 @@ func (m *mockGitHubControlServer) Stop(spawnID string) {
 
 func (m *mockGitHubControlServer) SpawnCACert(spawnID string) ([]byte, error) {
 	return []byte("fake-ca-cert"), nil
+}
+
+func (m *mockGitHubControlServer) PushCredentials(_ context.Context, spawnID, controlURL, controlToken string) error {
+	m.mu.Lock()
+	m.pushArgs = append(m.pushArgs, pushCall{spawnID: spawnID, controlURL: controlURL, controlToken: controlToken})
+	err := m.pushErr
+	onPush := m.onPush
+	m.mu.Unlock()
+	if onPush != nil {
+		onPush()
+	}
+	return err
+}
+
+func (m *mockGitHubControlServer) pushCalls() []pushCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]pushCall(nil), m.pushArgs...)
 }
 
 func (m *mockGitHubControlServer) lastServe() (ControlTransport, bool) {

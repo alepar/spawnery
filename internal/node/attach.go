@@ -204,7 +204,6 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	backoff := minBackoff
 	secretReplay := newSecretDeliveryReplay()
 	githubRefresh := newGitHubRefresher(cfg.GitHubMint)
-	safego.Go("node.github-refresh", func() { githubRefresh.run(ctx) })
 	// Create the GitHub credential control server only when a mint client is configured.
 	// It is process-lived (like githubRefresh): per-spawn listeners survive CP reconnects.
 	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
@@ -214,8 +213,25 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 			slog.Warn("node: SpawnCARoot is unset; per-spawn MITM CAs are memory-only and will NOT survive a spawnlet restart")
 		}
 		ghControl = newGitHubControlServer(githubRefresh, caStore{dir: cfg.SpawnCARoot})
+		// Push plane (sp-2tx8.9 §3.1): the node DIALS the sidecar's control listener to deliver the CA +
+		// token. The lookup resolves the spawn's endpoint from the Manager's store, which is how the two
+		// asynchronous delivery points (rotation, re-adopt) find a pod they did not create.
+		ghControl.doer = &http.Client{Timeout: controlPostTimeout}
+		ghControl.lookup = func(spawnID string) (string, string, bool) {
+			sp, ok := mgr.Store().Get(spawnID)
+			if !ok || sp.ControlURL == "" {
+				return "", "", false
+			}
+			return sp.ControlURL, sp.ControlToken, true
+		}
+		// Delivery point 2 — ON ROTATION: hook the refresher's existing ~8h schedule. Set BEFORE
+		// githubRefresh.run's goroutine can fire a Tick.
+		githubRefresh.onRotate = ghControl.PushAsync
 		mgr.SetGitHubControlServer(ghControl)
 	}
+	// Started AFTER the onRotate wiring above so a Tick can never fire before the hook is set (a data
+	// race the race detector would catch otherwise).
+	safego.Go("node.github-refresh", func() { githubRefresh.run(ctx) })
 	for {
 		start := time.Now()
 		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, readopt, githubRefresh, ghControl)
@@ -301,6 +317,14 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		return err
 	}
 	slog.Info("node: connected to CP", "url", cfg.CPURL, "id", cfg.NodeID, "class", cfg.NodeClass)
+
+	// The credential-condition reporter is CP-connection-scoped: installing it here also REPLAYS any
+	// sticky STALE/RELINK_REQUIRED computed while the node was disconnected (sp-2tx8.9 §4). Installed
+	// after Register so the CP has the node bound before any spawn status arrives.
+	if ghControl != nil {
+		ghControl.SetStatusReporter(a.reportGitHubCredentialStatus)
+	}
+
 	safego.Go("node.heartbeat-loop", func() { a.heartbeatLoop(connCtx) })
 
 	// Re-adoption (SE3 §4.2): report the pods this node's runtime still has and apply the CP's per-spawn
@@ -482,6 +506,18 @@ func hasGitHubTokenSecret(secrets []*nodev1.SealedSecret) bool {
 // report-back path; without it cross-node resume pinning is inert (spec §4).
 func (a *attacher) statusActive(spawnID, baseImageDigest string) {
 	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{SpawnId: spawnID, Phase: nodev1.SpawnPhase_ACTIVE, BaseImageDigest: baseImageDigest}}})
+}
+
+// reportGitHubCredentialStatus reports the spawn's GitHub credential CONDITION to the CP (sp-2tx8.9 §4.1).
+// Phase is deliberately left UNSPECIFIED: the spawn's lifecycle phase is unchanged (a spawn with a stale
+// token is still healthy for everything that is not git), and the CP persists the condition off any status
+// message — while an ACTIVE phase here would re-emit spawn_create telemetry and clear provisioning state.
+func (a *attacher) reportGitHubCredentialStatus(spawnID string, st nodev1.GitHubCredentialStatus) {
+	_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_Status{Status: &nodev1.SpawnStatus{
+		SpawnId:                spawnID,
+		Phase:                  nodev1.SpawnPhase_SPAWN_PHASE_UNSPECIFIED,
+		GithubCredentialStatus: st,
+	}}})
 }
 
 // zeroKey is the map key for a spawn's session #0 (the primary).

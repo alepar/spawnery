@@ -226,6 +226,16 @@ func (a *attacher) adoptPod(ctx context.Context, mp runtime.ManagedPod, ad *node
 	// Re-register the spawn's GitHub link(s) with the proactive refresher (sp-2tx8.3.5 D5): the
 	// refresher's state is in-memory and died with the previous process. Best-effort by construction.
 	a.noteGitHubLinksFromMounts(sp.ID, mp.Generation, st.GetMounts())
+	// Re-push the MITM CA + a live GitHub token into the still-running sidecar (sp-2tx8.9 §3.1, "on
+	// re-adopt"). Idempotent: the sidecar never stopped, so it still HAS its secrets — this covers a token
+	// that ROTATED while this node was down. Asynchronous and NON-FATAL, unlike the create-time push: the
+	// pod is already serving, and a spawn whose token cannot be re-delivered is still healthy for
+	// everything that is not git. The push loop reports STALE if it gives up. Must run AFTER the Note
+	// above (the refresher's link state died with the previous process; without it there is no token to
+	// mint) and AFTER Adopt (which put the Spawn — and its ControlURL/ControlToken — in the store).
+	if a.ghControl != nil {
+		a.ghControl.PushAsync(ctx, sp.ID)
+	}
 	// From here on, a failure must remove the spawn from the store again (mgr.Stop would TEAR THE POD DOWN
 	// through teardown — running the mount finalizers — which is not what a rebuild failure means: the
 	// caller's ReapPod captures first and does not finalize, and also removes the egress floor Adopt
