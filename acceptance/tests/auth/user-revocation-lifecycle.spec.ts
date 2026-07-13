@@ -6,6 +6,7 @@ import {
   WebCryptoSessionSigner,
 } from "@spawnery/client";
 import { refreshOAuthSession } from "../../src/auth/oauth-session";
+import { restoreAuthService } from "./auth-service-restoration";
 import {
   cpClient,
   decodeSessionArtifact,
@@ -340,14 +341,25 @@ test("user-revocation-lifecycle: logout closes ACP and MOSH; AS outage cannot ex
     expect(expiryClose.timestampMs).toBeGreaterThanOrEqual(signedExpiresAtMs - 2_000);
     expect(expiryClose.timestampMs).toBeLessThanOrEqual(signedExpiresAtMs + 20_000);
   } finally {
+    let restorationError: unknown;
     if (authsvcStopped) {
-      await ssh(cfg, "sudo systemctl start spawnery-authsvc").catch(() => {});
-      const refreshedCleanup = await establishCurrentSession(cfg).catch(() => undefined);
-      if (refreshedCleanup) cleanupToken = refreshedCleanup.accessToken;
+      try {
+        const refreshedCleanup = await restoreAuthService({
+          start: () => ssh(cfg, "sudo systemctl start spawnery-authsvc").then(() => undefined),
+          serviceState: () => ssh(cfg, "sudo systemctl is-active spawnery-authsvc || true"),
+          freshSession: () => establishCurrentSession(cfg),
+          wait: () => new Promise((resolve) => setTimeout(resolve, 500)),
+        });
+        cleanupToken = refreshedCleanup.accessToken;
+        authsvcStopped = false;
+      } catch (error) {
+        restorationError = error;
+      }
     }
     if (cleanupToken) {
       const cleanup = cpClient(cfg, cleanupToken);
       await Promise.all(createdSpawnIds.map((spawnId) => cleanup.deleteSpawn({ spawnId }).catch(() => {})));
     }
+    if (restorationError) throw restorationError;
   }
 });
