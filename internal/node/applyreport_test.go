@@ -11,6 +11,7 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentinstall/spec"
+	"spawnery/internal/runtime/fakepod"
 	"spawnery/internal/spawnlet"
 )
 
@@ -37,7 +38,7 @@ func startSpawnWithManifest(t *testing.T, spawnID string, manifest []byte) *node
 // SkillInstallReport is sent BEFORE the ERROR status, the pod is stopped, and ACTIVE is never
 // reached.
 func TestStartSpawn_MissingReportWithBundle_FailsSpawn(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.applyReportTimeout = 30 * time.Millisecond
@@ -87,7 +88,7 @@ func TestStartSpawn_MissingReportWithBundle_FailsSpawn(t *testing.T) {
 	}
 
 	// The pod must have been stopped (no leaked container).
-	if !be.wasStopped() {
+	if !podWasStopped(be) {
 		t.Error("pod backend Stop was not called after the fatal install-skills gate")
 	}
 }
@@ -96,7 +97,7 @@ func TestStartSpawn_MissingReportWithBundle_FailsSpawn(t *testing.T) {
 // bundle_ref groups tolerates a missing apply-report: the spawn still reaches ACTIVE, and a
 // SkillInstallReport with synthesized "unknown" entries is sent.
 func TestStartSpawn_MissingReportNoBundle_WarnsAndReachesActive(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.applyReportTimeout = 30 * time.Millisecond
@@ -123,7 +124,7 @@ func TestStartSpawn_MissingReportNoBundle_WarnsAndReachesActive(t *testing.T) {
 // writes a real apply-report.json (simulated here by writing directly to the staging dir the
 // real Manager materialized), and the spawn reaches ACTIVE carrying the applied-status entry.
 func TestStartSpawn_ReportArrivesOK_ReachesActive(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	mgr := newGooseManager(t, be)
 	a := newAttacher(mgr, fs)
@@ -173,7 +174,7 @@ func TestStartSpawn_ReportArrivesOK_ReachesActive(t *testing.T) {
 // not emit the install-skills milestone or a SkillInstallReport (regression guard: the gate must
 // stay off for the overwhelming majority of spawns that carry no skills).
 func TestStartSpawn_NoArtifacts_SkipsGateEntirely(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.startSpawn(context.Background(), &nodev1.StartSpawn{SpawnId: "sp1", AppRef: writeNodeApp(t), Model: "m"})
@@ -200,7 +201,7 @@ func alwaysDead(context.Context, string) (bool, error) { return false, nil }
 // the (generously large) applyReportTimeout — with a SkillInstallReport carrying outcome=ERROR and
 // an ERROR SpawnStatus whose Detail names the real reason, not a generic deadline.
 func TestStartSpawn_AgentGone_FailsFastWithReason(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.applyReportTimeout = 60 * time.Second // large budget: proves the fast-fail is NOT the timeout
@@ -241,7 +242,7 @@ func TestStartSpawn_AgentGone_FailsFastWithReason(t *testing.T) {
 		t.Errorf("ERROR status detail = %q, want it to name the agent-gone reason (spawnlet.ErrAgentGone)", errStatus.Detail)
 	}
 
-	if !be.wasStopped() {
+	if !podWasStopped(be) {
 		t.Error("pod backend Stop was not called after the agent-gone fast-fail")
 	}
 }
@@ -250,7 +251,7 @@ func TestStartSpawn_AgentGone_FailsFastWithReason(t *testing.T) {
 // with no bundle_ref groups — unlike a plain missing-report timeout (which only warns for a
 // no-bundle manifest), a confirmed-dead agent can never go ACTIVE regardless of bundle policy.
 func TestStartSpawn_AgentGone_FatalEvenWithNoBundle(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.applyReportTimeout = 60 * time.Second

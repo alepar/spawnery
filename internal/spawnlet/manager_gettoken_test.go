@@ -65,7 +65,7 @@ func sidecarEnvVal(env []string, key string) string {
 //   - adds a SidecarMount for the control dir
 //   - calls ghControl.Serve with Network="unix"
 func TestManagerGetTokenUDSLane(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 	overrideSidecarReadyProbe(t, nil) // sp-n7iy.5: probe added; stub so test doesn't dial 10.0.0.5
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -82,24 +82,24 @@ func TestManagerGetTokenUDSLane(t *testing.T) {
 	}
 
 	// Verify SIDECAR_GETTOKEN_UDS is in sidecar env.
-	if sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarGetTokenUDSEnv) == "" {
-		t.Fatalf("SIDECAR_GETTOKEN_UDS missing from sidecar env; env=%v", fb.podSpec.SidecarEnv)
+	if sidecarEnvVal(fb.PodSpec("sp-uds").SidecarEnv, SidecarGetTokenUDSEnv) == "" {
+		t.Fatalf("SIDECAR_GETTOKEN_UDS missing from sidecar env; env=%v", fb.PodSpec("sp-uds").SidecarEnv)
 	}
 
 	// Verify NO TCP vars.
-	if sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarGetTokenAddrEnv) != "" {
-		t.Fatalf("SIDECAR_GETTOKEN_ADDR must not be set in UDS lane; env=%v", fb.podSpec.SidecarEnv)
+	if sidecarEnvVal(fb.PodSpec("sp-uds").SidecarEnv, SidecarGetTokenAddrEnv) != "" {
+		t.Fatalf("SIDECAR_GETTOKEN_ADDR must not be set in UDS lane; env=%v", fb.PodSpec("sp-uds").SidecarEnv)
 	}
-	if sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarGetTokenBearerEnv) != "" {
-		t.Fatalf("SIDECAR_GETTOKEN_BEARER must not be set in UDS lane; env=%v", fb.podSpec.SidecarEnv)
+	if sidecarEnvVal(fb.PodSpec("sp-uds").SidecarEnv, SidecarGetTokenBearerEnv) != "" {
+		t.Fatalf("SIDECAR_GETTOKEN_BEARER must not be set in UDS lane; env=%v", fb.PodSpec("sp-uds").SidecarEnv)
 	}
 
 	// Verify a sidecar mount was added.
-	if len(fb.podSpec.SidecarMounts) == 0 {
+	if len(fb.PodSpec("sp-uds").SidecarMounts) == 0 {
 		t.Fatal("SidecarMounts empty in UDS lane; expected control dir bind-mount")
 	}
 	found := false
-	for _, mn := range fb.podSpec.SidecarMounts {
+	for _, mn := range fb.PodSpec("sp-uds").SidecarMounts {
 		if mn.ContainerPath == SidecarControlMountPath {
 			found = true
 			// The host control dir must exist and be 0711.
@@ -113,7 +113,7 @@ func TestManagerGetTokenUDSLane(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("no SidecarMount with ContainerPath=%s; mounts=%v", SidecarControlMountPath, fb.podSpec.SidecarMounts)
+		t.Fatalf("no SidecarMount with ContainerPath=%s; mounts=%v", SidecarControlMountPath, fb.PodSpec("sp-uds").SidecarMounts)
 	}
 
 	// Verify Serve was called with Network="unix".
@@ -135,7 +135,7 @@ func TestManagerGetTokenUDSLane(t *testing.T) {
 //   - does NOT add SidecarMounts for the control dir
 //   - calls ghControl.Serve with Network="tcp" and the correct bearer
 func TestManagerGetTokenTCPLane(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 	overrideSidecarReadyProbe(t, nil) // sp-n7iy.5: probe added; stub so test doesn't dial 10.0.0.5
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
@@ -152,26 +152,26 @@ func TestManagerGetTokenTCPLane(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	addr := sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarGetTokenAddrEnv)
+	addr := sidecarEnvVal(fb.PodSpec("sp-tcp").SidecarEnv, SidecarGetTokenAddrEnv)
 	if addr == "" {
-		t.Fatalf("SIDECAR_GETTOKEN_ADDR missing from sidecar env; env=%v", fb.podSpec.SidecarEnv)
+		t.Fatalf("SIDECAR_GETTOKEN_ADDR missing from sidecar env; env=%v", fb.PodSpec("sp-tcp").SidecarEnv)
 	}
 	if !strings.HasPrefix(addr, "127.0.0.1:") {
 		t.Fatalf("SIDECAR_GETTOKEN_ADDR = %q, want 127.0.0.1:<port>", addr)
 	}
 
-	bearer := sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarGetTokenBearerEnv)
+	bearer := sidecarEnvVal(fb.PodSpec("sp-tcp").SidecarEnv, SidecarGetTokenBearerEnv)
 	if bearer == "" {
-		t.Fatalf("SIDECAR_GETTOKEN_BEARER missing from sidecar env; env=%v", fb.podSpec.SidecarEnv)
+		t.Fatalf("SIDECAR_GETTOKEN_BEARER missing from sidecar env; env=%v", fb.PodSpec("sp-tcp").SidecarEnv)
 	}
 
 	// Verify NO UDS env var.
-	if sidecarEnvVal(fb.podSpec.SidecarEnv, SidecarGetTokenUDSEnv) != "" {
-		t.Fatalf("SIDECAR_GETTOKEN_UDS must not be set in TCP lane; env=%v", fb.podSpec.SidecarEnv)
+	if sidecarEnvVal(fb.PodSpec("sp-tcp").SidecarEnv, SidecarGetTokenUDSEnv) != "" {
+		t.Fatalf("SIDECAR_GETTOKEN_UDS must not be set in TCP lane; env=%v", fb.PodSpec("sp-tcp").SidecarEnv)
 	}
 
 	// Verify no SidecarMounts for the control dir.
-	for _, mn := range fb.podSpec.SidecarMounts {
+	for _, mn := range fb.PodSpec("sp-tcp").SidecarMounts {
 		if mn.ContainerPath == SidecarControlMountPath {
 			t.Fatalf("SidecarMount for %s must not be present in TCP lane", SidecarControlMountPath)
 		}
@@ -196,7 +196,7 @@ func TestManagerGetTokenTCPLane(t *testing.T) {
 // TestManagerGetTokenNoServer verifies that without SetGitHubControlServer no SIDECAR_GETTOKEN_*
 // env vars are injected and no panic occurs.
 func TestManagerGetTokenNoServer(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage:   "a",
 		SidecarImage: "s",
@@ -210,7 +210,7 @@ func TestManagerGetTokenNoServer(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	for _, e := range fb.podSpec.SidecarEnv {
+	for _, e := range fb.PodSpec("sp-nil").SidecarEnv {
 		if strings.HasPrefix(e, "SIDECAR_GETTOKEN") {
 			t.Fatalf("SIDECAR_GETTOKEN_* must not be injected without a control server; got %q", e)
 		}
@@ -219,7 +219,7 @@ func TestManagerGetTokenNoServer(t *testing.T) {
 
 // TestManagerStopCallsGhControlStop verifies that Stop triggers ghControl.Stop for the spawn.
 func TestManagerStopCallsGhControlStop(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	mock := &mockGitHubControlServer{}
 	overrideSidecarReadyProbe(t, nil) // sp-n7iy.5: probe added; stub so test doesn't dial 10.0.0.5
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{

@@ -92,6 +92,13 @@ type Config struct {
 	// set; nil in insecure/dev or when AS_URL is unset — then proactive refresh is disabled and spawns
 	// run on their delivered token until it lapses.
 	GitHubMint GitHubMintClient
+
+	// SpawnCARoot is a node-private directory (mode 0700, never bind-mounted into an agent) holding
+	// each spawn's persisted MITM CA keypair (sp-2tx8.3.5) — what lets a restarted node re-serve the
+	// SAME CA a still-running spawn's agent already trusts. Empty means memory-only: the CA does not
+	// survive a spawnlet restart (Run logs a Warn once when GitHubMint is also configured, since that
+	// combination silently degrades re-adoption's GitHub control plane).
+	SpawnCARoot string
 }
 
 // cpStream is the subset of the Connect bidi stream the attacher uses. *connect.BidiStreamForClient
@@ -129,7 +136,11 @@ type attacher struct {
 	subkeysMu    sync.Mutex
 	lastSubKeyID string // KeyID of the most recently published sub-key (heartbeat re-publishes only on change)
 
-	secretReplay  *secretDeliveryReplay
+	secretReplay *secretDeliveryReplay
+	// readopt is the process-lived spawnlet-restart re-adoption handshake state (SE3 §4.2, readopt.go).
+	// Built once in Run (like secretReplay) and threaded into every runOnce/attacher across reconnects: a
+	// stream that dies mid-handshake is retried on the next connection, not restarted from scratch.
+	readopt       *readoptState
 	githubRefresh *githubRefresher // process-lived; created in Run, shared across reconnects
 	// ghControl is the per-spawn GitHub credential control server (sp-n7iy.3). Created alongside
 	// githubRefresh in Run and injected into the Manager via SetGitHubControlServer. Shared across
@@ -185,11 +196,10 @@ type pendingClient struct {
 // waits for the CP at startup and reconnects after a disconnect (re-registering each time; the CP
 // reconciles a returning node). The Manager + its running spawns persist across reconnects.
 func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config) error {
-	// Reap pods leaked by a previous node process before serving — the in-mem store is empty at
-	// startup, so every spawnery-managed pod the runtime still has is an orphan.
-	if err := mgr.ReapOrphans(ctx); err != nil {
-		slog.Warn("node: reap orphans at startup", "err", err)
-	}
+	// NO reap at startup any more (SE3 §4.2): the pods a previous process left running are RE-ADOPTED,
+	// not destroyed. The handshake is process-lived — it survives CP reconnects, so a stream that dies
+	// mid-handshake is retried on the next connection.
+	readopt := newReadoptState()
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
 	secretReplay := newSecretDeliveryReplay()
@@ -200,12 +210,15 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 	// When GitHubMint is nil the field stays nil and the Manager omits all control-server logic.
 	var ghControl *githubControlServer
 	if cfg.GitHubMint != nil {
-		ghControl = newGitHubControlServer(githubRefresh)
+		if cfg.SpawnCARoot == "" {
+			slog.Warn("node: SpawnCARoot is unset; per-spawn MITM CAs are memory-only and will NOT survive a spawnlet restart")
+		}
+		ghControl = newGitHubControlServer(githubRefresh, caStore{dir: cfg.SpawnCARoot})
 		mgr.SetGitHubControlServer(ghControl)
 	}
 	for {
 		start := time.Now()
-		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, githubRefresh, ghControl)
+		err := runOnce(ctx, mgr, httpc, cfg, secretReplay, readopt, githubRefresh, ghControl)
 		if ctx.Err() != nil {
 			return ctx.Err() // clean shutdown
 		}
@@ -240,7 +253,7 @@ func registerMessage(cfg Config, running []*nodev1.RunningSpawn, signedSubKey []
 // runOnce serves a single CP connection: dial + Register + heartbeat + receive loop. It returns when
 // the connection ends (stream error) or ctx is cancelled. Everything connection-scoped (heartbeat,
 // pump sessions) is tied to connCtx so it stops cleanly when the connection ends.
-func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, githubRefresh *githubRefresher, ghControl *githubControlServer) error {
+func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, cfg Config, secretReplay *secretDeliveryReplay, readopt *readoptState, githubRefresh *githubRefresher, ghControl *githubControlServer) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -254,6 +267,7 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		sessions:         map[string]*sessionRegistry{},
 		pending:          map[sessionKey][]pendingClient{},
 		secretReplay:     secretReplay,
+		readopt:          readopt,
 		githubRefresh:    githubRefresh,
 		ghControl:        ghControl,
 		tmuxHasSessionFn: mgr.TmuxHasSession,
@@ -263,6 +277,21 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	// A disconnect unblocks every in-flight represignFunc waiter immediately (RECONNECT MID-FETCH,
 	// see represignFunc's doc comment) instead of making it burn the full represignTimeout.
 	defer a.represigns.failAll()
+
+	// Process shutdown (SIGTERM) — NOT a CP blip: detach from the spawns (close pumps/sessions) and leave
+	// every pod running for the next spawnlet to re-adopt (SE3 §4.1). On a plain connection drop we keep
+	// the pumps: Run reconnects.
+	//
+	// Note this closure captures ctx (the caller's), not connCtx — connCtx is always cancelled by its own
+	// defer cancel() above, so testing that one would detach on every CP disconnect too.
+	defer func() {
+		if ctx.Err() != nil {
+			if n := a.detachAll(); n > 0 {
+				slog.Info("node: shutting down — detached from running spawns (pods left running)", "pumps", n)
+			}
+		}
+	}()
+
 	client := nodev1connect.NewNodeServiceClient(httpc, cfg.CPURL, connect.WithGRPC())
 	a.stream = client.Attach(connCtx)
 
@@ -274,6 +303,11 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 	slog.Info("node: connected to CP", "url", cfg.CPURL, "id", cfg.NodeID, "class", cfg.NodeClass)
 	safego.Go("node.heartbeat-loop", func() { a.heartbeatLoop(connCtx) })
 
+	// Re-adoption (SE3 §4.2): report the pods this node's runtime still has and apply the CP's per-spawn
+	// verdict BEFORE serving any StartSpawn (see handle). Own goroutine: the CP's answer arrives on the
+	// receive loop below, so blocking here would deadlock it.
+	safego.Go("node.readopt", func() { a.reconcileManagedPods(connCtx) })
+
 	for {
 		msg, err := a.stream.Receive()
 		if err != nil {
@@ -281,6 +315,45 @@ func runOnce(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClien
 		}
 		a.handle(connCtx, msg)
 	}
+}
+
+// detachAll is the PROCESS-SHUTDOWN path (SE3 §4.1): the node closes its pumps, tmux relays and session
+// registries and returns — with every pod STILL RUNNING, so the next spawnlet process can re-adopt them.
+// It is called only when the process is going away (ctx cancelled), never on a CP disconnect: a reconnect
+// keeps its pumps.
+//
+// Pumps MUST be closed via Pump.stop(): stop() marks the pump stopped before closing the agent conn, which
+// is what suppresses exitFn — and session-0's exitFn calls mgr.Stop, i.e. it DESTROYS THE POD. Closing the
+// conn any other way would reclaim the container we are trying to preserve.
+//
+// Nothing is done to the in-container ACP/session servers: the agent is the ACP server and the node merely
+// dials it, so it survives the node's death and just sees a client disconnect. Lingering session servers are
+// reaped at re-adopt (§4.6). The CP stream needs no explicit close — runOnce's connCtx cancel ends it.
+//
+// Returns the number of pumps it closed.
+func (a *attacher) detachAll() int {
+	a.mu.Lock()
+	pumps := make([]*Pump, 0, len(a.pumps))
+	for k, p := range a.pumps {
+		pumps = append(pumps, p)
+		delete(a.pumps, k)
+	}
+	relays := make([]*tmuxRelay, 0, len(a.tmuxRelays))
+	for k, r := range a.tmuxRelays {
+		relays = append(relays, r)
+		delete(a.tmuxRelays, k)
+	}
+	a.sessions = map[string]*sessionRegistry{}
+	a.pending = map[sessionKey][]pendingClient{}
+	a.mu.Unlock()
+
+	for _, p := range pumps {
+		p.stop() // marks stopped first => exitFn (mgr.Stop!) does NOT fire
+	}
+	for _, r := range relays {
+		r.stop()
+	}
+	return len(pumps)
 }
 
 // runningSpawns maps the Manager's live inventory to proto RunningSpawn (all ACTIVE — the Manager
@@ -452,7 +525,15 @@ func (a *attacher) emitRoster(spawnID string) {
 func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 	switch m := msg.Msg.(type) {
 	case *nodev1.CPMessage_Start:
-		safego.Go("node.start-spawn", func() { a.startSpawn(ctx, m.Start) })
+		safego.Go("node.start-spawn", func() {
+			// Never start a pod while re-adoption is still deciding the fate of the pods we already have:
+			// a StartSpawn for a spawn id whose pod is still running would collide on the container name
+			// (Docker) or reap the stale same-named sandbox out from under the adoption (CRI).
+			if !a.awaitReadopt(ctx) {
+				return // the connection is going away
+			}
+			a.startSpawn(ctx, m.Start)
+		})
 	case *nodev1.CPMessage_Stop:
 		if a.staleGen(m.Stop.SpawnId, m.Stop.Generation) {
 			return
@@ -577,6 +658,14 @@ func (a *attacher) handle(ctx context.Context, msg *nodev1.CPMessage) {
 	case *nodev1.CPMessage_RepresignArtifactsResponse:
 		// Cheap locked-map routing to the waiting represignFunc call; inline (no goroutine needed).
 		a.represigns.resolve(m.RepresignArtifactsResponse)
+
+	case *nodev1.CPMessage_ReadoptDecisions:
+		// The CP's per-spawn adopt/reap/defer answer to our managed-pods report (SE3 §4.2). Handed to the
+		// reconcile goroutine, which is waiting on it; an answer for a request we are not waiting on is
+		// dropped there.
+		if a.readopt != nil {
+			a.readopt.deliver(m.ReadoptDecisions)
+		}
 	default:
 	}
 }
@@ -767,6 +856,31 @@ func rootfsArtifactsToProto(in []spawnlet.RootfsArtifact) []*nodev1.RootfsArtifa
 		})
 	}
 	return out
+}
+
+// agentDeathReclaim builds the Pump.exitFn fired when the in-container agent process exits unexpectedly
+// after the spawn went ACTIVE: report ERROR, drop the pump/session (only if we are still the registered
+// pump for spawnID — a pump that was already replaced or stopped must not undo someone else's state),
+// reclaim the active-capacity slot, and reap the crashed container. Shared by startSpawn and the
+// re-adoption ACP re-dial (readopt.go's adoptPod) — the agent can die post-adoption exactly the same way
+// it can die post-create, and both paths must react identically.
+func (a *attacher) agentDeathReclaim(ctx context.Context, spawnID string, p *Pump) func() {
+	return func() {
+		a.status(spawnID, nodev1.SpawnPhase_ERROR, "agent exited")
+		a.mu.Lock()
+		mine := a.pumps[zeroKey(spawnID)] == p
+		if mine {
+			delete(a.pumps, zeroKey(spawnID))
+			delete(a.sessions, spawnID)
+			if a.active > 0 {
+				a.active--
+			}
+		}
+		a.mu.Unlock()
+		if mine {
+			_ = a.mgr.Stop(context.WithoutCancel(ctx), spawnID) // reclaim the crashed container
+		}
+	}
 }
 
 func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
@@ -1058,22 +1172,7 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 	}
 	p := newPump(att.Stdin, att.Stdout)
 	p.closeFn = att.Close
-	p.exitFn = func() { // goose died after going active -> ERROR + reclaim (so capacity accounting stays honest)
-		a.status(st.SpawnId, nodev1.SpawnPhase_ERROR, "agent exited")
-		a.mu.Lock()
-		mine := a.pumps[zeroKey(st.SpawnId)] == p // only clean up if we're still the registered pump (not replaced/stopped)
-		if mine {
-			delete(a.pumps, zeroKey(st.SpawnId))
-			delete(a.sessions, st.SpawnId)
-			if a.active > 0 {
-				a.active--
-			}
-		}
-		a.mu.Unlock()
-		if mine {
-			_ = a.mgr.Stop(context.WithoutCancel(ctx), st.SpawnId) // reclaim the crashed container
-		}
-	}
+	p.exitFn = a.agentDeathReclaim(ctx, st.SpawnId, p) // goose died after going active -> ERROR + reclaim
 	a.mu.Lock()
 	a.applyForkBarrierLocked(st.SpawnId, p)
 	a.pumps[zeroKey(st.SpawnId)] = p

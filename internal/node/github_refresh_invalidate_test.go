@@ -162,7 +162,7 @@ func TestHandleGithubTokenRotatedCallsInvalidate(t *testing.T) {
 	seedEntry(r, "sp1", "sec-1", "initial-token", bigExpiry, base)
 
 	// Build an attacher with the refresher wired in, using the existing test helper.
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	a := newAttacher(mgr, &fakeCPStream{})
 	a.githubRefresh = r
 
@@ -210,7 +210,7 @@ func TestHandleGithubTokenRotatedStaleGenDropped(t *testing.T) {
 
 	// Register the spawn at generation=5 so the manager's SpawnGeneration("sp1") returns 5.
 	// Use mgr.Create (no agent started) — sufficient for the staleGen fence lookup.
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	if _, err := mgr.Create(ctx, "sp1", writeNodeApp(t), "m", "sp1", "app", 5); err != nil {
 		t.Fatalf("Create spawn: %v", err)
 	}

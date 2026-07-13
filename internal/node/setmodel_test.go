@@ -63,7 +63,7 @@ func putSpawn(mgr *spawnlet.Manager, id string, gen uint64, token, url string) {
 // Happy path: SetModel for the current generation POSTs to the spawn's ControlURL with the right bearer
 // token and JSON body, and replies ok=true echoing request_id.
 func TestSetModelPostsAndAcks(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	doer := stubDoerOK()
@@ -114,7 +114,7 @@ func TestSetModelPostsAndAcks(t *testing.T) {
 
 // Non-2xx from the sidecar -> ok=false with detail, request_id still echoed.
 func TestSetModelNon200Fails(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	a.ctrlHTTP = &stubDoer{status: 503}
@@ -139,7 +139,7 @@ func TestSetModelNon200Fails(t *testing.T) {
 
 // Stale generation (gen < live) -> dropped: no POST, no reply (matches StopSpawn fence convention).
 func TestSetModelStaleGenerationDropped(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	doer := stubDoerOK()
@@ -160,7 +160,7 @@ func TestSetModelStaleGenerationDropped(t *testing.T) {
 
 // Unknown spawn -> ok=false with detail, no POST, request_id echoed.
 func TestSetModelUnknownSpawnFails(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	doer := stubDoerOK()
@@ -185,7 +185,7 @@ func TestSetModelUnknownSpawnFails(t *testing.T) {
 
 // Empty ControlURL (pod has no IP) -> ok=false with detail, no POST, request_id echoed.
 func TestSetModelEmptyControlURLFails(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	doer := stubDoerOK()
@@ -211,7 +211,7 @@ func TestSetModelEmptyControlURLFails(t *testing.T) {
 
 // Transport error from the sidecar -> ok=false with detail, request_id echoed.
 func TestSetModelTransportErrorFails(t *testing.T) {
-	mgr := newGooseManager(t, &scriptedPodBackend{})
+	mgr := newGooseManager(t, fakeBackend(t))
 	fs := &fakeCPStream{}
 	a := newAttacher(mgr, fs)
 	a.ctrlHTTP = &stubDoer{err: io.ErrUnexpectedEOF}

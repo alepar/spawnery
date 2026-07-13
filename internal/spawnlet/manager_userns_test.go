@@ -21,7 +21,7 @@ func TestManagerUsernsMode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fb := &fakePodBackend{}
+			fb := fakeBackend(t)
 			m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 				AgentImage:      "a",
 				SidecarImage:    "s",
@@ -37,9 +37,9 @@ func TestManagerUsernsMode(t *testing.T) {
 			}
 
 			// AgentSpec.DropAllCaps must reflect the UsernsMode-derived CapPolicy.
-			if fb.agentSpec.DropAllCaps != tc.wantDropAllCaps {
+			if fb.AgentSpec("sp1").DropAllCaps != tc.wantDropAllCaps {
 				t.Errorf("AgentSpec.DropAllCaps = %v, want %v (UsernsMode=%q)",
-					fb.agentSpec.DropAllCaps, tc.wantDropAllCaps, tc.usernsMode)
+					fb.AgentSpec("sp1").DropAllCaps, tc.wantDropAllCaps, tc.usernsMode)
 			}
 
 			// RemapBase must return the configured base.
@@ -52,7 +52,7 @@ func TestManagerUsernsMode(t *testing.T) {
 
 // TestManagerRemapBaseGetter verifies the getter in isolation.
 func TestManagerRemapBaseGetter(t *testing.T) {
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage:      "a",
 		SidecarImage:    "s",
 		DataRoot:        t.TempDir(),
@@ -65,7 +65,7 @@ func TestManagerRemapBaseGetter(t *testing.T) {
 
 // Ensure the default (no UsernsMode set) still produces DropAllCaps=true (backward compat).
 func TestManagerUsernsDefault_DropAllCapsPreserved(t *testing.T) {
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
 		AgentImage:    "a",
 		SidecarImage:  "s",
@@ -77,7 +77,7 @@ func TestManagerUsernsDefault_DropAllCapsPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if !fb.agentSpec.DropAllCaps {
+	if !fb.AgentSpec("sp2").DropAllCaps {
 		t.Error("default config (no UsernsMode) must use DropAllCaps=true for backward compatibility")
 	}
 }

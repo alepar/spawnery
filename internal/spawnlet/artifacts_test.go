@@ -559,7 +559,7 @@ func TestManagerArtifactsMaterialized(t *testing.T) {
 	m := NewManager(runtime.NewFake(), ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot,
 	})
-	fb := &fakePodBackend{}
+	fb := fakeBackend(t)
 	m.pod = fb
 
 	spawnID := "sp-art-test"
@@ -584,7 +584,7 @@ func TestManagerArtifactsMaterialized(t *testing.T) {
 
 	// (b) AgentSpec.Mounts includes the artifacts bind-mount at ArtifactsMountPath
 	var found bool
-	for _, mt := range fb.agentSpec.Mounts {
+	for _, mt := range fb.AgentSpec(spawnID).Mounts {
 		if mt.ContainerPath == ArtifactsMountPath {
 			wantHost := filepath.Join(artifactsRoot, spawnID)
 			if mt.HostPath != wantHost {
@@ -595,7 +595,7 @@ func TestManagerArtifactsMaterialized(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("ArtifactsMountPath %q not found in agent mounts: %+v", ArtifactsMountPath, fb.agentSpec.Mounts)
+		t.Fatalf("ArtifactsMountPath %q not found in agent mounts: %+v", ArtifactsMountPath, fb.AgentSpec(spawnID).Mounts)
 	}
 
 	// (c) sensitive artifact landed under secrets root, not staging

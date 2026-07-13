@@ -50,9 +50,22 @@ func TestASConfig_FakeGitHubDefaultsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.FakeGitHubAddr != "" || cfg.FakeGitHubBaseURL != "" || cfg.FakeGitHubUsers != "" {
-		t.Errorf("expected empty defaults, got addr=%q base_url=%q users=%q",
-			cfg.FakeGitHubAddr, cfg.FakeGitHubBaseURL, cfg.FakeGitHubUsers)
+	if cfg.FakeGitHubAddr != "" || cfg.FakeGitHubBaseURL != "" || cfg.FakeGitHubUsers != "" || cfg.FakeGitHubToken != "" {
+		t.Errorf("expected empty defaults, got addr=%q base_url=%q users=%q token=%q",
+			cfg.FakeGitHubAddr, cfg.FakeGitHubBaseURL, cfg.FakeGitHubUsers, cfg.FakeGitHubToken)
+	}
+}
+
+func TestASConfig_FakeGitHubTokenEnvAlias(t *testing.T) {
+	cfg, err := loadASTest(t, "dev", map[string]string{
+		"AS_DEV":               "1",
+		"AS_FAKE_GITHUB_TOKEN": "gitea-pat-abc123",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.FakeGitHubToken != "gitea-pat-abc123" {
+		t.Errorf("FakeGitHubToken = %q, want gitea-pat-abc123", cfg.FakeGitHubToken)
 	}
 }
 

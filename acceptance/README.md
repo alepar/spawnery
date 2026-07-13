@@ -81,6 +81,19 @@ Preconditions beyond the base `.env.*` vars (see `.env.example`):
   loudly with a precondition error — never a silent skip.
 - `@agent` describe-blocks set `retries: 0` — see Cost ceiling above.
 
+## Node-admin scenarios (`@noderestart`)
+
+`tests/lifecycle/node-restart.spec.ts` proves the SE3 guarantee: `systemctl restart spawnery-node` (the
+documented upgrade path) must **not** destroy the node's running spawns — the spawn returns to ACTIVE on its
+own, its files and its in-flight processes survive, and in-agent git-over-HTTPS still works.
+
+It needs `ACC_NODE_RESTART_CMD` (a host shell command that restarts the target's spawnlet — see
+`.env.example`); unset, it fails loudly rather than skipping. Because a node restart disturbs **every** spawn
+on the box, the scenario is tagged `@noderestart` and must run in its **own serial pass**:
+`scripts/e2e-vm/run.sh` does that automatically (pass 1 `--grep-invert @noderestart`, pass 2
+`-g @noderestart --workers=1`). Against a target whose node you cannot restart, exclude it with
+`--grep-invert @noderestart`.
+
 ## Ownership & SLO
 
 Owner: the spawnery team (see CODEOWNERS once GH scenarios land). This suite runs on a schedule

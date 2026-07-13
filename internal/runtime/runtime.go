@@ -94,6 +94,12 @@ type ContainerRuntime interface {
 	ContainerIP(ctx context.Context, id string) (string, error)
 	// ListByLabel returns all containers (any state) carrying label key=value, with their labels.
 	ListByLabel(ctx context.Context, key, value string) ([]ContainerSummary, error)
+	// ContainerEnv returns the container's environment as K=V strings, exactly as it was started
+	// with. Re-adoption uses it to read back the per-pod secrets that live ONLY in the still-running
+	// sidecar's env (SIDECAR_CONTROL_TOKEN, SIDECAR_GETTOKEN_BEARER) after the node process that
+	// minted them died. The slice also carries the model API key — callers must extract the keys they
+	// need and MUST NOT log or forward it.
+	ContainerEnv(ctx context.Context, id string) ([]string, error)
 
 	// CommitContainer stops the container (without removing it) then commits its writable
 	// layer to a new image tagged ref. Used by the Docker delta-capture path (spec §2).
@@ -185,6 +191,14 @@ func (f *FakeRuntime) ContainerPID(_ context.Context, id string) (int, error) { 
 func (f *FakeRuntime) ContainerIP(_ context.Context, id string) (string, error) {
 	return "172.17.0.99", nil
 }
+func (f *FakeRuntime) ContainerEnv(_ context.Context, id string) ([]string, error) {
+	s, ok := f.byID[id]
+	if !ok {
+		return nil, fmt.Errorf("container %q not found", id)
+	}
+	return append([]string(nil), s.Env...), nil
+}
+
 func (f *FakeRuntime) ListByLabel(_ context.Context, key, value string) ([]ContainerSummary, error) {
 	var out []ContainerSummary
 	for id, s := range f.byID {

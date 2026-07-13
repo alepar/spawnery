@@ -558,6 +558,94 @@ func TestNewWithOptionsSeedsUsersAndDefault(t *testing.T) {
 	}
 }
 
+// --- FixedToken (sp-wwtc.4) --------------------------------------------------------------------
+
+// TestFixedTokenExchangeReturnsExactValue pins the mechanism sp-wwtc.4 depends on: with
+// Options.FixedToken set, exchange hands back that EXACT literal string as the access token
+// (instead of a random "gho_..." one), so a caller (the VM's AS_FAKE_GITHUB, wired to Gitea's own
+// pre-minted PAT) can make the fake's OAuth dance terminate in a credential a real downstream git
+// host will actually accept.
+func TestFixedTokenExchangeReturnsExactValue(t *testing.T) {
+	const fixed = "gitea-pat-abc123"
+	f := NewWithOptions(Options{FixedToken: fixed})
+	defer f.Close()
+
+	verifier := "test-verifier-string-of-sufficient-length"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code := authorizeCode(t, f, challenge)
+	out := exchange(t, f, code, f.ClientSecret, verifier)
+	if out["access_token"] != fixed {
+		t.Fatalf("access_token = %q, want fixed %q", out["access_token"], fixed)
+	}
+
+	// The fixed token is a genuinely live credential: /user resolves it.
+	req, _ := http.NewRequest(http.MethodGet, f.URL()+"/user", nil)
+	req.Header.Set("Authorization", "Bearer "+fixed)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/user with fixed token: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestFixedTokenRefreshReturnsExactValue pins the same guarantee across a refresh_token grant
+// (the node's proactive-refresh path, github_refresh.go) — a rotation must not silently drift the
+// live access token away from the fixed value the far end (Gitea) actually accepts.
+func TestFixedTokenRefreshReturnsExactValue(t *testing.T) {
+	const fixed = "gitea-pat-xyz789"
+	f := NewWithOptions(Options{FixedToken: fixed})
+	defer f.Close()
+
+	verifier := "test-verifier-string-of-sufficient-length"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code := authorizeCode(t, f, challenge)
+	out := exchange(t, f, code, f.ClientSecret, verifier)
+	refreshTok := out["refresh_token"]
+	if refreshTok == "" {
+		t.Fatalf("exchange did not issue a refresh token: %v", out)
+	}
+
+	refreshForm := url.Values{
+		"client_id":     {f.ClientID},
+		"client_secret": {f.ClientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshTok},
+	}
+	resp, err := http.PostForm(f.URL()+"/login/oauth/access_token", refreshForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var refreshed map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshed["access_token"] != fixed {
+		t.Fatalf("refreshed access_token = %v, want fixed %q", refreshed["access_token"], fixed)
+	}
+}
+
+// TestFixedTokenEmptyPreservesRandomBehavior pins back-compat: FixedToken's zero value ("") must
+// not change the historical random-token behavior for every existing caller.
+func TestFixedTokenEmptyPreservesRandomBehavior(t *testing.T) {
+	f := NewWithOptions(Options{})
+	defer f.Close()
+
+	verifier := "test-verifier-string-of-sufficient-length"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code := authorizeCode(t, f, challenge)
+	out := exchange(t, f, code, f.ClientSecret, verifier)
+	if !strings.HasPrefix(out["access_token"], "gho_") {
+		t.Fatalf("access_token = %q, want a random gho_-prefixed token", out["access_token"])
+	}
+}
+
 // TestNewBackCompat pins New()'s exact historical behavior: loopback bind, default user octocat
 // (1000001), no login_hint required.
 func TestNewBackCompat(t *testing.T) {

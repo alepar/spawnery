@@ -8,17 +8,6 @@ import (
 	"strconv"
 )
 
-// withRole returns a copy of base with the spawnery.role label set (so a Docker pod's sidecar +
-// agent are distinguishable when reconciling). nil base => a labels map with just the role.
-func withRole(base map[string]string, role string) map[string]string {
-	out := make(map[string]string, len(base)+1)
-	for k, v := range base {
-		out[k] = v
-	}
-	out[LabelRole] = role
-	return out
-}
-
 // DockerPodBackend implements PodBackend over the per-container ContainerRuntime (Docker): the
 // sidecar owns the pod network namespace and the agent joins it via NetnsOf. This is the runc path.
 type DockerPodBackend struct {
@@ -72,7 +61,7 @@ func (d *DockerPodBackend) StartPod(ctx context.Context, spec PodSpec) (*PodHand
 		NanoCPUs:    spec.Resources.NanoCPUs,
 		PidsLimit:   spec.Resources.PidsLimit,
 		Runtime:     spec.Runtime,
-		Labels:      withRole(spec.Labels, "sidecar"),
+		Labels:      WithRole(spec.Labels, RoleSidecar),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: %w", err)
@@ -119,7 +108,7 @@ func (d *DockerPodBackend) StartAgent(ctx context.Context, h *PodHandle, spec Ag
 		PidsLimit:   spec.Resources.PidsLimit,
 		Runtime:     spec.Runtime,
 		CapPolicy:   capPolicy,
-		Labels:      withRole(spec.Labels, "agent"),
+		Labels:      WithRole(spec.Labels, RoleAgent),
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
@@ -142,8 +131,14 @@ func (d *DockerPodBackend) Attach(ctx context.Context, h *PodHandle) (*AttachedS
 	return AttachTCP(ctx, net.JoinHostPort(h.PodIP, strconv.Itoa(d.port())))
 }
 
-// ListManaged groups all spawnery-managed containers by spawn id into ManagedPods (sidecar + agent
-// by role label), reading the generation/node-id off the labels.
+// ContainerEnv delegates to the underlying ContainerRuntime.
+func (d *DockerPodBackend) ContainerEnv(ctx context.Context, id string) ([]string, error) {
+	return d.rt.ContainerEnv(ctx, id)
+}
+
+// ListManaged groups all spawnery-managed containers by spawn id into ManagedPods (sidecar + agent by
+// role label), reading the generation/node-id off the labels and the pod IP off the netns-owning
+// sidecar. The ids and the IP are what a restarted node re-adopts the pod with (SE3 §4.5).
 func (d *DockerPodBackend) ListManaged(ctx context.Context) ([]ManagedPod, error) {
 	cs, err := d.rt.ListByLabel(ctx, LabelManaged, "true")
 	if err != nil {
@@ -161,7 +156,7 @@ func (d *DockerPodBackend) ListManaged(ctx context.Context) ([]ManagedPod, error
 			p = &ManagedPod{SpawnID: sid, Generation: gen, NodeID: c.Labels[LabelNodeID]}
 			pods[sid] = p
 		}
-		if c.Labels[LabelRole] == "agent" {
+		if c.Labels[LabelRole] == RoleAgent {
 			p.AgentID = c.ID
 		} else {
 			p.SidecarID = c.ID
@@ -169,6 +164,18 @@ func (d *DockerPodBackend) ListManaged(ctx context.Context) ([]ManagedPod, error
 	}
 	out := make([]ManagedPod, 0, len(pods))
 	for _, p := range pods {
+		// Best-effort: a STOPPED container has no IP (Docker's Stop does not remove, so stopped pods
+		// legitimately show up here), and rootless-podman-without-bridge never had one. An empty PodIP
+		// is reported as such; it is not an error, and it must not sink the whole inventory.
+		id := p.SidecarID
+		if id == "" {
+			id = p.AgentID
+		}
+		if id != "" {
+			if ip, ipErr := d.rt.ContainerIP(ctx, id); ipErr == nil {
+				p.PodIP = ip
+			}
+		}
 		out = append(out, *p)
 	}
 	return out, nil

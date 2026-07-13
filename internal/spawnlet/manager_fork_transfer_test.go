@@ -85,8 +85,8 @@ func TestForkTransferExportGeneratesKeySealsToVerifiedTargetAndRestoresSource(t 
 			},
 		},
 	}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 	src, ok := m.store.Get("sp-source")
 	if !ok {
 		t.Fatal("missing source")
@@ -166,8 +166,8 @@ func TestForkTransferExportFailsClosedWithoutPinnedRoot(t *testing.T) {
 	ctx := context.Background()
 	rec := &forkOpRecorder{}
 	j := &recordingForkJournal{rec: rec}
-	m, _ := newForkTestManager(t, rec, j)
-	putForkSource(t, m, "sp-source", 9)
+	m, fb := newForkTestManager(t, rec, j)
+	putForkSource(t, m, fb, "sp-source", 9)
 
 	targetFx := issueTransferNode(t, "node-2", "alice", pki.ClassSelfHosted)
 	targetHolder := subkey.NewNode(targetFx.key, "node-2", time.Hour)

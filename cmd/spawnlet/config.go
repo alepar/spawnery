@@ -21,9 +21,24 @@ type Spawnlet struct {
 	AgentBinaries    []string      `koanf:"agent_binaries"`
 	ContainerRuntime string        `koanf:"container_runtime"`
 	UsernsMode       string        `koanf:"userns_mode"`
+	// GetTokenListenIP is the IP the node binds for the per-spawn GitHub control listener on the TCP
+	// lane (any lane that is not userns-remap — notably CRI/runsc). It must be an address the NODE can
+	// bind AND every pod can reach: the CNI bridge gateway. Empty on the userns-remap lane, which uses a
+	// bind-mounted UNIX socket instead and ignores this.
+	//
+	// This mapping was MISSING: ManagerConfig.GetTokenListenIP was read by the manager and set only by
+	// tests, so in the shipped binary it was always empty and the TCP lane could never work — the control
+	// server fell back to binding a pod IP (which no host can bind) and every spawn died at setup-network.
+	// The manager's comment claimed "Set by cmd/spawnlet from GETTOKEN_LISTEN_IP"; cmd/spawnlet did not.
+	GetTokenListenIP string        `koanf:"gettoken_listen_ip"`
 	ASURL            string        `koanf:"as_url"`
 	EnrollToken      config.Secret `koanf:"enroll_token"`
 	PodDNS           []string      `koanf:"pod_dns"`
+	// SidecarCABundleFile is a DEV/TEST-ONLY knob (sp-wwtc.3): a host path to a merged CA bundle
+	// (system roots + an extra trusted CA) bind-mounted into the sidecar with SSL_CERT_FILE pointed
+	// at it. See spawnlet.ManagerConfig.SidecarCABundleFile for the full rationale. Empty (default,
+	// production) = no mount, no override.
+	SidecarCABundleFile string `koanf:"sidecar_ca_bundle_file"`
 
 	Node struct {
 		ID              string `koanf:"id"`
@@ -109,9 +124,11 @@ var spawnletEnvAliases = map[string]string{
 	"AGENT_BINARIES":                "agent_binaries",
 	"CONTAINER_RUNTIME":             "container_runtime",
 	"USERNS_MODE":                   "userns_mode",
+	"GETTOKEN_LISTEN_IP":            "gettoken_listen_ip",
 	"AS_URL":                        "as_url",
 	"ENROLL_TOKEN":                  "enroll_token",
 	"POD_DNS":                       "pod_dns",
+	"SIDECAR_CA_BUNDLE_FILE":        "sidecar_ca_bundle_file",
 	"NODE_ID":                       "node.id",
 	"NODE_CLASS":                    "node.class",
 	"NODE_OWNER":                    "node.owner",

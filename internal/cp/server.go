@@ -593,6 +593,10 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.models.deliver(m.SetModelResult)
 		case *nodev1.NodeMessage_SealJournalKeyResult:
 			s.upgradeWaiters.deliver(m.SealJournalKeyResult)
+		case *nodev1.NodeMessage_ManagedPods:
+			// A restarted spawnlet asking what to do with the pods it found still running (SE3 §4.2).
+			// nodeID is the stream's authoritative identity — never the report's self-asserted one.
+			s.handleManagedPodsReport(ctx, nodeID, sender, m.ManagedPods)
 		case *nodev1.NodeMessage_SuspendComplete:
 			// Route to the SuspendSpawn awaiting this spawn's persist markers. deliver returns true
 			// when delivered to a live gen-matched waiter; false when there is no live waiter (stall

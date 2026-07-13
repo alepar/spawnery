@@ -33,8 +33,9 @@ message NodeMessage {
     ForkSourceRestored            fork_source_restored = 16; // node -> CP: fork source is unpaused/restored; seed may still run
     ForkTransferExported          fork_transfer_exported = 17; // node -> CP: source-side cross-node fork transfer payload export
     ForkTransferImported          fork_transfer_imported = 18; // node -> CP: target-side cross-node fork transfer import complete
-    SkillInstallReport            skill_install_report  = 19; // node -> CP: apply-report envelope from the agent container's `agentinstall apply --report` (sp-mwco.2.7)
-    RepresignArtifactsRequest     represign_artifacts_request = 20; // node -> CP: mint fresh presigned GETs for by-ref skill artifacts staging on this node (sp-mwco.4.3)
+    ManagedPodsReport            managed_pods          = 19;  // node -> CP: pods observed at startup; asks adopt-or-reap (SE3 §4.2)
+    SkillInstallReport            skill_install_report  = 20; // node -> CP: apply-report envelope from the agent container's `agentinstall apply --report` (sp-mwco.2.7)
+    RepresignArtifactsRequest     represign_artifacts_request = 21; // node -> CP: mint fresh presigned GETs for by-ref skill artifacts staging on this node (sp-mwco.4.3)
   }
 }
 message CPMessage {
@@ -60,7 +61,8 @@ message CPMessage {
     ForkTransferImport           fork_transfer_import  = 19;            // CP -> node: target-side cross-node fork transfer import
     CancelForkTransfer           cancel_fork_transfer  = 20;            // CP -> node: cancel in-flight cross-node fork transfer work
     GitHubTokenRotatedSignal     github_token_rotated  = 21;            // CP -> node: token-free rotation heads-up (lazy invalidate + repull)
-    RepresignArtifactsResponse   represign_artifacts_response = 22;     // CP -> node: response to a RepresignArtifactsRequest (sp-mwco.4.3)
+    ManagedPodsDecisions         readopt_decisions     = 22;            // CP -> node: per-spawn adopt/reap/defer answer (SE3 §4.2)
+    RepresignArtifactsResponse   represign_artifacts_response = 23;     // CP -> node: response to a RepresignArtifactsRequest (sp-mwco.4.3)
   }
 }
 
@@ -598,4 +600,81 @@ message RepresignArtifactsResponse {
   string spawn_id                = 2;
   repeated PresignedObject objects = 3;
   string error                    = 4;
+}
+
+// --- SE3: spawnlet restart re-adoption handshake (sp-2tx8.3.3) ---------------
+//
+// A spawnlet restart leaves its pods RUNNING (gracefulDetachAll, sp-2tx8.3.2) but loses ALL per-spawn
+// in-memory state: the launch spec, the mount table, the mount finalizers, the journal key. The pods
+// carry only {spawn id, generation} in their labels. So on startup the node reports what it FOUND and
+// the CP — the source of truth for the spawn ledger — answers per spawn. The node NEVER self-adopts
+// (design §4.3): adoption requires the CP's confirmation, matched on generation, so a node returning
+// after its spawns were re-created elsewhere is told to reap and split-brain is not expressible.
+
+// node -> CP: every spawnery-managed pod this node's runtime still has at startup (from the container
+// labels), sent BEFORE the node serves. Pods labelled with a DIFFERENT node id are not ours and are
+// never reported (the node leaves them alone). request_id correlates the CP's ManagedPodsDecisions
+// answer; the node drops an answer whose request_id it is not waiting on.
+message ManagedPodsReport {
+  string node_id             = 1; // the reporting node; a mismatch with the stream's identity is ignored by the CP
+  repeated ObservedPod pods  = 2; // may be empty — the CP still answers, so the node never blocks
+  string request_id          = 3;
+}
+
+// One pod the node's runtime still has. Only the two facts the CP fences on: everything else the node
+// needs to rebuild the spawn comes BACK from the CP (design §3 — the CP re-delivers, the node persists
+// nothing).
+message ObservedPod {
+  string spawn_id   = 1;
+  uint64 generation = 2;
+}
+
+// CP -> node: one verdict per reported pod, echoing the report's request_id.
+//
+// A pod with NO decision in this answer — and an answer that never arrives at all — means DEFER: leave
+// the pod running, retry later. The destructive verdict is only ever reached from a positive, read-
+// confirmed fact about the CP ledger; never from the absence of one (design §4.3: a CP blip must never
+// become data loss).
+message ManagedPodsDecisions {
+  string request_id                   = 1;
+  repeated ReadoptDecision decisions  = 2;
+}
+
+// The CP's verdict for one reported pod.
+enum ReadoptVerdict {
+  READOPT_VERDICT_UNSPECIFIED = 0; // never sent by the CP; a node receiving it treats it as DEFER
+  READOPT_VERDICT_ADOPT       = 1; // the pod is a live episode of a live spawn: rebuild it (adopt is set)
+  READOPT_VERDICT_REAP        = 2; // unknown/dormant spawn, or a superseded generation: capture-before-reap it
+  READOPT_VERDICT_DEFER       = 3; // the CP cannot decide right now (store error, transient status, live claim): LEAVE IT RUNNING
+}
+
+message ReadoptDecision {
+  string spawn_id        = 1;
+  uint64 generation      = 2; // echoes the REPORTED generation this verdict is about; the node re-checks its own fence
+  ReadoptVerdict verdict = 3;
+  AdoptSpawn adopt       = 4; // set iff verdict == READOPT_VERDICT_ADOPT
+  string reason          = 5; // human-readable, for the node's log (e.g. "generation 3 superseded by 4")
+}
+
+// CP -> node: everything the node needs to REBUILD its in-memory Spawn for a pod that never stopped
+// (design §4.2). spec is the SAME launch spec a fresh start/resume carries — mount table, image, model,
+// runnable, mode, base digest, generation, asserted owner — so the node has one parser, not two.
+//
+// Four StartSpawn fields are deliberately EMPTY on an adopt:
+//   - auth: an adoption is CP-initiated. There is no client signed intent to verify, and the node MUST
+//     NOT run the A4 start-intent check against it.
+//   - artifacts: they were materialized into the pod at start and the pod is still running.
+//   - rootfs_artifacts: nothing to restore — the container never stopped.
+//   - secrets: the CP holds only OWNER-sealed ciphertext it cannot open (see journal_key_delivery_pending).
+//
+// journal_key_delivery_pending: true when this spawn has an OWNER-SEALED journaled mount. Its Kopia repo
+// password lived only in the node's memory and died with the process, and the CP cannot re-deliver it —
+// the ciphertext is sealed to the OWNER. So the CP re-arms the same key-travel path a migration uses: the
+// owner client fetches the ciphertext (GetJournalKeyCiphertext), unseals it locally, reseals it to this
+// node's sub-key and calls DeliverSecrets, which lands on the node as a SecretDelivery. The pod keeps
+// running throughout; only NEW journal snapshots wait on the key. NODE-LOCAL-custody mounts need nothing:
+// their password is sealed on this node's own disk under node.key and survived the restart.
+message AdoptSpawn {
+  StartSpawn spec                  = 1;
+  bool journal_key_delivery_pending = 2;
 }

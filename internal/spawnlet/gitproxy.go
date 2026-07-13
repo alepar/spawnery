@@ -49,7 +49,7 @@ var systemCABundlePaths = []string{
 var sidecarReadyTimeout = 10 * time.Second
 
 // sidecarReadyProbe is the seam for the sidecar-readiness gate before StartAgent. Replace in tests
-// to avoid real TCP dials (fakePodBackend returns the unreachable PodIP 10.0.0.5).
+// to avoid real TCP dials (fakepod returns the unreachable PodIP 10.0.0.5).
 var sidecarReadyProbe = defaultSidecarReadyProbe
 
 // proxyAddr returns the MITM proxy loopback address for the given sidecar port (port+sidecarProxyPortOffset).

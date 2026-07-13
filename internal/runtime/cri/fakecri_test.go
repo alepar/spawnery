@@ -14,6 +14,17 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
+// fakeContainer is one container in the fake's sandbox, with the state ListContainers reports.
+type fakeContainer struct {
+	id        string
+	sandboxID string
+	name      string // Metadata.Name ("sidecar"/"agent")
+	labels    map[string]string
+	state     runtimeapi.ContainerState
+	createdAt int64
+	envs      []*runtimeapi.KeyValue // -> ContainerStatus(Verbose) Info["info"].config.envs
+}
+
 // fakeCRI is an in-process CRI RuntimeService + ImageService for hermetic tests.
 type fakeCRI struct {
 	runtimeapi.UnimplementedRuntimeServiceServer
@@ -50,6 +61,19 @@ type fakeCRI struct {
 	stopSandbox       []string
 	removeSandbox     []string
 	nextID            int
+
+	containers          []*fakeContainer
+	failSandboxStatus   bool // inject a PodSandboxStatus failure (a transient CRI blip)
+	failListCtrs        bool // inject a ListContainers failure
+	failContainerStatus bool // inject a ContainerStatus failure
+	clock               int64
+}
+
+// tick returns an incrementing logical clock value, used to give fakeContainers a distinct CreatedAt.
+// Caller holds f.mu.
+func (f *fakeCRI) tick() int64 {
+	f.clock++
+	return f.clock
 }
 
 func (f *fakeCRI) Status(_ context.Context, _ *runtimeapi.StatusRequest) (*runtimeapi.StatusResponse, error) {
@@ -105,11 +129,24 @@ func (f *fakeCRI) RemovePodSandbox(_ context.Context, req *runtimeapi.RemovePodS
 	f.mu.Lock()
 	f.removeSandbox = append(f.removeSandbox, req.PodSandboxId)
 	f.removed = true
+	var kept []*fakeContainer
+	for _, c := range f.containers {
+		if c.sandboxID != req.PodSandboxId {
+			kept = append(kept, c)
+		}
+	}
+	f.containers = kept
 	f.mu.Unlock()
 	return &runtimeapi.RemovePodSandboxResponse{}, nil
 }
 
 func (f *fakeCRI) PodSandboxStatus(_ context.Context, req *runtimeapi.PodSandboxStatusRequest) (*runtimeapi.PodSandboxStatusResponse, error) {
+	f.mu.Lock()
+	fail := f.failSandboxStatus
+	f.mu.Unlock()
+	if fail {
+		return nil, fmt.Errorf("injected sandbox status failure")
+	}
 	info, _ := json.Marshal(struct {
 		Pid int `json:"pid"`
 	}{Pid: f.infoPid})
@@ -129,12 +166,70 @@ func (f *fakeCRI) CreateContainer(_ context.Context, req *runtimeapi.CreateConta
 	f.created = append(f.created, req.Config)
 	f.createdNames = append(f.createdNames, req.Config.GetMetadata().GetName())
 	f.createSandbox = append(f.createSandbox, req.PodSandboxId)
+	f.containers = append(f.containers, &fakeContainer{
+		id:        id,
+		sandboxID: req.PodSandboxId,
+		name:      req.Config.GetMetadata().GetName(),
+		labels:    req.Config.GetLabels(),
+		state:     runtimeapi.ContainerState_CONTAINER_CREATED,
+		createdAt: f.tick(),
+		envs:      req.GetConfig().GetEnvs(),
+	})
 	return &runtimeapi.CreateContainerResponse{ContainerId: id}, nil
+}
+
+// ContainerStatus reports the container's state and, when Verbose is requested, an Info["info"] blob
+// shaped like containerd's verbose ContainerStatus: {"config":{"envs":[{"key":..,"value":..}, ...]}}.
+// envFromContainerInfo (backend.go) is what parses this shape back out.
+func (f *fakeCRI) ContainerStatus(_ context.Context, req *runtimeapi.ContainerStatusRequest) (*runtimeapi.ContainerStatusResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failContainerStatus {
+		return nil, fmt.Errorf("injected container status failure")
+	}
+	var c *fakeContainer
+	for _, cc := range f.containers {
+		if cc.id == req.GetContainerId() {
+			c = cc
+			break
+		}
+	}
+	if c == nil {
+		return nil, fmt.Errorf("container %q not found", req.GetContainerId())
+	}
+	resp := &runtimeapi.ContainerStatusResponse{
+		Status: &runtimeapi.ContainerStatus{Id: c.id, State: c.state},
+	}
+	if req.GetVerbose() {
+		type kv struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}
+		envs := make([]kv, 0, len(c.envs))
+		for _, e := range c.envs {
+			envs = append(envs, kv{Key: e.GetKey(), Value: e.GetValue()})
+		}
+		info, _ := json.Marshal(struct {
+			Config struct {
+				Envs []kv `json:"envs"`
+			} `json:"config"`
+		}{Config: struct {
+			Envs []kv `json:"envs"`
+		}{Envs: envs}})
+		resp.Info = map[string]string{"info": string(info)}
+	}
+	return resp, nil
 }
 
 func (f *fakeCRI) StartContainer(_ context.Context, req *runtimeapi.StartContainerRequest) (*runtimeapi.StartContainerResponse, error) {
 	f.mu.Lock()
 	f.started = append(f.started, req.ContainerId)
+	for _, c := range f.containers {
+		if c.id == req.ContainerId {
+			c.state = runtimeapi.ContainerState_CONTAINER_RUNNING
+			break
+		}
+	}
 	f.mu.Unlock()
 	return &runtimeapi.StartContainerResponse{}, nil
 }
@@ -143,6 +238,14 @@ func (f *fakeCRI) StopContainer(_ context.Context, req *runtimeapi.StopContainer
 	f.mu.Lock()
 	fail := f.failStop
 	f.stopped = append(f.stopped, req.ContainerId)
+	if !fail {
+		for _, c := range f.containers {
+			if c.id == req.ContainerId {
+				c.state = runtimeapi.ContainerState_CONTAINER_EXITED
+				break
+			}
+		}
+	}
 	f.mu.Unlock()
 	if fail {
 		return nil, fmt.Errorf("injected stop failure")
@@ -153,8 +256,67 @@ func (f *fakeCRI) StopContainer(_ context.Context, req *runtimeapi.StopContainer
 func (f *fakeCRI) RemoveContainer(_ context.Context, req *runtimeapi.RemoveContainerRequest) (*runtimeapi.RemoveContainerResponse, error) {
 	f.mu.Lock()
 	f.removedContainers = append(f.removedContainers, req.ContainerId)
+	var kept []*fakeContainer
+	for _, c := range f.containers {
+		if c.id != req.ContainerId {
+			kept = append(kept, c)
+		}
+	}
+	f.containers = kept
 	f.mu.Unlock()
 	return &runtimeapi.RemoveContainerResponse{}, nil
+}
+
+// ListContainers honours the PodSandboxId and LabelSelector filter fields the backend uses.
+func (f *fakeCRI) ListContainers(_ context.Context, req *runtimeapi.ListContainersRequest) (*runtimeapi.ListContainersResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failListCtrs {
+		return nil, fmt.Errorf("injected list containers failure")
+	}
+	var out []*runtimeapi.Container
+	for _, c := range f.containers {
+		if sb := req.GetFilter().GetPodSandboxId(); sb != "" && c.sandboxID != sb {
+			continue
+		}
+		match := true
+		for k, v := range req.GetFilter().GetLabelSelector() {
+			if c.labels[k] != v {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		out = append(out, &runtimeapi.Container{
+			Id:           c.id,
+			PodSandboxId: c.sandboxID,
+			Metadata:     &runtimeapi.ContainerMetadata{Name: c.name},
+			Labels:       c.labels,
+			State:        c.state,
+			CreatedAt:    c.createdAt,
+		})
+	}
+	return &runtimeapi.ListContainersResponse{Containers: out}, nil
+}
+
+// addContainer injects a container that the backend did not create — used to model a pod created by an
+// OLDER node binary (no spawnery.role label) and a crashed predecessor agent that containerd kept.
+func (f *fakeCRI) addContainer(sandboxID, name string, labels map[string]string, state runtimeapi.ContainerState) string {
+	return f.addContainerWithEnv(sandboxID, name, labels, state, nil)
+}
+
+// addContainerWithEnv is addContainer plus the container's recorded env, for ContainerStatus(Verbose)
+// round-trip tests.
+func (f *fakeCRI) addContainerWithEnv(sandboxID, name string, labels map[string]string, state runtimeapi.ContainerState, envs []*runtimeapi.KeyValue) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.nextContainerID()
+	f.containers = append(f.containers, &fakeContainer{
+		id: id, sandboxID: sandboxID, name: name, labels: labels, state: state, createdAt: f.tick(), envs: envs,
+	})
+	return id
 }
 
 func (f *fakeCRI) ImageStatus(_ context.Context, req *runtimeapi.ImageStatusRequest) (*runtimeapi.ImageStatusResponse, error) {

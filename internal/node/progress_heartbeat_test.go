@@ -10,6 +10,7 @@ import (
 
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentinstall/spec"
+	"spawnery/internal/runtime/fakepod"
 )
 
 // resumeProgressFor returns the ResumeProgress messages sent for spawnID, in send order.
@@ -30,7 +31,7 @@ func resumeProgressFor(f *fakeCPStream, spawnID string) []*nodev1.ResumeProgress
 // emits a steady stream of ResumeProgress (phase "installing_skills") instead of staying silent
 // for the whole wait — the gap the CP's 30s resume stall window (sp-mwco.4.7) needs closed.
 func TestApplyReportWait_EmitsHeartbeatResumeProgress(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.applyReportTimeout = 300 * time.Millisecond
@@ -75,7 +76,7 @@ func TestApplyReportWait_EmitsHeartbeatResumeProgress(t *testing.T) {
 // be sent after the SkillInstallReport — proving heartbeatProgress's stop() joins the ticker
 // goroutine rather than merely signalling it, so message ordering stays deterministic.
 func TestApplyReportWait_NoProgressAfterReport(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	mgr := newGooseManager(t, be)
 	a := newAttacher(mgr, fs)
@@ -132,7 +133,7 @@ func TestApplyReportWait_NoProgressAfterReport(t *testing.T) {
 // it emits an immediate event, ticks on progressHeartbeat, stops cleanly (idempotent double-stop),
 // and a cancelled context stops the ticker goroutine without an explicit stop() call.
 func TestHeartbeatProgress_StopsAndIsIdempotent(t *testing.T) {
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.progressHeartbeat = 5 * time.Millisecond
@@ -180,7 +181,7 @@ func TestHeartbeatProgress_StopsAndIsIdempotent(t *testing.T) {
 // exceeding it alone).
 func TestTmuxReadyWait_EmitsHeartbeatResumeProgress(t *testing.T) {
 	var calls int
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	fs := &fakeCPStream{}
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.progressHeartbeat = 20 * time.Millisecond

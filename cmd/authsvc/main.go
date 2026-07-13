@@ -19,6 +19,10 @@
 //	                        is set.
 //	AS_FAKE_GITHUB_USERS    Comma-separated seed users for the fake's login_hint selection: "login[:id],...".
 //	                        The id derives (githubfake.DeriveUserID) when omitted. First entry is the default user.
+//	AS_FAKE_GITHUB_TOKEN    DEV/TEST-ONLY: makes the fake issue this EXACT string as every minted access token
+//	                        instead of a random one (githubfake.Options.FixedToken). The e2e-vm lane (sp-wwtc.4)
+//	                        sets this to a pre-minted Gitea PAT so the sidecar's GitHub MITM credential
+//	                        injection lands a token Gitea actually accepts. Empty (default): random tokens.
 //
 //	CA / PKI material (required unless AS_DEV=1):
 //	  AS_ROOT_CA_PEM                 Path to Root CA cert PEM (default: /etc/spawnery/as/root-ca.pem)
@@ -66,12 +70,30 @@
 //	                                 CP_AS_RPC_SECRET on the CP.
 //	  AS_DEV_RELAX_NODE_AUTH         "1" = DEV-ONLY (D3): trust the X-Spawnery-Dev-Node-Id header as the
 //	                                 node identity for GitHub mint, bypassing node mTLS. NEVER set in prod.
+//
+//	Node-mTLS listener (optional; makes nodeIdentityMiddleware reachable):
+//	  AS_TLS_CERT                    Server cert PEM path. AS_TLS_CERT and AS_TLS_KEY must both be
+//	                                 set or both be empty — setting exactly one is a fatal startup
+//	                                 error, never a silent downgrade to plaintext.
+//	  AS_TLS_KEY                     Server key PEM path.
+//	  AS_CLIENT_CA                   CA pool node client certs are verified against at the TLS
+//	                                 HANDSHAKE layer (tls.Config.ClientCAs, mode
+//	                                 VerifyClientCertIfGiven: a client cert is optional, but if
+//	                                 presented it must verify or the handshake fails). Distinct from
+//	                                 AS_ROOT_CA_PEM, which feeds nodeIdentityMiddleware's CHAIN
+//	                                 verification one layer up — usually the same file, different
+//	                                 layers. Unset with TLS on: no client cert can ever verify
+//	                                 (warns loudly; does not fail — TLS-without-node-clients is a
+//	                                 legitimate deployment). Both AS_TLS_CERT/AS_TLS_KEY unset
+//	                                 (the default): plain ListenAndServe, byte-for-byte unchanged.
 package main
 
 import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net/http"
@@ -162,6 +184,17 @@ func main() {
 		Handler: h2c.NewHandler(routed, &http2.Server{}),
 	}
 
+	// Optional TLS listener (sp-hsqs): makes the existing node-mTLS identity path
+	// (nodeIdentityMiddleware, unmodified) reachable. AS_TLS_CERT/AS_TLS_KEY both unset (the
+	// default) leaves srv.TLSConfig nil and behaviour below is plain ListenAndServe, byte-for-byte
+	// what shipped before. config.Validate already rejects exactly-one-of-cert/key set as a fatal
+	// config error, so by the time we get here it's "both set" or "both empty".
+	tlsConfig, err := buildTLSConfig(cfg)
+	if err != nil {
+		log.Fatalf("authsvc: tls: %v", err)
+	}
+	srv.TLSConfig = tlsConfig
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -172,9 +205,61 @@ func main() {
 	}()
 
 	log.Printf("authsvc listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if tlsConfig != nil {
+		err = srv.ListenAndServeTLS("", "")
+	} else {
+		err = srv.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		log.Fatalf("authsvc: %v", err)
 	}
+}
+
+// buildTLSConfig returns nil (plain HTTP; today's behaviour, unchanged) when tls.cert and tls.key
+// are both unset. When set, it returns a server TLS config with ClientAuth:
+// VerifyClientCertIfGiven — a client certificate is OPTIONAL (browsers/CLIs on the OAuth and
+// device-flow routes present none and are unaffected), but if one IS presented it must chain to
+// tls.client_ca or the handshake fails outright. This is what makes
+// nodeIdentityMiddleware's r.TLS.PeerCertificates read reachable at all; the middleware itself is
+// untouched.
+//
+// It re-checks the exactly-one-of-cert/key invariant defensively (AS.Validate already enforces it
+// on the config-load path) so this function is also correct when called directly, e.g. from tests.
+func buildTLSConfig(cfg *AS) (*tls.Config, error) {
+	if cfg.TLS.Cert == "" && cfg.TLS.Key == "" {
+		return nil, nil
+	}
+	if cfg.TLS.Cert == "" || cfg.TLS.Key == "" {
+		return nil, fmt.Errorf("tls.cert and tls.key must both be set or both be empty")
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+	if err != nil {
+		return nil, fmt.Errorf("load tls.cert/tls.key: %w", err)
+	}
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"},
+	}
+	if cfg.TLS.ClientCA == "" {
+		// TLS-without-node-clients is a legitimate deployment (browsers/CLIs only) — warn, don't fail.
+		log.Printf("authsvc: WARNING — tls enabled but tls.client_ca is unset: no presented client " +
+			"certificate can ever verify, so node identity can never be established (browser/CLI " +
+			"traffic is unaffected)")
+		return tlsConfig, nil
+	}
+	pemBytes, err := os.ReadFile(cfg.TLS.ClientCA)
+	if err != nil {
+		return nil, fmt.Errorf("read tls.client_ca: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("tls.client_ca %s: no certificates found", cfg.TLS.ClientCA)
+	}
+	tlsConfig.ClientCAs = pool
+	log.Printf("authsvc: TLS listener enabled on %s (client cert optional; presented certs verified against tls.client_ca)", cfg.Listen)
+	return tlsConfig, nil
 }
 
 // buildService loads the AS's material and returns a fully-wired Service.
@@ -243,9 +328,10 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 			return nil, fmt.Errorf("authsvc: %w", err)
 		}
 		fake := githubfake.NewWithOptions(githubfake.Options{
-			Addr:    cfg.FakeGitHubAddr,
-			BaseURL: cfg.FakeGitHubBaseURL,
-			Users:   seedUsers,
+			Addr:       cfg.FakeGitHubAddr,
+			BaseURL:    cfg.FakeGitHubBaseURL,
+			Users:      seedUsers,
+			FixedToken: cfg.FakeGitHubToken,
 		})
 		if cfg.FakeGitHubAddr != "" {
 			log.Printf("authsvc: using in-process fake GitHub (dev/CI only), reachable at %s", fake.URL())

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	nodev1 "spawnery/gen/node/v1"
+	"spawnery/internal/runtime/fakepod"
 )
 
 // newRepresignTestAttacher returns an attacher wired for represignFunc tests: newAttacher's
@@ -14,7 +15,7 @@ import (
 // tests that exercise the re-presign seam).
 func newRepresignTestAttacher(t *testing.T, fs *fakeCPStream) *attacher {
 	t.Helper()
-	be := &scriptedPodBackend{script: scriptGoose}
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
 	a := newAttacher(newGooseManager(t, be), fs)
 	a.represigns = newRepresignPending()
 	return a

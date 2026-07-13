@@ -24,6 +24,13 @@ type AS struct {
 	FakeGitHubAddr    string `koanf:"fake_github_addr"`     // bind addr for reachable mode, e.g. "0.0.0.0:9099"
 	FakeGitHubBaseURL string `koanf:"fake_github_base_url"` // advertised base URL; required when Addr is set
 	FakeGitHubUsers   string `koanf:"fake_github_users"`    // "alice:2000001,bob" or "alice,bob" (id derived when omitted)
+	// FakeGitHubToken, when set, makes the fake issue this EXACT string as every minted access
+	// token instead of a random one (githubfake.Options.FixedToken). DEV/TEST-ONLY: the e2e-vm
+	// lane (sp-wwtc.4) sets this to a Gitea PAT it minted at provision time, so the sidecar's
+	// GitHub MITM proxy injection (Authorization: Basic base64("x-access-token:"+token)) — the real,
+	// non-optional production injection path — lands a credential Gitea actually accepts. Empty
+	// (the default) preserves the historical random-token behavior everywhere else.
+	FakeGitHubToken string `koanf:"fake_github_token"`
 
 	CA struct {
 		RootPEM          string `koanf:"root_pem"`
@@ -68,6 +75,18 @@ type AS struct {
 	} `koanf:"cp"`
 
 	DevRelaxNodeAuth bool `koanf:"dev_relax_node_auth"`
+
+	// TLS makes the node-mTLS identity path (nodeIdentityMiddleware) reachable in the shipped
+	// binary. Cert/Key are the server identity; both empty (the default) is a fatal-error-free
+	// no-op that keeps today's plain ListenAndServe byte-for-byte. ClientCA is the
+	// HANDSHAKE-level pool that a presented client cert is verified against — distinct from
+	// ca.root_pem, which feeds nodeIdentityMiddleware's CHAIN verification one layer up. They
+	// will usually be the same file, but they are different layers.
+	TLS struct {
+		Cert     string `koanf:"cert"`
+		Key      string `koanf:"key"`
+		ClientCA string `koanf:"client_ca"`
+	} `koanf:"tls"`
 }
 
 // derive fills origin/callback/redirect fields from Common.PublicURL when they are left empty. An
@@ -126,6 +145,13 @@ func (c AS) Validate() error {
 			return fmt.Errorf("github.client_secret is required when not using fake_github")
 		}
 	}
+	// tls.cert and tls.key gate the optional TLS listener: both empty is the plain-HTTP default,
+	// both set turns TLS on, but exactly ONE set is a half-configured listener that would quietly
+	// serve HTTP — the single worst outcome for an auth service, so it is fatal here rather than a
+	// silent downgrade.
+	if (c.TLS.Cert == "") != (c.TLS.Key == "") {
+		return fmt.Errorf("tls.cert and tls.key must both be set or both be empty (half-configured TLS is not a silent downgrade to plaintext)")
+	}
 	return nil
 }
 
@@ -138,6 +164,7 @@ var asEnvAliases = map[string]string{
 	"AS_FAKE_GITHUB_ADDR":            "fake_github_addr",
 	"AS_FAKE_GITHUB_BASE_URL":        "fake_github_base_url",
 	"AS_FAKE_GITHUB_USERS":           "fake_github_users",
+	"AS_FAKE_GITHUB_TOKEN":           "fake_github_token",
 	"AS_LISTEN":                      "listen",
 	"AS_ALLOWED_ORIGINS":             "allowed_origins",
 	"AS_ROOT_CA_PEM":                 "ca.root_pem",
@@ -166,4 +193,7 @@ var asEnvAliases = map[string]string{
 	"AS_CP_RPC_SECRET":               "cp.rpc_secret",
 	"AS_CP_SECRET":                   "cp.secret",
 	"AS_DEV_RELAX_NODE_AUTH":         "dev_relax_node_auth",
+	"AS_TLS_CERT":                    "tls.cert",
+	"AS_TLS_KEY":                     "tls.key",
+	"AS_CLIENT_CA":                   "tls.client_ca",
 }

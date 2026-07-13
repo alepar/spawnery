@@ -317,6 +317,59 @@ test-cri-delta:
         BASE_IMAGE=docker.io/library/debian:stable \
         /tmp/cde2e.test -test.run TestCRIDeltaOnlyRoundTrip -test.v -test.count=1
 
+# PodBackend cross-lane CONTRACT suite on the CRI lane (sp-2tx8.1.3). Stands up a DEDICATED containerd
+# WITH the CRI plugin + a CNI bridge (the test-cri-delta containerd has neither, so it cannot run a pod
+# sandbox), imports the fixture images into the k8s.io namespace, and runs the cri_delta_e2e contract arm
+# as root. Needs: root, containerd + ctr + runc on the host, CNI plugins in /opt/cni/bin, and the images
+# (`make images` in the dev distrobox). Set RUNTIME_HANDLER=runsc to run the arm under gVisor instead.
+test-cri-contract:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sock=/run/spawnery-ctr8/c.sock; root=/var/tmp/spawnery-ctr8
+    handler="${RUNTIME_HANDLER:-runc}"
+    images_tar="${IMAGES_TAR:-}"
+    go test -tags cri_delta_e2e -c -o /tmp/cri-contract.test ./internal/runtime/cri/
+    if [ -z "$images_tar" ]; then
+        images_tar=/tmp/spawnery-contract-images.tar
+        docker save spawnery/stubagent:dev spawnery/sidecar:dev -o "$images_tar"
+    fi
+    sudo mkdir -p "$root/root" /run/spawnery-ctr8 "$root/cni"
+    printf '%s\n' \
+        'version = 3' \
+        "root = \"$root/root\"" \
+        'state = "/run/spawnery-ctr8"' \
+        '[grpc]' \
+        "  address = \"$sock\"" \
+        "[plugins.'io.containerd.cri.v1.runtime'.containerd]" \
+        '  default_runtime_name = "runc"' \
+        "  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]" \
+        '    runtime_type = "io.containerd.runc.v2"' \
+        "  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]" \
+        '    runtime_type = "io.containerd.runsc.v1"' \
+        "[plugins.'io.containerd.cri.v1.runtime'.cni]" \
+        '  bin_dir = "/opt/cni/bin"' \
+        "  conf_dir = \"$root/cni\"" \
+        | sudo tee "$root/config.toml" >/dev/null
+    printf '%s\n' \
+        '{' \
+        '  "cniVersion": "1.0.0", "name": "spawnery-contract",' \
+        '  "plugins": [' \
+        '    { "type": "bridge", "bridge": "spawnery-ct0", "isGateway": true, "ipMasq": true,' \
+        '      "ipam": { "type": "host-local", "subnet": "10.88.77.0/24",' \
+        '                "routes": [ { "dst": "0.0.0.0/0" } ] } }' \
+        '  ]' \
+        '}' \
+        | sudo tee "$root/cni/10-spawnery-contract.conflist" >/dev/null
+    cleanup(){ sudo systemctl stop spawnery-ctr8 2>/dev/null || true; sudo rm -rf "$root" /run/spawnery-ctr8; sudo ip link del spawnery-ct0 2>/dev/null || true; }
+    trap cleanup EXIT
+    sudo systemctl reset-failed spawnery-ctr8 2>/dev/null || true
+    sudo systemd-run --unit=spawnery-ctr8 --collect containerd --config "$root/config.toml"
+    for i in $(seq 1 60); do sudo ctr --address "$sock" version >/dev/null 2>&1 && break; sleep 0.5; done
+    sudo ctr --address "$sock" -n k8s.io images import "$images_tar"
+    sudo env "PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        CONTAINERD_ADDRESS="$sock" RUNTIME_HANDLER="$handler" \
+        /tmp/cri-contract.test -test.run TestPodBackendContract_CRI -test.v -test.count=1 -test.timeout 20m
+
 # --- lint (correctness-focused: bugs, not formatting/style) --------------
 
 # run all linters

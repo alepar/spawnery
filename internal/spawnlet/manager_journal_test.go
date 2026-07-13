@@ -165,7 +165,7 @@ func TestNodeLocalSuspendResumeRestoresPinnedManifest(t *testing.T) {
 
 	newMgr := func() (*Manager, *fakeJournal) {
 		fj := newFakeJournal("manifest-abc")
-		m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+		m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 			AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 		})
 		m.SetJournal(fj, stateDir)
@@ -210,7 +210,7 @@ func TestNodeLocalSuspendResumeRestoresPinnedManifest(t *testing.T) {
 func TestScratchOnlySpawnLeavesNoJournalState(t *testing.T) {
 	ctx := context.Background()
 	stateDir := t.TempDir()
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	fj := newFakeJournal("x")
@@ -243,7 +243,7 @@ func TestWatcherDrivesRequestSnapshotOnWrite(t *testing.T) {
 	ctx := context.Background()
 	app := writeJournalApp(t)
 	fj := newFakeJournal("manifest-x")
-	m := NewManagerWithBackend(&fakePodBackend{}, &fakeApplier{}, ManagerConfig{
+	m := NewManagerWithBackend(fakeBackend(t), &fakeApplier{}, ManagerConfig{
 		AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
 	})
 	m.SetJournal(fj, t.TempDir())
