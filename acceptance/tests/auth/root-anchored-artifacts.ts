@@ -218,11 +218,16 @@ export function vmRunMarkerVerificationCommand(expectedRunId: string): string {
     + "test \"$(sudo stat -c '%U:%G:%a' \"$marker\")\" = root:root:600 && echo verified";
 }
 
+export async function assertDisposableVM(
+  cfg: VMAuthConfig,
+  executeSSH: typeof ssh = ssh,
+): Promise<void> {
+  const verified = await executeSSH(cfg, vmRunMarkerVerificationCommand(cfg.vmRunId));
+  if (verified !== "verified") throw new Error("disposable VM run marker did not verify");
+}
+
 export async function setCPAuthMode(cfg: VMAuthConfig, mode: "prod" | "dev"): Promise<void> {
-  if (mode === "dev") {
-    const verified = await ssh(cfg, vmRunMarkerVerificationCommand(cfg.vmRunId));
-    if (verified !== "verified") throw new Error("disposable VM run marker did not verify");
-  }
+  if (mode === "dev") await assertDisposableVM(cfg);
   const plan = cpAuthModePlan(cfg, mode);
   await ssh(cfg, remoteArgv("sudo", "sh", "-c", plan.configureCommand));
   await ssh(cfg, "sudo systemctl daemon-reload && sudo systemctl restart spawnery-cp");

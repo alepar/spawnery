@@ -98,9 +98,8 @@ For a **single binary** hot-patch (e.g. testing a `spawnlet` change) you can `sc
 
 ## Running the suite against a VM you already have up
 
-`up.sh` writes `~/.local/state/spawnery-e2e/<runid>/acc.env` (base `ACC_*` values). To run the suite
-by hand against it, source that and set the validated env (this is exactly what `run.sh` step 3 does —
-see `scripts/e2e-vm/run.sh`):
+`up.sh` writes `~/.local/state/spawnery-e2e/<runid>/acc.env` (base `ACC_*` values). To run the
+non-destructive suite by hand against it, source that and set the validated environment:
 
 ```bash
 set -a; . ~/.local/state/spawnery-e2e/<runid>/acc.env; set +a
@@ -111,15 +110,19 @@ export ACC_AUTH_MODE=oauth-pop \
   ACC_CLOUD_ACCOUNT_ID=spawnery-system ACC_CRL_STATE="$PUBLIC/crl-state.json" \
   ACC_CRL_ISSUERS="$PUBLIC/service-intermediate.pem,$PUBLIC/cloud-intermediate.pem,$PUBLIC/self-hosted-intermediate.pem" \
   ACC_CRLS="$PUBLIC/service.crl.pem,$PUBLIC/cloud-node.crl.pem,$PUBLIC/self-hosted-node.crl.pem" \
-  ACC_DESTRUCTIVE_DEV_TOKEN=devtoken1 \
   ACC_TARGET_REF=vm ACC_BUILD_REF=vm ACC_SPAWNCTL_BIN="$PWD/bin/spawnctl" \
   ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app \
   ACC_AGENT_INFERENCE_AVAILABLE=0 ACC_APP_ID=spawnery/secret-app \
   ACC_TEST_MODEL=openai/gpt-4o-mini \
   ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000 \
   NODE_EXTRA_CA_CERTS=/var/lib/libvirt/images/spawnery-e2e/golden-ca.crt
-( cd acceptance && npx playwright test [tests/...] -g "cli" --reporter=list )
+( cd acceptance && npx playwright test [tests/...] --project=chromium -g "cli" --reporter=list )
 ```
+
+This manual path deliberately excludes the `destructive-root-artifacts` project. Its
+`ACC_E2E_VM_RUNID` is not a user-configurable safety assertion: `run.sh` writes the exact run ID to a
+root-owned, boot-local marker in its fresh VM and only then exports the matching acceptance value.
+Do not synthesize either side of that binding. Run the destructive project only through `run.sh`.
 
 ## Auth profiles
 

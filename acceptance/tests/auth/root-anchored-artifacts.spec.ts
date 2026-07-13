@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { createHash, X509Certificate } from "node:crypto";
 import { exportSpkiDer } from "@spawnery/client";
 import {
+  assertDisposableVM,
   chainHashes,
   cpClient,
   decodeSessionArtifact,
@@ -20,6 +21,7 @@ import {
 test("root-anchored-artifacts: CP and spawnlet enforce root, purpose, audience, and signer revocation", async () => {
   test.setTimeout(8 * 60_000);
   const cfg = loadVMAuthConfig();
+  await assertDisposableVM(cfg);
   const env = await ssh(cfg, "sudo cat /etc/spawnery/env.d/common.env");
   expect(env).toContain("CP_AUTH_ROOT_CA=/etc/spawnery/cp/root.pem");
   expect(env).toContain("NODE_ROOT_CA=/etc/spawnery/node/root.pem");

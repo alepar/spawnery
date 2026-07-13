@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  assertDisposableVM,
   cpAuthModePlan,
   cpAuthModeReadinessCommand,
   loadVMAuthConfig,
@@ -79,6 +80,24 @@ describe("destructive VM identity", () => {
       "marker=/run/spawnery-e2e-runid; "
       + "test \"$(sudo cat \"$marker\")\" = 'run-'\"'\"'quoted' && "
       + "test \"$(sudo stat -c '%U:%G:%a' \"$marker\")\" = root:root:600 && echo verified",
+    );
+  });
+
+  it("fails closed unless SSH confirms the exact disposable marker", async () => {
+    const cfg = loadVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
+    const commands: string[] = [];
+    const executeSSH = async (_cfg: typeof cfg, command: string) => {
+      commands.push(command);
+      return "wrong-run";
+    };
+    await expect(assertDisposableVM(cfg, executeSSH)).rejects.toThrow("did not verify");
+    expect(commands).toEqual([vmRunMarkerVerificationCommand("run-123")]);
+  });
+
+  it("gates the destructive spec before its first SSH operation", () => {
+    const source = readFileSync(new URL("./root-anchored-artifacts.spec.ts", import.meta.url), "utf8");
+    expect(source).toMatch(
+      /const cfg = loadVMAuthConfig\(\);\s+await assertDisposableVM\(cfg\);\s+const env = await ssh/,
     );
   });
 });
