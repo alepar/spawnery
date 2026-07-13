@@ -110,11 +110,20 @@ func patchModelJSON(body []byte, model string) ([]byte, error) {
 //	/control/model  POST {"model":"<openrouter-id>"} -> set the live override (empty clears it)
 //	/control/model  GET                              -> {"model":"<current override>"}
 //	/control/credentials POST {"upstream":"<url>","key":"<api-key>"} -> set live credentials
+//	/control/github POST {"ca_cert_pem","ca_key_pem","token","token_expires_at"} -> replace the
+//	                                                    pushed GitHub state (idempotent)
+//	/control/github/events GET                       -> long-poll: 200 {"event":"token_rejected"}
+//	                                                    when the MITM proxy saw a 401/403 from the
+//	                                                    GitHub upstream, 204 on a bounded timeout
 //	/control/status GET                              -> {"model":"<current override>","busy":bool,"active_requests":n}
 //
 // Auth: Authorization: Bearer <token>, constant-time compared against token.
 // Intended to run on its own http.Server bound to the pod IP (not loopback).
-func NewControlHandler(ov *Override, token string, trackers ...*Inflight) http.Handler {
+//
+// gh may be nil when the GitHub proxy is not enabled for this spawn; the /control/github* routes
+// then answer 503. The node PUSHES GitHub credentials here — the sidecar never fetches them
+// (spec: 2026-07-13-github-control-channel-inversion-design.md §3).
+func NewControlHandler(ov *Override, token string, gh *GitHubState, trackers ...*Inflight) http.Handler {
 	inflight := firstInflight(trackers)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/control/model", func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +170,57 @@ func NewControlHandler(ov *Override, token string, trackers ...*Inflight) http.H
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"applied": true, "upstream_set": strings.TrimSpace(body.Upstream) != ""})
+	})
+	mux.HandleFunc("/control/github", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if gh == nil {
+			http.Error(w, "github proxy not enabled", http.StatusServiceUnavailable)
+			return
+		}
+		var body struct {
+			CACertPEM      string `json:"ca_cert_pem"`
+			CAKeyPEM       string `json:"ca_key_pem"`
+			Token          string `json:"token"`
+			TokenExpiresAt int64  `json:"token_expires_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := gh.Set([]byte(body.CACertPEM), []byte(body.CAKeyPEM), body.Token, body.TokenExpiresAt); err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		slog.Info("sidecar: github credentials pushed", "token_expires_at", body.TokenExpiresAt)
+		writeJSON(w, http.StatusOK, map[string]any{"applied": true})
+	})
+	mux.HandleFunc("/control/github/events", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if gh == nil {
+			http.Error(w, "github proxy not enabled", http.StatusServiceUnavailable)
+			return
+		}
+		// Long-poll. The bounded timeout is load-bearing: it forces the node to re-dial, so a
+		// silently-dead connection cannot stop rejection detection forever (spec §3.2).
+		if gh.WaitRejection(r.Context(), gh.eventsTimeout) {
+			writeJSON(w, http.StatusOK, map[string]any{"event": "token_rejected"})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/control/status", func(w http.ResponseWriter, r *http.Request) {
 		if !authorized(r, token) {

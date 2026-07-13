@@ -1,8 +1,6 @@
 package sidecar
 
 import (
-	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -13,17 +11,16 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/elazarl/goproxy"
 )
 
 // GitHubProxyConfig holds the parameters for the GitHub MITM forward proxy.
 type GitHubProxyConfig struct {
-	// CA is the per-spawn CA used to sign JIT leaf certs for MITM'd hosts.
-	CA *spawnCA
-	// Control is the node credential client; used to pull the real token before each MITM request.
-	Control *githubControl
+	// State is the node-pushed GitHub credential state: the per-spawn MITM CA (used to sign JIT
+	// leaf certs) and the current access token. The sidecar NEVER fetches these — the node pushes
+	// them to /control/github before the agent starts (§3.1).
+	State *GitHubState
 	// UpstreamTransport is the HTTP transport used for the proxy→github upstream leg.
 	// Default (nil): a strict transport (no InsecureSkipVerify, Proxy=nil, HTTP/1.1 only) — T2 (§2.3).
 	// Tests inject a transport whose TLSClientConfig trusts the test upstream's cert.
@@ -76,7 +73,7 @@ func proxyErrResp(req *http.Request, body string) *http.Response {
 
 // newGitHubProxy builds a goproxy-based forward proxy that:
 //   - MITMs GitHub inject hosts (github.com, api.github.com, etc.) using per-spawn JIT leaf
-//     certs from cfg.CA and overwrites Authorization with the real token from cfg.Control;
+//     certs from cfg.State and overwrites Authorization with the token pushed to cfg.State;
 //   - CONNECT-tunnels presigned object stores and all non-GitHub hosts untouched;
 //   - uses cfg.UpstreamTransport for the upstream TLS leg — default is strict (T2 §2.3).
 func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
@@ -95,10 +92,14 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 		switch action {
 		case actionMitmBasic, actionMitmBearer:
 			hostname := hostOnly(host)
-			leaf, err := cfg.CA.leafFor(hostname)
+			leaf, err := cfg.State.LeafFor(hostname)
 			if err != nil {
-				slog.Warn("githubproxy: leafFor failed, falling back to plain tunnel", "host", hostname, "err", err)
-				return goproxy.OkConnect, host
+				// No CA pushed (or a broken one): REJECT. Falling back to a plain tunnel would send
+				// the agent to GitHub with its dummy token and no injection — a confusing 401 and a
+				// silent loss of the MITM. Fail closed instead (§3.1: the agent must never run
+				// without a working proxy).
+				slog.Error("githubproxy: no usable spawn CA, rejecting CONNECT", "host", hostname, "err", err)
+				return goproxy.RejectConnect, host
 			}
 			tlsCfg := &tls.Config{
 				Certificates: []tls.Certificate{*leaf},
@@ -118,18 +119,19 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 		}
 	}))
 
-	// maxRetryBodyBytes is the maximum request body size that the proxy will buffer for a
-	// potential 401-retry replay. Requests with larger bodies are streamed once (not retried).
-	const maxRetryBodyBytes = 4 << 20
-
 	// OnRequest DoFunc: perform the upstream round-trip ourselves (short-circuiting goproxy's own
-	// RoundTrip) so we can inspect the response status and retry on 401 with a force-refreshed
-	// token. When DoFunc returns a non-nil *http.Response, goproxy skips its own round-trip and
-	// streams our response to the client — so we own the full request/response lifecycle here.
+	// RoundTrip) so we can inspect the response status and record a token rejection. When DoFunc
+	// returns a non-nil *http.Response, goproxy skips its own round-trip and streams our response to
+	// the client — so we own the full request/response lifecycle here.
 	//
-	// NOTE: because we short-circuit, goproxy will NOT call RemoveProxyHeaders for us.
-	// Before each RoundTrip we MUST set req.RequestURI = "" (else stdlib errors "RequestURI can't
-	// be set in client requests") and strip hop-by-hop proxy headers.
+	// NOTE: because we short-circuit, goproxy will NOT call RemoveProxyHeaders for us. Before the
+	// RoundTrip we MUST set req.RequestURI = "" (else stdlib errors "RequestURI can't be set in
+	// client requests") and strip hop-by-hop proxy headers.
+	//
+	// There is NO in-request retry: the sidecar cannot re-mint a token (it has no channel to ask on
+	// — that was the whole point of the inversion). On a 401/403 it records the rejection, the node's
+	// long-poll picks it up, forces a re-mint and pushes a fresh token (§3.2). The upstream response
+	// is passed through to the agent unchanged.
 	proxy.OnRequest().DoFunc(func(req *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		host := req.Host
 		if host == "" {
@@ -141,99 +143,34 @@ func newGitHubProxy(cfg GitHubProxyConfig) http.Handler {
 			return req, nil
 		}
 
-		// --- initial token ---
-		tok, err := cfg.Control.Token(req.Context())
+		tok, _ := cfg.State.Token()
+		if tok == "" {
+			slog.Warn("githubproxy: no token pushed yet", "host", host, "action", action)
+			return req, proxyErrResp(req, "github proxy: no token has been pushed to the sidecar")
+		}
+
+		r2 := req.Clone(req.Context())
+		applyGitHubAuth(r2.Header, action, tok)
+		// Mandatory: stdlib transport errors if RequestURI is non-empty on a client request.
+		r2.RequestURI = ""
+		// Strip hop-by-hop / proxy headers that goproxy's RemoveProxyHeaders would normally drop.
+		r2.Header.Del("Accept-Encoding")
+		r2.Header.Del("Proxy-Connection")
+		r2.Header.Del("Connection")
+		r2.Header.Del("Proxy-Authorization")
+		r2.Header.Del("Proxy-Authenticate")
+
+		resp, err := upstream.RoundTrip(r2)
 		if err != nil {
-			diagBody := "github proxy: GetToken failed"
-			var ctrlErr *ControlTokenError
-			if errors.As(err, &ctrlErr) {
-				diagBody = fmt.Sprintf("github proxy: GetToken %d: %s", ctrlErr.StatusCode, strings.TrimSpace(ctrlErr.Body))
-			}
-			slog.Warn("githubproxy: GetToken failed", "host", host, "action", action, "detail", diagBody)
-			return req, proxyErrResp(req, diagBody)
-		}
-
-		// --- buffer request body for potential 401-retry replay ---
-		var bodyBytes []byte // non-nil iff body was fully buffered (retryable)
-		retryable := true
-		var bodyForSingleAttempt io.ReadCloser // used only when not retryable
-
-		if req.Body != nil && req.Body != http.NoBody {
-			data, readErr := io.ReadAll(io.LimitReader(req.Body, int64(maxRetryBodyBytes)+1))
-			if readErr != nil || int64(len(data)) > int64(maxRetryBodyBytes) {
-				// Body too large or unreadable — stream once, no retry.
-				retryable = false
-				bodyForSingleAttempt = io.NopCloser(io.MultiReader(bytes.NewReader(data), req.Body))
-			} else {
-				bodyBytes = data
-			}
-		}
-
-		// attempt performs one upstream round-trip: clone req, apply auth, strip proxy headers,
-		// set body, and call RoundTrip. The upstream transport is captured in the outer closure.
-		attempt := func(token string) (*http.Response, error) {
-			r2 := req.Clone(req.Context())
-			applyGitHubAuth(r2.Header, action, token)
-			// Mandatory: stdlib transport errors if RequestURI is non-empty on a client request.
-			r2.RequestURI = ""
-			// Strip hop-by-hop / proxy headers that goproxy's RemoveProxyHeaders would normally drop.
-			r2.Header.Del("Accept-Encoding")
-			r2.Header.Del("Proxy-Connection")
-			r2.Header.Del("Connection")
-			r2.Header.Del("Proxy-Authorization")
-			r2.Header.Del("Proxy-Authenticate")
-
-			if retryable {
-				if bodyBytes != nil {
-					r2.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					r2.ContentLength = int64(len(bodyBytes))
-					r2.GetBody = func() (io.ReadCloser, error) {
-						return io.NopCloser(bytes.NewReader(bodyBytes)), nil
-					}
-				} else {
-					r2.Body = nil
-					r2.ContentLength = 0
-				}
-			} else {
-				r2.Body = bodyForSingleAttempt
-				if req.ContentLength >= 0 {
-					r2.ContentLength = req.ContentLength // MultiReader yields exactly req.ContentLength bytes
-				} else {
-					r2.ContentLength = -1 // unknown: the body is a multi-reader stream
-				}
-			}
-
-			return upstream.RoundTrip(r2)
-		}
-
-		// --- first attempt ---
-		resp, err := attempt(tok)
-		if err != nil {
-			diagBody := "github proxy: upstream error: " + err.Error()
 			slog.Warn("githubproxy: upstream round-trip failed", "host", host, "action", action, "err", err)
-			return req, proxyErrResp(req, diagBody)
+			return req, proxyErrResp(req, "github proxy: upstream error: "+err.Error())
 		}
 
-		// --- 401 backstop: force a fresh token and replay exactly once ---
-		if resp.StatusCode == http.StatusUnauthorized && retryable {
-			// Drain and release the intermediate response before re-minting — must not leak
-			// the upstream connection. Only the final response body is left open for goproxy.
-			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close() //nolint:errcheck
-
-			tok2, ferr := cfg.Control.ForceToken(req.Context())
-			if ferr != nil {
-				slog.Warn("githubproxy: ForceToken failed during 401 retry", "host", host, "err", ferr)
-				return req, proxyErrResp(req, "github proxy: ForceToken failed: "+ferr.Error())
-			}
-
-			resp2, err2 := attempt(tok2)
-			if err2 != nil {
-				slog.Warn("githubproxy: upstream round-trip (retry) failed", "host", host, "err", err2)
-				return req, proxyErrResp(req, "github proxy: upstream retry error: "+err2.Error())
-			}
-			// Return the second response as-is: even another 401 (grant revoked) is passed through.
-			return req, resp2
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			// GitHub rejected the pushed token. Latch it for the node's long-poll; pass the response
+			// through untouched so the agent's git/gh sees the real error.
+			slog.Warn("githubproxy: upstream rejected the token", "host", host, "status", resp.StatusCode)
+			cfg.State.RecordRejection(tok)
 		}
 
 		return req, resp
@@ -262,23 +199,27 @@ func ServeGitHubProxy(ln net.Listener, cfg GitHubProxyConfig) {
 	}()
 }
 
-// StartGitHubProxy is the startup helper for cmd/sidecar/main.go: it reads env, binds the
-// listener (claiming the port before the agent starts — §2.6), fetches the per-spawn CA with
-// bounded retry, parses it, and starts serving the GitHub MITM proxy in a background goroutine.
-// When the proxy is disabled (SIDECAR_GITHUB_PROXY_ADDR unset or no control transport) it logs
-// a notice and returns — inference proxy continues unaffected (back-compat).
-// On unrecoverable startup errors it logs at Error level and calls os.Exit(1).
-func StartGitHubProxy(getenv func(string) string) {
+// StartGitHubProxy is the startup helper for cmd/sidecar/main.go: it reads env, binds the listener
+// (claiming the port before the agent starts — §2.6) and starts serving the GitHub MITM proxy in a
+// background goroutine, backed by state.
+//
+// The sidecar NO LONGER FETCHES ANYTHING. The node pushes the CA + token to POST /control/github
+// before the agent starts (§3.1), so the proxy comes up credential-less and fails closed (REJECT on
+// CONNECT, 502 on request) until the first push lands — which, in the fail-closed create path, is
+// always before the agent can issue a request.
+//
+// When the proxy is disabled (SIDECAR_GITHUB_PROXY_ADDR unset) it logs a notice and returns; the
+// inference proxy is unaffected. A bind failure is still fatal (os.Exit(1)): the port must be
+// claimed before the agent starts.
+func StartGitHubProxy(getenv func(string) string, state *GitHubState) {
 	proxyAddr := getenv("SIDECAR_GITHUB_PROXY_ADDR")
 	if proxyAddr == "" {
-		slog.Info("sidecar github proxy disabled (set SIDECAR_GITHUB_PROXY_ADDR + a SIDECAR_GETTOKEN_* transport to enable)")
+		slog.Info("sidecar github proxy disabled (set SIDECAR_GITHUB_PROXY_ADDR to enable)")
 		return
 	}
-
-	ctrlCfg, ok := ControlTransportFromEnv(getenv)
-	if !ok {
-		slog.Info("sidecar github proxy disabled (SIDECAR_GITHUB_PROXY_ADDR set but no SIDECAR_GETTOKEN_UDS or SIDECAR_GETTOKEN_ADDR)")
-		return
+	if state == nil {
+		slog.Error("sidecar github proxy: nil GitHubState")
+		os.Exit(1)
 	}
 
 	// Bind the listener first: claim the port before the agent starts (prevents port-squatting §2.6).
@@ -289,63 +230,14 @@ func StartGitHubProxy(getenv func(string) string) {
 	}
 	slog.Info("sidecar github proxy listener bound", "addr", proxyAddr)
 
-	ctrl := newGitHubControl(ctrlCfg)
-
-	// FetchCA with bounded retry/backoff — the node may not have the CA ready the instant we start.
-	var ca *spawnCA
-	const maxRetries = 10
-	for attempt := range maxRetries {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		delivery, fetchErr := ctrl.FetchCA(ctx)
-		cancel()
-		if fetchErr == nil {
-			ca, err = parseSpawnCA(delivery.GetCaCertPem(), delivery.GetCaKeyPem())
-			if err != nil {
-				slog.Error("sidecar github proxy: parse CA failed", "err", err)
-				os.Exit(1)
-			}
-			break
-		}
-		if attempt == maxRetries-1 {
-			slog.Error("sidecar github proxy: FetchCA failed", "attempts", maxRetries, "err", fetchErr)
-			os.Exit(1)
-		}
-		backoff := time.Duration(attempt+1) * 500 * time.Millisecond
-		slog.Warn("sidecar github proxy: FetchCA attempt failed", "attempt", attempt+1, "max", maxRetries, "err", fetchErr, "retry_in", backoff)
-		time.Sleep(backoff)
-	}
-
-	ServeGitHubProxy(ln, GitHubProxyConfig{CA: ca, Control: ctrl})
-	slog.Info("sidecar github proxy serving", "addr", proxyAddr)
-}
-
-// ControlTransportFromEnv builds a ControlConfig from environment variables (UDS or TCP lane).
-// Returns (zero value, false) when no transport is configured.
-func ControlTransportFromEnv(getenv func(string) string) (ControlConfig, bool) {
-	spawnID := getenv("SIDECAR_SPAWN_ID")
-
-	if uds := getenv("SIDECAR_GETTOKEN_UDS"); uds != "" {
-		return ControlConfig{
-			Network: "unix",
-			Address: uds,
-			SpawnID: spawnID,
-		}, true
-	}
-	if addr := getenv("SIDECAR_GETTOKEN_ADDR"); addr != "" {
-		bearer := getenv("SIDECAR_GETTOKEN_BEARER")
-		return ControlConfig{
-			Network: "tcp",
-			Address: addr,
-			Bearer:  bearer,
-			SpawnID: spawnID,
-		}, true
-	}
-	return ControlConfig{}, false
+	ServeGitHubProxy(ln, GitHubProxyConfig{State: state})
+	slog.Info("sidecar github proxy serving; awaiting a credential push on /control/github", "addr", proxyAddr)
 }
 
 // ListenAndServeGitHubProxy binds the github proxy listener on addr (claiming the port before
 // the agent starts — prevents port-squatting §2.6). The caller passes the listener to
-// ServeGitHubProxy after the CA is fetched and parsed.
+// ServeGitHubProxy, which serves immediately: the proxy comes up credential-less and fails
+// closed until the node's first push lands on /control/github.
 func ListenAndServeGitHubProxy(addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
