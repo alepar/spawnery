@@ -184,7 +184,7 @@ func main() {
 			if clientErr != nil {
 				log.Fatalf("node: AS client setup: %v", clientErr)
 			}
-			consumer, consumerErr := node.NewRevocationConsumer(asClient, strings.TrimRight(cfg.ASURL, "/")+"/revocations", artifactTrust.verifier, userRevocations, cfg.Node.UserRevocationPollInterval)
+			consumer, consumerErr := nodeUserRevocationConsumer(cfg, asClient, artifactTrust.verifier, userRevocations)
 			if consumerErr != nil {
 				log.Fatalf("node: user revocation consumer setup: %v", consumerErr)
 			}
@@ -644,6 +644,17 @@ func nodeASClient(cfg *Spawnlet, revocations *nodeCertificateRevocations) (*http
 		return nil, fmt.Errorf("build node AS mTLS client: %w", err)
 	}
 	return client, nil
+}
+
+type nodeHTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func nodeUserRevocationConsumer(cfg *Spawnlet, client nodeHTTPDoer, artifacts *token.Verifier, store *node.UserRevocationStore) (*node.RevocationConsumer, error) {
+	if cfg == nil {
+		return nil, errors.New("user revocation consumer configuration is required")
+	}
+	return node.NewRevocationConsumer(client, strings.TrimRight(cfg.ASURL, "/")+"/revocations", artifacts, store, cfg.Node.UserRevocationPollInterval)
 }
 
 // buildIntentVerifier builds the mandatory A4 IntentVerifier. AuthMode selects only the CP transport;
