@@ -14,8 +14,8 @@
  *   (no storageState round-trip — a non-extractable session CryptoKey cannot be serialized into
  *   one; the key lives in the page's own IndexedDB for the test, Spike S1 approach (a)). The AS
  *   does not forward login_hint to the IdP (internal/authsvc/oauth.go's serveAuthorize), so the
- *   fake-IdP hop is rewritten in-flight via page.route(), mirroring oauth-session.ts's oracle-side
- *   rewrite (sp-tq0t.13 bead notes).
+ *   AS authorize response's Location is rewritten in-flight via page.route(), mirroring
+ *   oauth-session.ts's oracle-side rewrite (sp-tq0t.13 bead notes).
  */
 
 import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
@@ -41,7 +41,17 @@ function needsRefresh(state: OAuthSessionState, nowMs: number): boolean {
 // with plain mocks). A real Playwright Page/Route/Locator satisfies this shape unchanged.
 export interface RouteLike {
   request(): { url(): string };
-  continue(overrides?: { url?: string }): Promise<void>;
+  fetch(options?: { maxRedirects?: number }): Promise<ResponseLike>;
+  fulfill(options: {
+    response: ResponseLike;
+    status: number;
+    headers: Record<string, string>;
+  }): Promise<void>;
+}
+
+export interface ResponseLike {
+  status(): number;
+  headers(): Record<string, string>;
 }
 
 export interface LocatorLike {
@@ -55,7 +65,11 @@ export interface PageLike {
   waitForURL(matcher: (url: URL) => boolean, options?: { timeout?: number }): Promise<void>;
 }
 
-export const OAUTH_AUTHORIZE_ROUTE = /\/oauth\/authorize(?:\?.*)?$/;
+export function oauthAuthorizeRoute(asOrigin: string): RegExp {
+  const authorizeUrl = new URL("/oauth/authorize", `${asOrigin.replace(/\/$/, "")}/`).toString();
+  const escaped = authorizeUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}(?:\\?[^#]*)?$`);
+}
 
 export interface OAuthPoPConfig {
   /** Base URL of the Auth Service (TargetConfig.asOrigin). */
@@ -98,13 +112,39 @@ export class OAuthPoPAuth implements AuthStrategy {
 
   async seedWeb(page: unknown, identity: Identity): Promise<void> {
     const p = page as PageLike;
+    if (!identity.token) throw new Error("oauth web login requires a non-empty fake IdP login_hint");
 
-    // Match both the SPA -> AS /oauth/authorize request and the redirected fake-IdP
-    // /login/oauth/authorize hop. The AS ignores login_hint; the fake IdP consumes it.
-    await p.route(OAUTH_AUTHORIZE_ROUTE, async (route) => {
-      const url = new URL(route.request().url());
-      if (identity.token) url.searchParams.set("login_hint", identity.token);
-      await route.continue({ url: url.toString() });
+    // route.continue() owns the complete redirect chain, so a handler cannot rewrite the fake
+    // IdP request on the second hop. Stop at the AS response and give the browser a Location that
+    // already contains the fake's account selector.
+    await p.route(oauthAuthorizeRoute(this.cfg.asOrigin), async (route) => {
+      const response = await route.fetch({ maxRedirects: 0 });
+      if (response.status() !== 302) {
+        throw new Error(`oauth authorize redirect returned ${response.status()}, expected 302`);
+      }
+      const headers = response.headers();
+      const locationEntry = Object.entries(headers).find(([name]) => name.toLowerCase() === "location");
+      if (!locationEntry?.[1]) throw new Error("oauth authorize redirect omitted Location");
+
+      let idpUrl: URL;
+      try {
+        idpUrl = new URL(locationEntry[1]);
+      } catch {
+        throw new Error("oauth authorize redirect returned an invalid Location");
+      }
+      if (idpUrl.pathname !== "/login/oauth/authorize") {
+        throw new Error(`oauth authorize redirect returned unexpected Location path ${idpUrl.pathname}`);
+      }
+      idpUrl.searchParams.set("login_hint", identity.token);
+
+      const rewrittenHeaders = { ...headers };
+      delete rewrittenHeaders[locationEntry[0]];
+      rewrittenHeaders.location = idpUrl.toString();
+      await route.fulfill({
+        response,
+        status: response.status(),
+        headers: rewrittenHeaders,
+      });
     });
 
     await p.goto("/");

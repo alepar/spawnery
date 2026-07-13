@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { OAUTH_AUTHORIZE_ROUTE, OAuthPoPAuth, type PageLike, type RouteLike } from "./oauthpop";
+import { oauthAuthorizeRoute, OAuthPoPAuth, type PageLike, type RouteLike } from "./oauthpop";
 import type { Identity } from "../fixtures/identity-pool";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
 import { initializeCliOwnerDevice, runCliDeviceLogin } from "./cli-device";
@@ -141,84 +141,97 @@ describe("OAuthPoPAuth.prepareCli", () => {
 });
 
 describe("OAuthPoPAuth.seedWeb", () => {
-  it("routes the actual authorize path and injects a non-default identity into the fake IdP hop", async () => {
+  async function captureRouteHandler(identity: Identity = bob) {
     const auth = new OAuthPoPAuth(cfg);
     let routeHandler: ((route: RouteLike) => Promise<void> | void) | undefined;
-    let clickCount = 0;
     const waitForURLMatchers: Array<(url: URL) => boolean> = [];
 
     const page: PageLike = {
       route: vi.fn(async (pattern, handler) => {
-        expect(pattern).toBe(OAUTH_AUTHORIZE_ROUTE);
         expect(pattern).toBeInstanceOf(RegExp);
         expect((pattern as RegExp).test("https://as.example/oauth/authorize?state=one")).toBe(true);
-        expect((pattern as RegExp).test("http://fake.example/login/oauth/authorize?state=two")).toBe(true);
+        expect((pattern as RegExp).test("http://fake.example/login/oauth/authorize?state=two")).toBe(false);
         expect((pattern as RegExp).test("https://as.example/oauth/callback?code=three")).toBe(false);
+        expect((pattern as RegExp).test("https://as.example/unrelated/oauth/authorize?state=four")).toBe(false);
         routeHandler = handler;
       }),
       goto: vi.fn(async () => undefined),
       getByTestId: vi.fn((testId: string) => {
         expect(testId).toBe("sign-in-btn");
-        return {
-          click: async () => {
-            clickCount++;
-          },
-        };
+        return { click: async () => {} };
       }),
       waitForURL: vi.fn(async (matcher) => {
         waitForURLMatchers.push(matcher);
       }),
     };
 
-    await auth.seedWeb(page, bob);
+    await auth.seedWeb(page, identity);
 
     expect(page.goto).toHaveBeenCalledWith("/");
-    expect(clickCount).toBe(1);
     expect(waitForURLMatchers).toHaveLength(2);
-
     expect(waitForURLMatchers[0](new URL("https://web.example/"))).toBe(false);
     expect(waitForURLMatchers[0](new URL("https://web.example/callback?cp_access_token=t"))).toBe(true);
     expect(waitForURLMatchers[1](new URL("https://web.example/callback?cp_access_token=t"))).toBe(false);
     expect(waitForURLMatchers[1](new URL("https://web.example/templates"))).toBe(true);
+    expect(routeHandler).toBeDefined();
+    return routeHandler!;
+  }
 
-    // Drive the captured route handler the way Playwright would, and assert it injects login_hint
-    // without touching anything else about the request.
-    let continuedUrl = "";
-    const route: RouteLike = {
-      request: () => ({ url: () => "http://fake-idp.example:9099/login/oauth/authorize?client_id=x&state=s" }),
-      continue: async (overrides) => {
-        continuedUrl = overrides?.url ?? "";
-      },
+  it("routes only the AS authorize endpoint", () => {
+    const pattern = oauthAuthorizeRoute("https://as.example");
+    expect(pattern.test("https://as.example/oauth/authorize?state=one")).toBe(true);
+    expect(pattern.test("http://fake.example/login/oauth/authorize?state=two")).toBe(false);
+    expect(pattern.test("https://as.example/oauth/callback?code=three")).toBe(false);
+    expect(pattern.test("https://as.example/unrelated/oauth/authorize?state=four")).toBe(false);
+  });
+
+  it("rewrites the AS redirect to the selected fake user without dropping response metadata", async () => {
+    const routeHandler = await captureRouteHandler();
+    const originalHeaders = {
+      location: "http://fake-idp.example:9099/login/oauth/authorize?client_id=x&state=s",
+      "set-cookie": "as_flow=flow; Path=/; HttpOnly\nas_aux=aux; Path=/; HttpOnly",
+      "x-content-type-options": "nosniff",
     };
-    await routeHandler!(route);
-    const rewritten = new URL(continuedUrl);
+    const response = {
+      status: () => 302,
+      headers: () => originalHeaders,
+    };
+    let fulfilled: { response?: unknown; status?: number; headers?: Record<string, string> } | undefined;
+    const route = {
+      request: () => ({ url: () => "https://as.example/oauth/authorize?state=s" }),
+      fetch: vi.fn(async () => response),
+      fulfill: vi.fn(async (options) => { fulfilled = options; }),
+    } as unknown as RouteLike;
+
+    await routeHandler(route);
+
+    expect(route.fetch).toHaveBeenCalledWith({ maxRedirects: 0 });
+    expect(fulfilled?.response).toBe(response);
+    expect(fulfilled?.status).toBe(302);
+    expect(fulfilled?.headers?.["set-cookie"]).toBe(originalHeaders["set-cookie"]);
+    expect(fulfilled?.headers?.["x-content-type-options"]).toBe("nosniff");
+    const rewritten = new URL(fulfilled!.headers!.location);
     expect(rewritten.searchParams.get("login_hint")).toBe("bob");
     expect(rewritten.searchParams.get("client_id")).toBe("x");
     expect(rewritten.origin).toBe("http://fake-idp.example:9099");
   });
 
-  it("does not set login_hint when the identity's token is empty", async () => {
-    const auth = new OAuthPoPAuth(cfg);
-    let routeHandler: ((route: RouteLike) => Promise<void> | void) | undefined;
-    const page: PageLike = {
-      route: vi.fn(async (_pattern, handler) => {
-        routeHandler = handler;
-      }),
-      goto: vi.fn(async () => undefined),
-      getByTestId: vi.fn(() => ({ click: async () => {} })),
-      waitForURL: vi.fn(async () => {}),
-    };
+  it.each([
+    ["a non-302 response", 200, "http://fake.example/login/oauth/authorize"],
+    ["a missing Location", 302, undefined],
+    ["an invalid Location", 302, "not a URL"],
+  ])("fails closed on %s", async (_case, status, location) => {
+    const routeHandler = await captureRouteHandler();
+    const route = {
+      request: () => ({ url: () => "https://as.example/oauth/authorize?state=s" }),
+      fetch: vi.fn(async () => ({
+        status: () => status,
+        headers: () => location ? { location, "set-cookie": "as_flow=flow" } : { "set-cookie": "as_flow=flow" },
+      })),
+      fulfill: vi.fn(async () => {}),
+    } as unknown as RouteLike;
 
-    await auth.seedWeb(page, { token: "", owner: "o1" });
-
-    let continuedUrl = "";
-    const route: RouteLike = {
-      request: () => ({ url: () => "http://fake-idp.example/login/oauth/authorize?client_id=x" }),
-      continue: async (overrides) => {
-        continuedUrl = overrides?.url ?? "";
-      },
-    };
-    await routeHandler!(route);
-    expect(new URL(continuedUrl).searchParams.has("login_hint")).toBe(false);
+    await expect(routeHandler(route)).rejects.toThrow(/authorize redirect/);
+    expect(route.fulfill).not.toHaveBeenCalled();
   });
 });

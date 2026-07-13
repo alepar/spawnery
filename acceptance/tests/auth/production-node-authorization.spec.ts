@@ -17,6 +17,7 @@ import { createKnownVMTargetVerifier } from "../../src/drivers/oracle";
 import { expect, test } from "../../src/harness/scenario";
 import { waitForStatus } from "../../src/scenarios/wait";
 import { acquirePendingAfterCapacityConverges } from "../../src/scenarios/pending-capacity";
+import { resolveIntentIssuedAt } from "../../src/scenarios/intent-time";
 import {
   cpClient,
   decodeSessionArtifact,
@@ -79,6 +80,7 @@ interface IntentMutation {
   }>;
   attachedSecretIds?: string[];
   issuedAt?: number;
+  issuedAtOffsetSeconds?: number;
   corruptSignature?: boolean;
 }
 
@@ -90,7 +92,7 @@ async function signedPendingIntent(
   const op = mutation.op ?? pending.op;
   const body = buildIntentBodyBytes({
     jti: crypto.randomUUID(),
-    issuedAt: mutation.issuedAt ?? Math.floor(Date.now() / 1000),
+    issuedAt: resolveIntentIssuedAt(mutation),
     spawnId: mutation.spawnId ?? pending.spawnId,
     generation: mutation.generation ?? pending.generation,
     targetNodeId: mutation.targetNodeId ?? pending.targetNodeId,
@@ -361,9 +363,8 @@ test("production authorization: exact node NACKs and target substitution refusal
   for (const [name, mutation] of correspondence) {
     await rejectedCreate(owner, owner, `correspondence-${name}`, "CORRESPONDENCE", mutation);
   }
-  const now = Math.floor(Date.now() / 1000);
-  await rejectedCreate(owner, owner, "stale", "STALE", { issuedAt: now - 121 });
-  await rejectedCreate(owner, owner, "skew", "SKEW", { issuedAt: now + 31 });
+  await rejectedCreate(owner, owner, "stale", "STALE", { issuedAtOffsetSeconds: -121 });
+  await rejectedCreate(owner, owner, "skew", "SKEW", { issuedAtOffsetSeconds: 61 });
 
   const accepted = await client.createSpawn({ appId: cfg.appId, model: cfg.model, name: "acc-auth-target-pins" });
   try {
