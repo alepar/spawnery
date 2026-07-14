@@ -62,6 +62,22 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
 vm_ssh "$IP" '
 set -euo pipefail
 
+# BEGIN POD_DNS_RECONCILIATION
+reconcile_pod_dns_template() {
+  local template="$1" gateway="$2" assignments
+  assignments="$(sudo grep -c '^POD_DNS=' "$template" || true)"
+  [[ "$assignments" == 1 ]] || {
+    echo "expected exactly one POD_DNS assignment in $template, found ${assignments:-0}" >&2
+    return 1
+  }
+  sudo sed -i "s#^POD_DNS=.*#POD_DNS=${gateway}#" "$template"
+  [[ "$(sudo grep -Fxc "POD_DNS=${gateway}" "$template" || true)" == 1 ]] || {
+    echo "failed to publish exactly POD_DNS=${gateway} in $template" >&2
+    return 1
+  }
+}
+# END POD_DNS_RECONCILIATION
+
 NODE_HOSTS=/etc/spawnery/node-hosts
 sudo sed -i -E -e "/^[[:space:]]*#/! s/(^|[[:space:]])github\.com([[:space:]]|$)/\1\2/g" -e "/^[[:space:]]*#/! s/(^|[[:space:]])codeload\.github\.com([[:space:]]|$)/\1\2/g" /etc/hosts
 sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"
@@ -120,7 +136,7 @@ if ip link show spawnery-cni0 >/dev/null 2>&1; then
     exit 1
   }
 fi
-sudo sed -i "s#^POD_DNS=.*#POD_DNS=${CNI_GATEWAY}#" /etc/spawnery/env.d/common.env.tmpl
+reconcile_pod_dns_template /etc/spawnery/env.d/common.env.tmpl "$CNI_GATEWAY"
 
 sudo install -d -m0755 /etc/systemd/system/spawnery-cp.service.d /etc/systemd/system/spawnery-node.service.d
 printf "%s\n" "[Service]" "InaccessiblePaths=/etc/spawnery/env.d" | sudo tee /etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf >/dev/null

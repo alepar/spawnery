@@ -31,6 +31,22 @@ WILDCARD_DOMAIN="${WILDCARD_DOMAIN:-e2e.test}" # cert covers *.e2e.test
 PAYLOAD="${PAYLOAD:-/home/build/payload}"      # scp'd by build-base.sh: bin/ images.tar config/ examples/ env/ web-dist/ spawnery-ca
 log(){ printf '\033[36m[provision]\033[0m %s\n' "$*"; }
 
+# BEGIN POD_DNS_RECONCILIATION
+reconcile_pod_dns_template() {
+  local template="$1" gateway="$2" assignments
+  assignments="$(sudo grep -c '^POD_DNS=' "$template" || true)"
+  [[ "$assignments" == 1 ]] || {
+    echo "expected exactly one POD_DNS assignment in $template, found ${assignments:-0}" >&2
+    return 1
+  }
+  sudo sed -i "s#^POD_DNS=.*#POD_DNS=${gateway}#" "$template"
+  [[ "$(sudo grep -Fxc "POD_DNS=${gateway}" "$template" || true)" == 1 ]] || {
+    echo "failed to publish exactly POD_DNS=${gateway} in $template" >&2
+    return 1
+  }
+}
+# END POD_DNS_RECONCILIATION
+
 log "installing base packages…"
 sudo dnf -y install curl tar iptables-legacy postgresql-server postgresql caddy chrony \
   qemu-guest-agent cloud-init rsync jq openssl containernetworking-plugins git dnsmasq || true
@@ -487,7 +503,7 @@ sudo systemctl enable dnsmasq
 # anything else's resolution (dnsmasq forwards everything else to the SAME POD_DNS servers). The
 # template was just installed above (common.env.tmpl), so patch it in place; the per-boot render
 # (spawnery-render-env.sh) copies this value through verbatim like every other non-@@…@@ line.
-sudo sed -i "s#^POD_DNS=.*#POD_DNS=${GITHUB_DNS_ADDR}#" /etc/spawnery/env.d/common.env.tmpl
+reconcile_pod_dns_template /etc/spawnery/env.d/common.env.tmpl "$GITHUB_DNS_ADDR"
 
 sudo tee /usr/local/bin/spawnery-render-env.sh >/dev/null <<'RENDER_EOF'
 #!/usr/bin/env bash

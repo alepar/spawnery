@@ -431,14 +431,64 @@ do
     routing_failures=$((routing_failures + 1))
   fi
 done
+
+roll="$REPO/scripts/e2e-vm/roll.sh"
+provision_pod_dns_logic="$tmp/provision-pod-dns-reconciliation.sh"
+roll_pod_dns_logic="$tmp/roll-pod-dns-reconciliation.sh"
+sed -n '/^# BEGIN POD_DNS_RECONCILIATION$/,/^# END POD_DNS_RECONCILIATION$/p' \
+  "$provision" >"$provision_pod_dns_logic"
+sed -n '/^# BEGIN POD_DNS_RECONCILIATION$/,/^# END POD_DNS_RECONCILIATION$/p' \
+  "$roll" >"$roll_pod_dns_logic"
+pod_dns_logic_is_shared=1
+if [[ ! -s "$provision_pod_dns_logic" || ! -s "$roll_pod_dns_logic" ]] \
+  || ! cmp -s "$provision_pod_dns_logic" "$roll_pod_dns_logic"; then
+  echo "fresh provision and live roll lack one asserted-identical POD_DNS reconciler" >&2
+  pod_dns_logic_is_shared=0
+fi
+if ! (
+  sudo() { "$@"; }
+  if (( pod_dns_logic_is_shared )); then
+    # shellcheck disable=SC1090
+    source "$provision_pod_dns_logic"
+  else
+    # Model the current permissive rewrite so the rejection fixtures still execute during RED.
+    reconcile_pod_dns_template() {
+      local template="$1" gateway="$2"
+      sed -i "s#^POD_DNS=.*#POD_DNS=${gateway}#" "$template"
+    }
+  fi
+
+  fixture_failures=0
+  printf '%s\n' 'AGENT_IMAGE=spawnery/agent:dev' >"$tmp/pod-dns-missing.env"
+  if reconcile_pod_dns_template "$tmp/pod-dns-missing.env" 10.234.0.1 >/dev/null 2>&1; then
+    echo "POD_DNS reconciler accepted a template with no POD_DNS assignment" >&2
+    fixture_failures=$((fixture_failures + 1))
+  fi
+
+  printf '%s\n' 'POD_DNS=1.1.1.1' 'POD_DNS=8.8.8.8' >"$tmp/pod-dns-duplicate.env"
+  if reconcile_pod_dns_template "$tmp/pod-dns-duplicate.env" 10.234.0.1 >/dev/null 2>&1; then
+    echo "POD_DNS reconciler accepted duplicate POD_DNS assignments" >&2
+    fixture_failures=$((fixture_failures + 1))
+  fi
+
+  printf '%s\n' 'POD_DNS=1.1.1.1,8.8.8.8' >"$tmp/pod-dns-valid.env"
+  reconcile_pod_dns_template "$tmp/pod-dns-valid.env" 10.234.0.1
+  [[ "$(grep -Fxc 'POD_DNS=10.234.0.1' "$tmp/pod-dns-valid.env" || true)" == 1 ]] || {
+    echo "POD_DNS reconciler did not publish exactly the requested gateway" >&2
+    fixture_failures=$((fixture_failures + 1))
+  }
+
+  (( fixture_failures == 0 && pod_dns_logic_is_shared == 1 ))
+); then
+  routing_failures=$((routing_failures + 1))
+fi
 fresh_common_copy_line="$(rg -n 'cp -f .*common\.env /etc/spawnery/env.d/common\.env\.tmpl' "$provision" | head -n1 | cut -d: -f1 || true)"
-fresh_pod_dns_line="$(rg -n 'POD_DNS=\$\{GITHUB_DNS_ADDR\}.*common\.env\.tmpl' "$provision" | head -n1 | cut -d: -f1 || true)"
+fresh_pod_dns_line="$(rg -n 'reconcile_pod_dns_template /etc/spawnery/env.d/common\.env\.tmpl "\$GITHUB_DNS_ADDR"' "$provision" | head -n1 | cut -d: -f1 || true)"
 if [[ -z "$fresh_common_copy_line" || -z "$fresh_pod_dns_line" || "$fresh_common_copy_line" -ge "$fresh_pod_dns_line" ]]; then
   echo "fresh provisioning does not patch POD_DNS to the dnsmasq gateway after copying common.env" >&2
   routing_failures=$((routing_failures + 1))
 fi
 
-roll="$REPO/scripts/e2e-vm/roll.sh"
 for roll_hosts_binding in \
   'NODE_HOSTS=/etc/spawnery/node-hosts' \
   'sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"' \
@@ -463,7 +513,7 @@ done
 for gateway_contract in \
   '/etc/cni/net.d/10-spawnery.conflist' \
   '/etc/dnsmasq.d/spawnery-github.conf' \
-  'POD_DNS=${CNI_GATEWAY}'
+  'reconcile_pod_dns_template /etc/spawnery/env.d/common.env.tmpl "$CNI_GATEWAY"'
 do
   if ! rg -Fq "$gateway_contract" "$roll"; then
     echo "roll.sh lacks fail-closed CNI/dnsmasq gateway reconciliation: ${gateway_contract}" >&2
@@ -471,7 +521,7 @@ do
   fi
 done
 roll_common_copy_line="$(rg -n 'cp -f .*common\.env /etc/spawnery/env.d/common\.env\.tmpl' "$roll" | head -n1 | cut -d: -f1 || true)"
-roll_pod_dns_line="$(rg -n 'POD_DNS=\$\{CNI_GATEWAY\}.*common\.env\.tmpl' "$roll" | head -n1 | cut -d: -f1 || true)"
+roll_pod_dns_line="$(rg -n 'reconcile_pod_dns_template /etc/spawnery/env.d/common\.env\.tmpl "\$CNI_GATEWAY"' "$roll" | head -n1 | cut -d: -f1 || true)"
 roll_render_line="$(rg -n 'systemctl restart spawnery-render-env' "$roll" | head -n1 | cut -d: -f1 || true)"
 if [[ -z "$roll_common_copy_line" || -z "$roll_pod_dns_line" || -z "$roll_render_line" \
    || "$roll_common_copy_line" -ge "$roll_pod_dns_line" || "$roll_pod_dns_line" -ge "$roll_render_line" ]]; then
