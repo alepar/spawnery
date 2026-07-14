@@ -1,28 +1,20 @@
 package node
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/subtle"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
-	"net"
-	"net/http"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protojson"
-
-	sidecarv1 "spawnery/gen/sidecar/v1"
+	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/spawnlet"
 )
 
@@ -32,26 +24,99 @@ type caPair struct {
 	keyPEM  []byte
 }
 
-// githubControlServer implements spawnlet.GitHubControlServer. It holds the per-spawn ECDSA-P256
-// CA store and drives the lane-aware HTTP control server (UDS or TCP) for GetToken + GetSpawnCA.
+// spawnControlLookup resolves a spawn's sidecar control endpoint (its /control/model URL and the
+// SIDECAR_CONTROL_TOKEN bearer). Injected by node.Run over the Manager's spawn store: the async push
+// paths (rotation, re-adopt) run outside CreateWithSelection and have no other way to find the pod.
+type spawnControlLookup func(spawnID string) (controlURL, controlToken string, ok bool)
+
+// githubControlServer implements spawnlet.GitHubControlServer. It holds the per-spawn ECDSA-P256 CA
+// store, PUSHES the CA + GitHub token into the sidecar (sp-2tx8.9 §3.1 — see githubpush.go), and HOLDS a
+// rejection long-poll per github spawn (§3.2 — see githubevents.go).
+//
+// It has NO inbound listener. The node used to SERVE /control/gettoken + /control/spawnca to the pod;
+// sp-2tx8.9 inverted the channel (a node can dial into a pod, but cannot bind the pod's IP), and
+// sp-2tx8.9.5 deleted the server. Do not re-add one: see internal/node/no_inbound_listener_test.go.
 type githubControlServer struct {
 	refresher *githubRefresher
 	cas       caStore // on-disk CA persistence (sp-2tx8.3.5); zero value = memory-only
 
-	mu        sync.Mutex
-	cache     map[string]caPair       // spawnID -> CA pair (memoizes cas.Load / generateCA)
-	listeners map[string]net.Listener // spawnID -> active listener
+	mu    sync.Mutex
+	cache map[string]caPair // spawnID -> CA pair (memoizes cas.Load / generateCA)
+
+	// --- push plane (sp-2tx8.9.3) ---
+	doer   httpDoer           // POSTs /control/github; set by node.Run
+	lookup spawnControlLookup // resolves a spawn's control endpoint; set by node.Run
+
+	reporter     func(spawnID string, st nodev1.GitHubCredentialStatus) // per-CP-connection; nil until installed
+	lastStatus   map[string]nodev1.GitHubCredentialStatus               // sticky condition per spawn
+	pushedExpiry map[string]int64                                       // expiry of the last SUCCESSFULLY pushed token (unix; 0 = unknown)
+	pushes       map[string]*pushHandle                                 // in-flight async push loop per spawn
+
+	// Timing knobs (fields, not package vars, so parallel tests never race). Defaults in the constructor.
+	now                func() time.Time
+	pushBackoffBase    time.Duration
+	pushBackoffMax     time.Duration
+	pushFallbackWindow time.Duration
+
+	// --- watch plane (sp-2tx8.9.4) ---
+	// eventsDoer holds the long-poll against the sidecar's GET /control/github/events. It is a SEPARATE
+	// client from doer: doer has a 5s timeout (controlPostTimeout) and the long-poll blocks ~60s. nil
+	// disables rejection detection entirely (the default; node.Run sets it).
+	eventsDoer httpDoer
+	// baseCtx bounds the watcher goroutines. It is the NODE PROCESS's ctx, not a request's: PushCredentials
+	// runs on the create path, whose ctx dies with CreateWithSelection, and the watch must outlive it (and
+	// every CP reconnect). Set by node.Run; context.Background() by default.
+	baseCtx context.Context
+
+	watches map[string]*watchHandle // in-flight events long-poll per spawn (githubevents.go)
+
+	eventsBackoffBase time.Duration // re-dial backoff after a FAILED poll
+	eventsBackoffMax  time.Duration
+	eventsPollTimeout time.Duration // our own bound on one long-poll (> the sidecar's 60s)
+	rejectCooldown    time.Duration // min interval between two FORCED re-mints for one spawn
 }
+
+// Default push timings. The retry loop gives up when the last successfully pushed token expires
+// (spec §4: "if still undeliverable when the token expires, report STALE"); when no token was ever
+// pushed — or its expiry is unknown — pushFallbackWindow bounds the loop instead.
+const (
+	defaultPushBackoffBase    = 5 * time.Second
+	defaultPushBackoffMax     = 60 * time.Second
+	defaultPushFallbackWindow = 15 * time.Minute
+)
+
+// Default watch timings (sp-2tx8.9.4). eventsPollTimeout exceeds the sidecar's own ~60s long-poll bound
+// (internal/sidecar/githubstate.go: defaultEventsTimeout) so a healthy poll is ended by the SIDECAR's
+// 204, not by us. rejectCooldown bounds forced re-mints: GetToken(force=true) bypasses the refresher's
+// minMintInterval floor, so an agent hammering a dead token must not become a mint storm against the AS.
+const (
+	defaultEventsBackoffBase = 5 * time.Second
+	defaultEventsBackoffMax  = 60 * time.Second
+	defaultEventsPollTimeout = 90 * time.Second
+	defaultRejectCooldown    = 60 * time.Second
+)
 
 // newGitHubControlServer creates a githubControlServer backed by the given refresher and the given
 // on-disk CA store. store's zero value (caStore{}) makes the CA memory-only, as before this bead —
 // it will not survive a restart, but nothing errors.
 func newGitHubControlServer(r *githubRefresher, store caStore) *githubControlServer {
 	return &githubControlServer{
-		refresher: r,
-		cas:       store,
-		cache:     make(map[string]caPair),
-		listeners: make(map[string]net.Listener),
+		refresher:          r,
+		cas:                store,
+		cache:              make(map[string]caPair),
+		lastStatus:         make(map[string]nodev1.GitHubCredentialStatus),
+		pushedExpiry:       make(map[string]int64),
+		pushes:             make(map[string]*pushHandle),
+		now:                time.Now,
+		pushBackoffBase:    defaultPushBackoffBase,
+		pushBackoffMax:     defaultPushBackoffMax,
+		pushFallbackWindow: defaultPushFallbackWindow,
+		baseCtx:            context.Background(),
+		watches:            make(map[string]*watchHandle),
+		eventsBackoffBase:  defaultEventsBackoffBase,
+		eventsBackoffMax:   defaultEventsBackoffMax,
+		eventsPollTimeout:  defaultEventsPollTimeout,
+		rejectCooldown:     defaultRejectCooldown,
 	}
 }
 
@@ -138,79 +203,27 @@ func generateCA(spawnID string) (caPair, error) {
 	return caPair{certPEM: certPEM, keyPEM: keyPEM}, nil
 }
 
-// Serve binds the control HTTP server on the transport described by t. For "unix" it creates
-// the socket and chmods it 0666; for "tcp" it wraps each handler with bearer + source-IP auth.
-// If a prior listener exists for t.SpawnID it is closed first (idempotent re-Serve). A Serve
-// error tears down the listener before returning so the caller can fail-close the pod.
-func (s *githubControlServer) Serve(t spawnlet.ControlTransport) error {
-	mux := http.NewServeMux()
-
-	if t.Network == "tcp" {
-		// TCP lane: wrap each handler with auth.
-		mux.Handle("/control/gettoken", s.tcpAuthMiddleware(t, http.HandlerFunc(s.handleGetToken)))
-		mux.Handle("/control/spawnca", s.tcpAuthMiddleware(t, http.HandlerFunc(s.handleGetSpawnCA)))
-	} else {
-		// UDS lane: filesystem scope is the auth boundary.
-		mux.HandleFunc("/control/gettoken", s.handleGetToken)
-		mux.HandleFunc("/control/spawnca", s.handleGetSpawnCA)
-	}
-
-	if t.Network == "unix" {
-		// A prior process (this spawn re-adopted after a node restart) left its socket file behind
-		// on a graceful shutdown — net.Listen on an existing path fails EADDRINUSE. Remove it first;
-		// ErrNotExist means there was nothing to clean up.
-		if err := os.Remove(t.Address); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("github control server: remove stale socket %s: %w", t.Address, err)
-		}
-	}
-
-	ln, err := net.Listen(t.Network, t.Address)
-	if err != nil {
-		return fmt.Errorf("github control server %s %s: listen: %w", t.Network, t.Address, err)
-	}
-
-	if t.Network == "unix" {
-		// Make the socket world-connectable so the userns-remapped sidecar (different uid) can
-		// connect. The parent directory is 0711 (node uid), so only the sidecar-on-the-mount-point
-		// and the node process itself can reach the socket.
-		if err := os.Chmod(t.Address, 0o666); err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("github control server chmod socket %s: %w", t.Address, err)
-		}
-	}
-
-	// Register the listener before starting the goroutine so Stop can find and close it.
-	s.mu.Lock()
-	// Close any prior listener for this spawn (idempotent re-Serve).
-	if prev := s.listeners[t.SpawnID]; prev != nil {
-		_ = prev.Close()
-	}
-	s.listeners[t.SpawnID] = ln
-	s.mu.Unlock()
-
-	srv := &http.Server{Handler: mux}
-	go func() {
-		if err := srv.Serve(ln); err != nil && !isListenerClosed(err) {
-			log.Printf("github control server for spawn %s: %v", t.SpawnID, err)
-		}
-	}()
-	return nil
-}
-
-// Stop closes the spawn's listener and purges its CA — both the memory cache and the persisted
-// on-disk pair, since Stop means the spawn itself is gone (stop/suspend/delete; see the call sites
-// in cleanupSpawnDirs/teardown/CleanupSpawnTransient), not merely that this node process is exiting.
+// Stop cancels the spawn's in-flight push loop and rejection watch, and purges its CA (memory + disk) —
+// since Stop means the spawn itself is gone (stop/suspend/delete; see the call sites in
+// cleanupSpawnDirs/teardown/CleanupSpawnTransient), not merely that this node process is exiting.
 // A graceful restart does NOT call Stop (see DetachAll) — that asymmetry is what lets the CA survive
 // a spawnlet restart while still dying with the spawn. Also calls Forget on the refresher so the
 // proactive-refresh entry is removed (callers that previously called Forget directly may switch to
-// Stop-only to avoid the double-Forget; Forget is idempotent).
+// Stop-only to avoid the double-Forget; Forget is idempotent), and stops the spawn's
+// `/control/github/events` long-poll (sp-2tx8.9.4) — rejection detection dies with the spawn.
 func (s *githubControlServer) Stop(spawnID string) {
 	s.mu.Lock()
-	if ln := s.listeners[spawnID]; ln != nil {
-		_ = ln.Close()
-		delete(s.listeners, spawnID)
-	}
 	delete(s.cache, spawnID)
+	if h := s.pushes[spawnID]; h != nil {
+		h.cancel()
+		delete(s.pushes, spawnID)
+	}
+	if w := s.watches[spawnID]; w != nil {
+		w.cancel()
+		delete(s.watches, spawnID)
+	}
+	delete(s.lastStatus, spawnID)
+	delete(s.pushedExpiry, spawnID)
 	s.mu.Unlock()
 
 	if err := s.cas.Remove(spawnID); err != nil {
@@ -220,134 +233,6 @@ func (s *githubControlServer) Stop(spawnID string) {
 	if s.refresher != nil {
 		s.refresher.Forget(spawnID)
 	}
-}
-
-// tcpAuthMiddleware wraps h with bearer-token + source-pod-IP verification for the TCP lane.
-func (s *githubControlServer) tcpAuthMiddleware(t spawnlet.ControlTransport, h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Bearer token check (constant-time to resist timing attacks).
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(t.Bearer)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		// Source pod IP check.
-		sourceHost, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil || sourceHost != t.PodIP {
-			http.Error(w, "forbidden: unexpected source IP", http.StatusForbidden)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
-}
-
-// handleGetToken decodes a GetTokenRequest, calls GetToken on the refresher, maps typed errors
-// to HTTP status codes, and writes a protojson GetTokenResponse.
-func (s *githubControlServer) handleGetToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
-	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var req sidecarv1.GetTokenRequest
-	if err := protojson.Unmarshal(body, &req); err != nil {
-		http.Error(w, "decode request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	tok, exp, err := s.refresher.GetToken(r.Context(), req.GetSpawnId(), req.GetMinRemainingSeconds(), req.GetForceRefresh())
-	if err != nil {
-		status, msg := statusForGetToken(err)
-		http.Error(w, msg, status)
-		return
-	}
-
-	resp := &sidecarv1.GetTokenResponse{
-		Token:               tok,
-		AccessExpiresAtUnix: exp,
-	}
-	out, merr := protojson.Marshal(resp)
-	if merr != nil {
-		http.Error(w, "marshal response: "+merr.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
-}
-
-// handleGetSpawnCA decodes a GetSpawnCARequest and returns a protojson SpawnCADelivery with both
-// the public cert and the private key (the key is needed by the sidecar for JIT leaf-cert signing).
-func (s *githubControlServer) handleGetSpawnCA(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
-	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var req sidecarv1.GetSpawnCARequest
-	if err := protojson.Unmarshal(body, &req); err != nil {
-		http.Error(w, "decode request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	s.mu.Lock()
-	pair, err := s.caForLocked(req.GetSpawnId())
-	s.mu.Unlock()
-	if err != nil {
-		http.Error(w, "CA generation failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	resp := &sidecarv1.SpawnCADelivery{
-		CaCertPem: pair.certPEM,
-		CaKeyPem:  pair.keyPEM,
-	}
-	out, merr := protojson.Marshal(resp)
-	if merr != nil {
-		http.Error(w, "marshal response: "+merr.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
-}
-
-// statusForGetToken maps typed GetToken errors to HTTP status codes and short diagnostic bodies.
-// Returns a distinct, non-retrying status for each typed failure so the sidecar proxy (and by
-// extension the agent's git/gh) fails fast with a comprehensible error rather than looping.
-func statusForGetToken(err error) (int, string) {
-	switch {
-	case isNotLinkedOrNotFound(err):
-		return http.StatusForbidden, "no github link for this spawn (not linked or link not yet delivered)"
-	case isMintRateLimited(err):
-		return http.StatusTooManyRequests, "github token mint rate-limited; try again shortly"
-	default:
-		return http.StatusBadGateway, "upstream github auth service error: " + err.Error()
-	}
-}
-
-func isNotLinkedOrNotFound(err error) bool {
-	return errors.Is(err, ErrGitHubNotLinked) || errors.Is(err, ErrGitHubRelinkRequired)
-}
-
-func isMintRateLimited(err error) bool {
-	return errors.Is(err, ErrGitHubMintRateLimited)
-}
-
-// isListenerClosed reports whether err is the expected "use of closed network connection" error
-// returned when we close the listener from Stop (not a real server error).
-func isListenerClosed(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "use of closed network connection")
 }
 
 // Compile-time assertion: *githubControlServer must implement spawnlet.GitHubControlServer.

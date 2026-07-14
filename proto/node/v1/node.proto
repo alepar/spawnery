@@ -13,6 +13,22 @@ service NodeService {
 // SUSPENDING/SUSPENDED = suspend path. Values 0-6 are wire-stable; SUSPENDING (7) added for the suspend path.
 enum SpawnPhase { SPAWN_PHASE_UNSPECIFIED = 0; STARTING = 1; ACTIVE = 2; STOPPING = 3; STOPPED = 4; ERROR = 5; SUSPENDED = 6; SUSPENDING = 7; }
 
+// GitHubCredentialStatus is a CONDITION on a spawn, not a lifecycle phase (sp-2tx8.9 §4.1). A spawn
+// whose GitHub token is stale is still healthy for everything that is not git, so it stays ACTIVE —
+// adding a Degraded phase would corrupt the lifecycle state machine (nothing transitions out of it).
+//
+// UNSPECIFIED (0) means "this message carries no GitHub credential report" — it does NOT mean OK.
+// Most SpawnStatus messages (plain STARTING/ACTIVE/milestones) leave it unset, so a consumer MUST
+// NOT clobber a previously reported status with 0. Only an explicit OK clears a STALE /
+// RELINK_REQUIRED. Producers: the node sets STALE when a rotation push is undeliverable past token
+// expiry, and RELINK_REQUIRED when a re-mint fails with ErrGitHubRelinkRequired.
+enum GitHubCredentialStatus {
+  GITHUB_CREDENTIAL_STATUS_UNSPECIFIED     = 0;
+  GITHUB_CREDENTIAL_STATUS_OK              = 1;
+  GITHUB_CREDENTIAL_STATUS_STALE           = 2;
+  GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED = 3;
+}
+
 message NodeMessage {
   oneof msg {
     Register                      register              = 1;
@@ -298,6 +314,9 @@ message SpawnStatus {
   uint32 step_total = 7;
   string step_key   = 8;  // milestone key (e.g. "create-pod"); on ERROR = the failing step
   string step_label = 9;
+  // github_credential_status (field 10): the GitHub credential CONDITION (sp-2tx8.9 §4.1). Unset on
+  // the overwhelming majority of reports — see the enum's doc: 0 = "not reported", never "OK".
+  GitHubCredentialStatus github_credential_status = 10;
 }
 // auth (field 20): the client's signed intent + aud=node access token (A4). The node verifies
 // the full chain: AS sig on token -> aud=node -> owner match -> SPKI/cnf match -> intent sig

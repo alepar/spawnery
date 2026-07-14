@@ -83,6 +83,11 @@ type githubRefresher struct {
 	client GitHubMintClient
 	now    func() time.Time
 
+	// onRotate, when set, is called after a SUCCESSFUL proactive refresh mint for a spawn, so the node
+	// can push the rotated token into the still-running sidecar (sp-2tx8.9 §3.1, "on rotation"). Set once
+	// by node.Run, before the refresher goroutine starts; never mutated afterwards. nil-safe.
+	onRotate func(ctx context.Context, spawnID string)
+
 	mu     sync.Mutex
 	states map[string]map[string]*refreshState // spawnID -> secretID -> state
 }
@@ -287,7 +292,10 @@ func (r *githubRefresher) attempt(ctx context.Context, e githubRefreshEntry, now
 		r.failAttempt(e, now)
 		return
 	}
-	r.succeedAttempt(e, now, resp.Msg.GetAccessExpiresAtUnix())
+	r.succeedAttempt(e, now, resp.Msg.GetAccessToken(), resp.Msg.GetAccessExpiresAtUnix())
+	if r.onRotate != nil {
+		r.onRotate(ctx, e.SpawnID)
+	}
 }
 
 // beginAttempt marks the entry in-flight + sets the grace floor. Returns false if the entry vanished
@@ -317,7 +325,7 @@ func (r *githubRefresher) failAttempt(e githubRefreshEntry, now time.Time) {
 	st.nextAttempt = now.Add(d)
 }
 
-func (r *githubRefresher) succeedAttempt(e githubRefreshEntry, now time.Time, accessExpiresAtUnix int64) {
+func (r *githubRefresher) succeedAttempt(e githubRefreshEntry, now time.Time, token string, accessExpiresAtUnix int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	st := r.lookupLocked(e.SpawnID, e.SecretID)
@@ -326,6 +334,14 @@ func (r *githubRefresher) succeedAttempt(e githubRefreshEntry, now time.Time, ac
 	}
 	st.inFlight = false
 	st.backoffDur = 0
+	// The AS handed us the CURRENT access token — cache it (with its mint timestamp) so the rotation
+	// push delivers exactly this token instead of provoking a third mint. Before the push inversion the
+	// sidecar re-pulled its own token and this response body was discarded.
+	if token != "" {
+		st.token = token
+		st.tokenExpiryUnix = accessExpiresAtUnix
+		st.lastMintAt = now
+	}
 	// Keep the in-flight grace nextAttempt set by beginAttempt: the AS either rotated the token
 	// (a rotation signal is incoming, calling Invalidate — re-minting before it arrives is redundant)
 	// or confirmed the token is still valid (no rotation, but hammering again immediately wastes AS quota).

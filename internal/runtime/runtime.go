@@ -96,7 +96,7 @@ type ContainerRuntime interface {
 	ListByLabel(ctx context.Context, key, value string) ([]ContainerSummary, error)
 	// ContainerEnv returns the container's environment as K=V strings, exactly as it was started
 	// with. Re-adoption uses it to read back the per-pod secrets that live ONLY in the still-running
-	// sidecar's env (SIDECAR_CONTROL_TOKEN, SIDECAR_GETTOKEN_BEARER) after the node process that
+	// sidecar's env (SIDECAR_CONTROL_TOKEN) after the node process that
 	// minted them died. The slice also carries the model API key — callers must extract the keys they
 	// need and MUST NOT log or forward it.
 	ContainerEnv(ctx context.Context, id string) ([]string, error)

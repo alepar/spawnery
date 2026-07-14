@@ -565,6 +565,17 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 				})
 			}
 			s.sched.OnStatus(m.Status.SpawnId, m.Status.Phase, m.Status.Detail)
+			// The GitHub credential CONDITION (sp-2tx8.9 §4.1) — persisted, phase untouched. Gated
+			// on an explicit report: UNSPECIFIED means "not reported" and MUST NOT clobber a stored
+			// STALE/RELINK_REQUIRED, since every routine status message leaves the field unset.
+			// Non-fatal on error (mirrors base_image_digest): a spawn deleted mid-flight must not
+			// kill the node stream.
+			if gcs, reported := githubCredStatusFromProto(m.Status.GetGithubCredentialStatus()); reported {
+				if err := s.st.Spawns().SetGitHubCredentialStatus(ctx, m.Status.SpawnId, gcs); err != nil {
+					slog.Warn("spawn: persist github_credential_status failed (non-fatal)",
+						"spawn", m.Status.SpawnId, "status", string(gcs), "err", err)
+				}
+			}
 			if m.Status.Phase == nodev1.SpawnPhase_ACTIVE {
 				s.provisioning.clear(m.Status.SpawnId)
 				var owner string
@@ -721,6 +732,38 @@ func skillInstallOutcomeFromProto(spawnID string, outcome nodev1.SkillInstallOut
 		slog.Error("skill install report: UNSPECIFIED outcome — invariant violation, node must never send this",
 			"spawn", spawnID)
 		return "error"
+	}
+}
+
+// githubCredStatusFromProto maps the wire node.v1 GitHub credential condition to its persisted store
+// form. It returns (status, true) ONLY for an explicitly reported value: UNSPECIFIED means "this
+// message carries no report" and yields ok=false, so a routine STARTING/ACTIVE status can never
+// clear a previously reported STALE/RELINK_REQUIRED (sp-2tx8.9 §4.1).
+func githubCredStatusFromProto(st nodev1.GitHubCredentialStatus) (store.GitHubCredentialStatus, bool) {
+	switch st {
+	case nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_OK:
+		return store.GitHubCredOK, true
+	case nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_STALE:
+		return store.GitHubCredStale, true
+	case nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED:
+		return store.GitHubCredRelinkRequired, true
+	default: // GITHUB_CREDENTIAL_STATUS_UNSPECIFIED — not reported
+		return store.GitHubCredUnset, false
+	}
+}
+
+// githubCredStatusToProto maps the persisted condition to the client-facing cp.v1 enum (cp.proto
+// deliberately does not import node.proto; we convert at the boundary — same as SkillInstallStatus).
+func githubCredStatusToProto(st store.GitHubCredentialStatus) cpv1.GitHubCredentialStatus {
+	switch st {
+	case store.GitHubCredOK:
+		return cpv1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_OK
+	case store.GitHubCredStale:
+		return cpv1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_STALE
+	case store.GitHubCredRelinkRequired:
+		return cpv1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED
+	default:
+		return cpv1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_UNSPECIFIED
 	}
 }
 

@@ -25,6 +25,19 @@ const (
 	PhaseLost       Phase = "lost"
 )
 
+// GitHubCredentialStatus is a spawn CONDITION, not a lifecycle status (sp-2tx8.9 §4.1): a spawn
+// whose GitHub token is stale stays Active and is still healthy for everything that is not git.
+// Reported by the node on SpawnStatus and persisted on the spawn row so RELINK_REQUIRED survives a
+// CP restart. Self-healing: the node's next successful credential push reports OK and overwrites.
+type GitHubCredentialStatus string
+
+const (
+	GitHubCredUnset          GitHubCredentialStatus = ""                // never reported (e.g. no GitHub mount)
+	GitHubCredOK             GitHubCredentialStatus = "ok"              // token delivered and accepted
+	GitHubCredStale          GitHubCredentialStatus = "stale"           // rotation push undeliverable past expiry
+	GitHubCredRelinkRequired GitHubCredentialStatus = "relink_required" // re-mint failed: the user must re-link GitHub
+)
+
 type Owner struct {
 	bun.BaseModel `bun:"table:owners,alias:o"`
 	ID            string `bun:"id,pk"`
@@ -98,6 +111,9 @@ type Spawn struct {
 	// create time by the node and stored here for cross-node resume (spec §4 / sp-ei4.1.10).
 	// Empty for spawns created before this field was introduced.
 	BaseImageDigest string `bun:"base_image_digest,notnull"`
+	// GitHubCredentialStatus is the node-reported GitHub credential condition (sp-2tx8.9.2).
+	// Empty for spawns with no GitHub mount and for rows predating this field.
+	GitHubCredentialStatus GitHubCredentialStatus `bun:"github_credential_status,notnull"`
 	// ProfileID records which profile was applied at create time (sp-nrzf.3.8/3.9).
 	// Empty string for spawns created without a profile.
 	ProfileID string `bun:"profile_id,notnull"`

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { listSpawns, listAgentImages, createSpawn, renameSpawn, statusFromProto, setSpawnModel, spawnLifecycleAction, recreateSpawn } from "./spawnlet";
+import { listSpawns, listAgentImages, createSpawn, renameSpawn, statusFromProto, githubCredStatusFromProto, setSpawnModel, spawnLifecycleAction, recreateSpawn } from "./spawnlet";
 import type { SpawnStatus, SpawnLifecycleAction } from "./spawnlet";
 
 function mockFetch(json: unknown) {
@@ -24,6 +24,19 @@ describe("statusFromProto", () => {
   });
 });
 
+describe("githubCredStatusFromProto", () => {
+  it("maps the Connect-JSON enum names", () => {
+    expect(githubCredStatusFromProto("GITHUB_CREDENTIAL_STATUS_OK")).toBe("ok");
+    expect(githubCredStatusFromProto("GITHUB_CREDENTIAL_STATUS_STALE")).toBe("stale");
+    expect(githubCredStatusFromProto("GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED")).toBe("relink_required");
+  });
+
+  it("maps unspecified/absent to none (a spawn with no GitHub mount reports nothing)", () => {
+    expect(githubCredStatusFromProto("GITHUB_CREDENTIAL_STATUS_UNSPECIFIED")).toBe("none");
+    expect(githubCredStatusFromProto(undefined)).toBe("none");
+  });
+});
+
 describe("listSpawns", () => {
   it("POSTs ListSpawns and maps the response to SpawnView[]", async () => {
     const calls = mockFetch({
@@ -35,8 +48,8 @@ describe("listSpawns", () => {
     const out = await listSpawns();
     expect(calls[0].url).toContain("/cp.v1.SpawnService/ListSpawns");
     expect(out).toEqual([
-      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "" },
-      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "" },
+      { spawnId: "a", name: "Wiki", appId: "spawnery/wiki", status: "active", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "", githubCredentialStatus: "none" },
+      { spawnId: "b", name: "", appId: "spawnery/zork", status: "suspended", generation: 0n, mode: "", model: "", modelApplied: true, journalKeyDeliveryPending: false, transitionPhase: "", parentSpawnId: "", forkedAt: 0, provisionStep: 0, provisionTotal: 0, provisionStepLabel: "", errorStep: "", errorDetail: "", githubCredentialStatus: "none" },
     ]);
   });
   it("maps fork lineage fields from ListSpawns", async () => {

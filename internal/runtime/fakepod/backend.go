@@ -245,8 +245,8 @@ func (b *Backend) ListManaged(_ context.Context) ([]runtime.ManagedPod, error) {
 }
 
 // ContainerEnv returns the environment the named container (sidecar or agent) was started with, read
-// back from the recorded spec — exactly what re-adoption needs to recover the per-pod secrets
-// (SIDECAR_CONTROL_TOKEN, SIDECAR_GETTOKEN_*) a previous process minted and that live only in the
+// back from the recorded spec — exactly what re-adoption needs to recover the per-pod secret
+// (SIDECAR_CONTROL_TOKEN) a previous process minted and that live only in the
 // still-running sidecar's env. A sandbox container has no env of its own; it returns an empty slice.
 func (b *Backend) ContainerEnv(_ context.Context, id string) ([]string, error) {
 	b.mu.Lock()
