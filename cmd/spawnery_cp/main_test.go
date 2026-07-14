@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/proto"
 
 	configfiles "spawnery/config"
@@ -32,6 +33,7 @@ import (
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/nodeauth"
 	"spawnery/internal/cp/skillfetch"
+	"spawnery/internal/h2keepalive"
 	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
@@ -330,6 +332,16 @@ func TestCPInternalClientPresentsCPRequiresAuthServiceRoleAndNegotiatesHTTP2(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = runtime.revocations.Close() })
+	transport, ok := runtime.client.Transport.(*http2.Transport)
+	if !ok {
+		t.Fatalf("internal client transport = %T, want *http2.Transport", runtime.client.Transport)
+	}
+	if transport.ReadIdleTimeout != h2keepalive.ReadIdleTimeout {
+		t.Errorf("ReadIdleTimeout = %v, want %v", transport.ReadIdleTimeout, h2keepalive.ReadIdleTimeout)
+	}
+	if transport.PingTimeout != h2keepalive.PingTimeout {
+		t.Errorf("PingTimeout = %v, want %v", transport.PingTimeout, h2keepalive.PingTimeout)
+	}
 	serve := func(role string, reached *bool) *httptest.Server {
 		return newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, role, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			*reached = true

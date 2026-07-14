@@ -490,6 +490,7 @@ func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error)
 			TLSClientConfig: clientTLS,
 			DialTLSContext:  mtls.DialTLSContextHTTP2(clientTLS, connections),
 		}
+		h2keepalive.ConfigureTransport(transport)
 		client = &http.Client{
 			Transport:     transport,
 			CheckRedirect: checkInternalRedirect,
