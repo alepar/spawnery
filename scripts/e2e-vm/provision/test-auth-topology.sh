@@ -93,6 +93,16 @@ rg -Fq 'reconcile-gitea-env.sh /etc/spawnery/env.d/gitea.env' "$REPO/scripts/e2e
   echo "roll.sh does not reconcile generated Gitea state before restarting the node" >&2
   exit 1
 }
+for caddy_cert in wildcard github; do
+  rg -Fq "/etc/spawnery/pki/${caddy_cert}.crt /etc/spawnery/caddy/${caddy_cert}.crt" "$REPO/scripts/e2e-vm/roll.sh" || {
+    echo "roll.sh does not preserve the golden ${caddy_cert} certificate before rotating internal PKI" >&2
+    exit 1
+  }
+  rg -Fq "/etc/spawnery/pki/${caddy_cert}.key /etc/spawnery/caddy/${caddy_cert}.key" "$REPO/scripts/e2e-vm/roll.sh" || {
+    echo "roll.sh does not preserve the golden ${caddy_cert} key before rotating internal PKI" >&2
+    exit 1
+  }
+done
 
 rg -q 'install -d -m0700 "\$CLIENT_STATE"' "$runner" || {
   echo "run.sh does not create a private mutable client-state directory" >&2
