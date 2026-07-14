@@ -32,7 +32,7 @@ const minPushRemaining = int64(nodeRefreshLead / time.Second)
 // token-less push with a 400. Everything else — a mint failure, an unreachable sidecar, a non-2xx — is
 // an error.
 func (s *githubControlServer) PushCredentials(ctx context.Context, spawnID, controlURL, controlToken string) error {
-	exp, err := s.pushOnce(ctx, spawnID, controlURL, controlToken)
+	exp, err := s.pushOnce(ctx, spawnID, controlURL, controlToken, false)
 	switch {
 	case errors.Is(err, ErrGitHubNotLinked):
 		return nil // not a github spawn: nothing to deliver
@@ -41,6 +41,8 @@ func (s *githubControlServer) PushCredentials(ctx context.Context, spawnID, cont
 	}
 	s.recordPushed(spawnID, exp)
 	s.report(spawnID, nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_OK)
+	// a spawn with no github link returned above, so ONLY github spawns get a watcher.
+	s.startEventsWatch(spawnID, controlURL, controlToken)
 	return nil
 }
 
@@ -85,7 +87,7 @@ func (s *githubControlServer) PushAsync(ctx context.Context, spawnID string) {
 
 	safego.Go("node.github-push", func() {
 		defer cancel()
-		s.pushWithRetry(pctx, spawnID, controlURL, controlToken)
+		s.pushWithRetry(pctx, spawnID, controlURL, controlToken, false)
 		s.mu.Lock()
 		// Only clear our own entry: a newer PushAsync may already have replaced it (pointer identity,
 		// not just non-nil — see pushHandle's doc comment).
@@ -96,6 +98,34 @@ func (s *githubControlServer) PushAsync(ctx context.Context, spawnID string) {
 	})
 }
 
+// pushOutcome is how a pushWithRetry loop ended. The events watcher (githubevents.go) acts on it: a
+// revoked link means there is nothing left to detect, so the watch stops.
+type pushOutcome int
+
+const (
+	pushOK             pushOutcome = iota // delivered; github_credential_status=OK
+	pushNotLinked                         // the spawn has no github link (or it was forgotten mid-flight)
+	pushRelinkRequired                    // the AS says the link is broken/revoked; RELINK_REQUIRED reported
+	pushStale                             // still undeliverable at the token's expiry; STALE reported
+	pushCanceled                          // ctx died (spawn stopped, or the process is going away)
+)
+
+func (o pushOutcome) String() string {
+	switch o {
+	case pushOK:
+		return "ok"
+	case pushNotLinked:
+		return "not-linked"
+	case pushRelinkRequired:
+		return "relink-required"
+	case pushStale:
+		return "stale"
+	case pushCanceled:
+		return "canceled"
+	}
+	return "unknown"
+}
+
 // pushWithRetry retries the push with exponential backoff until it lands, the spawn turns out to have no
 // link, the link is revoked, or the deadline passes — the spec's failure semantics (§4):
 //
@@ -104,34 +134,43 @@ func (s *githubControlServer) PushAsync(ctx context.Context, spawnID string) {
 //	still undeliverable at the
 //	  deadline (= the expiry of
 //	  the token the sidecar holds) -> STALE
-func (s *githubControlServer) pushWithRetry(ctx context.Context, spawnID, controlURL, controlToken string) {
+//
+// force applies to the FIRST attempt only: after it, the freshly minted token is in the refresher's
+// cache, and re-forcing on every backoff retry (whose failures are POST failures, not mint failures)
+// would be a mint storm against the AS.
+func (s *githubControlServer) pushWithRetry(ctx context.Context, spawnID, controlURL, controlToken string, force bool) pushOutcome {
 	deadline := s.staleDeadline(spawnID)
 	backoff := s.pushBackoffBase
+	attemptForce := force
 	for {
-		exp, err := s.pushOnce(ctx, spawnID, controlURL, controlToken)
+		exp, err := s.pushOnce(ctx, spawnID, controlURL, controlToken, attemptForce)
+		attemptForce = false
 		switch {
 		case err == nil:
 			s.recordPushed(spawnID, exp)
 			s.report(spawnID, nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_OK)
-			return
+			// delivery point 2/3 (rotation, re-adopt) is also where a restarted node RE-ESTABLISHES the
+			// rejection long-poll (§3.2) — idempotent, so a rotation push finds it already running.
+			s.startEventsWatch(spawnID, controlURL, controlToken)
+			return pushOK
 		case errors.Is(err, ErrGitHubNotLinked):
-			return // not a github spawn (or the link was forgotten mid-flight)
+			return pushNotLinked // not a github spawn (or the link was forgotten mid-flight)
 		case errors.Is(err, ErrGitHubRelinkRequired):
 			log.Printf("github push: spawn %s: %v (reporting RELINK_REQUIRED)", spawnID, err)
 			s.report(spawnID, nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_RELINK_REQUIRED)
-			return
+			return pushRelinkRequired
 		}
 		log.Printf("github push: spawn %s: %v (retrying in %s)", spawnID, err, backoff)
 
 		select {
 		case <-ctx.Done():
-			return // spawn stopped, or the process is going away
+			return pushCanceled // spawn stopped, or the process is going away
 		case <-time.After(backoff):
 		}
 		if s.now().After(deadline) {
 			log.Printf("github push: spawn %s: undeliverable past the token's expiry; reporting STALE", spawnID)
 			s.report(spawnID, nodev1.GitHubCredentialStatus_GITHUB_CREDENTIAL_STATUS_STALE)
-			return
+			return pushStale
 		}
 		if backoff *= 2; backoff > s.pushBackoffMax {
 			backoff = s.pushBackoffMax
@@ -140,8 +179,10 @@ func (s *githubControlServer) pushWithRetry(ctx context.Context, spawnID, contro
 }
 
 // pushOnce performs one delivery attempt: the spawn's CA (from the persistent store) plus a token with
-// at least minPushRemaining seconds of life. Returns the pushed token's expiry (unix; 0 = unknown).
-func (s *githubControlServer) pushOnce(ctx context.Context, spawnID, controlURL, controlToken string) (int64, error) {
+// at least minPushRemaining seconds of life. force bypasses the refresher's token cache and its
+// minMintInterval floor — the rejection path (§3.2) needs a genuinely NEW token, because the cached one
+// is exactly the one GitHub just refused. Returns the pushed token's expiry (unix; 0 = unknown).
+func (s *githubControlServer) pushOnce(ctx context.Context, spawnID, controlURL, controlToken string, force bool) (int64, error) {
 	s.mu.Lock()
 	pair, err := s.caForLocked(spawnID)
 	s.mu.Unlock()
@@ -149,7 +190,7 @@ func (s *githubControlServer) pushOnce(ctx context.Context, spawnID, controlURL,
 		return 0, err
 	}
 
-	tok, exp, err := s.refresher.GetToken(ctx, spawnID, minPushRemaining, false)
+	tok, exp, err := s.refresher.GetToken(ctx, spawnID, minPushRemaining, force)
 	// A rate-limited GetToken that still handed back a live cached token is good enough to push: the
 	// alternative is failing a delivery over the node's own mint floor.
 	if err != nil && !(tok != "" && errors.Is(err, ErrGitHubMintRateLimited)) {

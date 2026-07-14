@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -39,8 +40,9 @@ type caPair struct {
 type spawnControlLookup func(spawnID string) (controlURL, controlToken string, ok bool)
 
 // githubControlServer implements spawnlet.GitHubControlServer. It holds the per-spawn ECDSA-P256
-// CA store, drives the lane-aware HTTP control server (UDS or TCP) for GetToken + GetSpawnCA, and
-// PUSHES the CA + GitHub token into the sidecar (sp-2tx8.9 §3.1 — see githubpush.go).
+// CA store, drives the lane-aware HTTP control server (UDS or TCP) for GetToken + GetSpawnCA,
+// PUSHES the CA + GitHub token into the sidecar (sp-2tx8.9 §3.1 — see githubpush.go), and HOLDS a
+// rejection long-poll per github spawn (§3.2 — see githubevents.go).
 type githubControlServer struct {
 	refresher *githubRefresher
 	cas       caStore // on-disk CA persistence (sp-2tx8.3.5); zero value = memory-only
@@ -63,6 +65,23 @@ type githubControlServer struct {
 	pushBackoffBase    time.Duration
 	pushBackoffMax     time.Duration
 	pushFallbackWindow time.Duration
+
+	// --- watch plane (sp-2tx8.9.4) ---
+	// eventsDoer holds the long-poll against the sidecar's GET /control/github/events. It is a SEPARATE
+	// client from doer: doer has a 5s timeout (controlPostTimeout) and the long-poll blocks ~60s. nil
+	// disables rejection detection entirely (the default; node.Run sets it).
+	eventsDoer httpDoer
+	// baseCtx bounds the watcher goroutines. It is the NODE PROCESS's ctx, not a request's: PushCredentials
+	// runs on the create path, whose ctx dies with CreateWithSelection, and the watch must outlive it (and
+	// every CP reconnect). Set by node.Run; context.Background() by default.
+	baseCtx context.Context
+
+	watches map[string]*watchHandle // in-flight events long-poll per spawn (githubevents.go)
+
+	eventsBackoffBase time.Duration // re-dial backoff after a FAILED poll
+	eventsBackoffMax  time.Duration
+	eventsPollTimeout time.Duration // our own bound on one long-poll (> the sidecar's 60s)
+	rejectCooldown    time.Duration // min interval between two FORCED re-mints for one spawn
 }
 
 // Default push timings. The retry loop gives up when the last successfully pushed token expires
@@ -72,6 +91,17 @@ const (
 	defaultPushBackoffBase    = 5 * time.Second
 	defaultPushBackoffMax     = 60 * time.Second
 	defaultPushFallbackWindow = 15 * time.Minute
+)
+
+// Default watch timings (sp-2tx8.9.4). eventsPollTimeout exceeds the sidecar's own ~60s long-poll bound
+// (internal/sidecar/githubstate.go: defaultEventsTimeout) so a healthy poll is ended by the SIDECAR's
+// 204, not by us. rejectCooldown bounds forced re-mints: GetToken(force=true) bypasses the refresher's
+// minMintInterval floor, so an agent hammering a dead token must not become a mint storm against the AS.
+const (
+	defaultEventsBackoffBase = 5 * time.Second
+	defaultEventsBackoffMax  = 60 * time.Second
+	defaultEventsPollTimeout = 90 * time.Second
+	defaultRejectCooldown    = 60 * time.Second
 )
 
 // newGitHubControlServer creates a githubControlServer backed by the given refresher and the given
@@ -90,6 +120,12 @@ func newGitHubControlServer(r *githubRefresher, store caStore) *githubControlSer
 		pushBackoffBase:    defaultPushBackoffBase,
 		pushBackoffMax:     defaultPushBackoffMax,
 		pushFallbackWindow: defaultPushFallbackWindow,
+		baseCtx:            context.Background(),
+		watches:            make(map[string]*watchHandle),
+		eventsBackoffBase:  defaultEventsBackoffBase,
+		eventsBackoffMax:   defaultEventsBackoffMax,
+		eventsPollTimeout:  defaultEventsPollTimeout,
+		rejectCooldown:     defaultRejectCooldown,
 	}
 }
 
@@ -241,7 +277,8 @@ func (s *githubControlServer) Serve(t spawnlet.ControlTransport) error {
 // A graceful restart does NOT call Stop (see DetachAll) — that asymmetry is what lets the CA survive
 // a spawnlet restart while still dying with the spawn. Also calls Forget on the refresher so the
 // proactive-refresh entry is removed (callers that previously called Forget directly may switch to
-// Stop-only to avoid the double-Forget; Forget is idempotent).
+// Stop-only to avoid the double-Forget; Forget is idempotent), and stops the spawn's
+// `/control/github/events` long-poll (sp-2tx8.9.4) — rejection detection dies with the spawn.
 func (s *githubControlServer) Stop(spawnID string) {
 	s.mu.Lock()
 	if ln := s.listeners[spawnID]; ln != nil {
@@ -252,6 +289,10 @@ func (s *githubControlServer) Stop(spawnID string) {
 	if h := s.pushes[spawnID]; h != nil {
 		h.cancel()
 		delete(s.pushes, spawnID)
+	}
+	if w := s.watches[spawnID]; w != nil {
+		w.cancel()
+		delete(s.watches, spawnID)
 	}
 	delete(s.lastStatus, spawnID)
 	delete(s.pushedExpiry, spawnID)

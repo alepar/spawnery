@@ -224,6 +224,12 @@ func Run(ctx context.Context, mgr *spawnlet.Manager, httpc connect.HTTPClient, c
 			}
 			return sp.ControlURL, sp.ControlToken, true
 		}
+		// Rejection detection (sp-2tx8.9 §3.2): the node holds a long-poll per github spawn against the
+		// sidecar's GET /control/github/events. It needs its OWN client — the push doer's 5s timeout would
+		// guillotine a 60s long-poll — and the PROCESS's ctx, because a watch outlives both the create call
+		// that started it and every CP reconnect.
+		ghControl.eventsDoer = &http.Client{} // no client timeout: eventsPollTimeout bounds each poll
+		ghControl.baseCtx = ctx
 		// Delivery point 2 — ON ROTATION: hook the refresher's existing ~8h schedule. Set BEFORE
 		// githubRefresh.run's goroutine can fire a Tick.
 		githubRefresh.onRotate = ghControl.PushAsync
