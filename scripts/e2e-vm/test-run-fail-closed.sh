@@ -141,6 +141,51 @@ if [ "$actual_acceptance_commands" != "$expected_acceptance_commands" ]; then
   exit 1
 fi
 
+for documented_pass in \
+  'pass 1 `--project=chromium -g @noderestart`' \
+  'pass 2 `--project=chromium --grep-invert @noderestart`' \
+  'pass 3 `--project=destructive-root-artifacts --no-deps`'
+do
+  rg -Fq -- "$documented_pass" "$ROOT/acceptance/README.md" || {
+    echo "acceptance README lacks default VM lane command: $documented_pass" >&2
+    exit 1
+  }
+done
+
+sed -n '/^# Pass 1:/,$p' "$ROOT/scripts/e2e-vm/run.sh" >"$TMP/default-acceptance-passes.sh"
+acceptance_trace="$TMP/default-acceptance.trace"
+set +e
+(
+  set -euo pipefail
+  RD="$TMP/behavioral-run"
+  log() { :; }
+  npm() {
+    printf '%s\n' "$*" >>"$acceptance_trace"
+    case "$*" in
+      *'--project=chromium -g @noderestart'*) return 31 ;;
+      *'--project=chromium --grep-invert @noderestart'*) return 32 ;;
+      *'--project=destructive-root-artifacts --no-deps'*) return 33 ;;
+      *) return 99 ;;
+    esac
+  }
+  # shellcheck disable=SC1090
+  source "$TMP/default-acceptance-passes.sh"
+)
+acceptance_rc=$?
+set -e
+if [ "$acceptance_rc" -ne 31 ]; then
+  echo "run.sh did not preserve the first nonzero acceptance exit (got $acceptance_rc, want 31)" >&2
+  exit 1
+fi
+expected_acceptance_trace=$'run test:accept -- --retries=0 --workers=1 --project=chromium -g @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps'
+actual_acceptance_trace="$(cat "$acceptance_trace")"
+if [ "$actual_acceptance_trace" != "$expected_acceptance_trace" ]; then
+  echo "run.sh stopped or reordered acceptance passes after an earlier failure" >&2
+  printf 'expected trace:\n%s\nactual trace:\n%s\n' \
+    "$expected_acceptance_trace" "$actual_acceptance_trace" >&2
+  exit 1
+fi
+
 PLAYWRIGHT="$ROOT/node_modules/.bin/playwright"
 [ -x "$PLAYWRIGHT" ] || {
   echo "repository-local Playwright CLI is unavailable; run npm ci" >&2
@@ -159,20 +204,20 @@ list_acceptance --project=chromium --grep-invert '@noderestart' >"$TMP/ordinary.
 list_acceptance --project=destructive-root-artifacts --no-deps >"$TMP/destructive.list"
 
 restart_count="$(rg -c '^  \[chromium\].*@noderestart$' "$TMP/noderestart.list" || true)"
-if [ "$restart_count" -ne 1 ] ||
-    rg -q '\[destructive-root-artifacts\]' "$TMP/noderestart.list"; then
+restart_total="$(rg -c '^  \[[^]]+\] › ' "$TMP/noderestart.list" || true)"
+restart_projects="$(sed -n 's/^  \[\([^]]*\)\] ›.*/\1/p' "$TMP/noderestart.list" | sort -u)"
+if [ "$restart_count" -ne 1 ] || [ "$restart_total" -ne 1 ] ||
+    [ "$restart_projects" != chromium ]; then
   echo "restart discovery is not exactly one chromium @noderestart test" >&2
   cat "$TMP/noderestart.list" >&2
   exit 1
 fi
 
-rg -q '^  \[chromium\] ›' "$TMP/ordinary.list" || {
-  echo "ordinary discovery contains no chromium tests" >&2
-  cat "$TMP/ordinary.list" >&2
-  exit 1
-}
-if rg -q '@noderestart|\[destructive-root-artifacts\]' "$TMP/ordinary.list"; then
-  echo "ordinary discovery replayed restart or destructive coverage" >&2
+ordinary_total="$(rg -c '^  \[[^]]+\] › ' "$TMP/ordinary.list" || true)"
+ordinary_projects="$(sed -n 's/^  \[\([^]]*\)\] ›.*/\1/p' "$TMP/ordinary.list" | sort -u)"
+if [ "$ordinary_total" -ne 40 ] || [ "$ordinary_projects" != chromium ] ||
+    rg -q '@noderestart' "$TMP/ordinary.list"; then
+  echo "ordinary discovery is not exactly 40 chromium tests without @noderestart" >&2
   cat "$TMP/ordinary.list" >&2
   exit 1
 fi
@@ -181,8 +226,11 @@ destructive_count="$(
   rg -c '^  \[destructive-root-artifacts\] › auth/root-anchored-artifacts\.spec\.ts:' \
     "$TMP/destructive.list" || true
 )"
-if [ "$destructive_count" -ne 1 ] ||
-    rg -q '\[chromium\]|@noderestart' "$TMP/destructive.list"; then
+destructive_total="$(rg -c '^  \[[^]]+\] › ' "$TMP/destructive.list" || true)"
+destructive_projects="$(sed -n 's/^  \[\([^]]*\)\] ›.*/\1/p' "$TMP/destructive.list" | sort -u)"
+if [ "$destructive_count" -ne 1 ] || [ "$destructive_total" -ne 1 ] ||
+    [ "$destructive_projects" != destructive-root-artifacts ] ||
+    rg -q '@noderestart' "$TMP/destructive.list"; then
   echo "destructive discovery replayed chromium dependencies or lost root-artifact coverage" >&2
   cat "$TMP/destructive.list" >&2
   exit 1

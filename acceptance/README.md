@@ -109,9 +109,16 @@ own, its files and its in-flight processes survive, and in-agent git-over-HTTPS 
 
 It needs `ACC_NODE_RESTART_CMD` (a host shell command that restarts the target's spawnlet — see
 `.env.example`); unset, it fails loudly rather than skipping. Because a node restart disturbs **every** spawn
-on the box, the scenario is tagged `@noderestart` and must run in its **own serial pass**:
-`scripts/e2e-vm/run.sh` does that automatically (pass 1 `--grep-invert @noderestart`, pass 2
-`-g @noderestart --workers=1`). Against a target whose node you cannot restart, exclude it with
+on the box, the scenario is tagged `@noderestart` and must run in its **own serial pass**. The default VM
+lane in `scripts/e2e-vm/run.sh` runs three serial commands:
+
+1. pass 1 `--project=chromium -g @noderestart`
+2. pass 2 `--project=chromium --grep-invert @noderestart`
+3. pass 3 `--project=destructive-root-artifacts --no-deps`
+
+The destructive project remains dependent on Chromium for ordinary direct Playwright use; only the final
+VM pass suppresses that dependency to avoid replaying restart and ordinary coverage after destructive
+state changes. Against a target whose node you cannot restart, exclude the scenario with
 `--grep-invert @noderestart`.
 
 ## Ownership & SLO
