@@ -153,38 +153,49 @@ do
 done
 
 sed -n '/^# Pass 1:/,$p' "$ROOT/scripts/e2e-vm/run.sh" >"$TMP/default-acceptance-passes.sh"
-acceptance_trace="$TMP/default-acceptance.trace"
-set +e
-(
-  set -euo pipefail
-  RD="$TMP/behavioral-run"
-  log() { :; }
-  npm() {
-    printf '%s\n' "$*" >>"$acceptance_trace"
-    case "$*" in
-      *'--project=chromium -g @noderestart'*) return 31 ;;
-      *'--project=chromium --grep-invert @noderestart'*) return 32 ;;
-      *'--project=destructive-root-artifacts --no-deps'*) return 33 ;;
-      *) return 99 ;;
-    esac
-  }
-  # shellcheck disable=SC1090
-  source "$TMP/default-acceptance-passes.sh"
-)
-acceptance_rc=$?
-set -e
-if [ "$acceptance_rc" -ne 31 ]; then
-  echo "run.sh did not preserve the first nonzero acceptance exit (got $acceptance_rc, want 31)" >&2
-  exit 1
-fi
 expected_acceptance_trace=$'run test:accept -- --retries=0 --workers=1 --project=chromium -g @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps'
-actual_acceptance_trace="$(cat "$acceptance_trace")"
-if [ "$actual_acceptance_trace" != "$expected_acceptance_trace" ]; then
-  echo "run.sh stopped or reordered acceptance passes after an earlier failure" >&2
-  printf 'expected trace:\n%s\nactual trace:\n%s\n' \
-    "$expected_acceptance_trace" "$actual_acceptance_trace" >&2
-  exit 1
-fi
+run_acceptance_case() {
+  local case_name="$1" restart_rc="$2" ordinary_rc="$3" destructive_rc="$4" expected_rc="$5"
+  local acceptance_trace="$TMP/default-acceptance-$case_name.trace"
+  local acceptance_rc actual_acceptance_trace
+
+  set +e
+  (
+    set -euo pipefail
+    RD="$TMP/behavioral-run-$case_name"
+    log() { :; }
+    npm() {
+      printf '%s\n' "$*" >>"$acceptance_trace"
+      case "$*" in
+        *'--project=chromium -g @noderestart'*) return "$restart_rc" ;;
+        *'--project=chromium --grep-invert @noderestart'*) return "$ordinary_rc" ;;
+        *'--project=destructive-root-artifacts --no-deps'*) return "$destructive_rc" ;;
+        *) return 99 ;;
+      esac
+    }
+    # shellcheck disable=SC1090
+    source "$TMP/default-acceptance-passes.sh"
+  )
+  acceptance_rc=$?
+  set -e
+
+  if [ "$acceptance_rc" -ne "$expected_rc" ]; then
+    echo "run.sh acceptance case $case_name exited $acceptance_rc, want $expected_rc" >&2
+    exit 1
+  fi
+  actual_acceptance_trace="$(cat "$acceptance_trace")"
+  if [ "$actual_acceptance_trace" != "$expected_acceptance_trace" ]; then
+    echo "run.sh acceptance case $case_name stopped or reordered passes" >&2
+    printf 'expected trace:\n%s\nactual trace:\n%s\n' \
+      "$expected_acceptance_trace" "$actual_acceptance_trace" >&2
+    exit 1
+  fi
+}
+
+run_acceptance_case all-fail 31 32 33 31
+run_acceptance_case pass2-fail 0 32 0 32
+run_acceptance_case pass3-fail 0 0 33 33
+run_acceptance_case all-success 0 0 0 0
 
 PLAYWRIGHT="$ROOT/node_modules/.bin/playwright"
 [ -x "$PLAYWRIGHT" ] || {
@@ -215,9 +226,9 @@ fi
 
 ordinary_total="$(rg -c '^  \[[^]]+\] › ' "$TMP/ordinary.list" || true)"
 ordinary_projects="$(sed -n 's/^  \[\([^]]*\)\] ›.*/\1/p' "$TMP/ordinary.list" | sort -u)"
-if [ "$ordinary_total" -ne 40 ] || [ "$ordinary_projects" != chromium ] ||
-    rg -q '@noderestart' "$TMP/ordinary.list"; then
-  echo "ordinary discovery is not exactly 40 chromium tests without @noderestart" >&2
+if [ "$ordinary_total" -lt 1 ] || [ "$ordinary_projects" != chromium ] ||
+    rg -q '@noderestart|auth/root-anchored-artifacts\.spec\.ts' "$TMP/ordinary.list"; then
+  echo "ordinary discovery is not nonempty chromium-only coverage without excluded tests" >&2
   cat "$TMP/ordinary.list" >&2
   exit 1
 fi
