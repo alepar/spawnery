@@ -433,10 +433,13 @@ func TestCPSkillBundleAllOrNothingE2E(t *testing.T) {
 	goodCatalogID, _ := putMember(goodName, buildSkillTar(t, "# good\nThis member is fine.\n"))
 	brokenCatalogID, _ := putMember(brokenName, buildBrokenSkillTar(t))
 
-	// createBundleSpawn creates a bundle (bundleID/versionID unique per call), attaches it to a
-	// fresh profile via a store-level bundle_ref entry (no RPC attach exists yet — sp-mwco.1.8),
-	// and creates a claude-tui spawn from it. Returns the spawn id and the entry id (for the
-	// error-detail assertion).
+	// createBundleSpawn creates a bundle (bundleID/versionID unique per call) and its members via
+	// direct store writes — legitimate here because the "broken" bundle's second member is a
+	// synthetic SKILL.md-less tar that no real ingest could ever produce — then attaches it to a
+	// fresh profile via the real AddProfileEntry(BUNDLE_REF) RPC (see sp-mwco.1.14: the profile
+	// attach used to be a store-level shortcut too; it now goes through the wire, exactly like
+	// TestCPSkillBundleE2E) and creates a claude-tui spawn from it. Returns the spawn id and the
+	// entry id (for the error-detail assertion).
 	createBundleSpawn := func(label string, members []store.SkillBundleMember) (spawnID, entryID string) {
 		t.Helper()
 		bundleID := "bnd-aon-" + label + "-" + nonce
@@ -465,17 +468,45 @@ func TestCPSkillBundleAllOrNothingE2E(t *testing.T) {
 			t.Fatalf("CreateProfile (%s): %v", label, err)
 		}
 		profileID := profResp.Msg.ProfileId
-		entryID = "ent-bundle-" + label + "-" + nonce
-		if _, err := st.Profiles().AddEntry(ctx, profileID, 1, store.ProfileEntry{
-			ProfileID:  profileID,
-			EntryID:    entryID,
-			Kind:       store.ProfileEntrySkill,
-			Name:       "my-bundle-" + label,
-			SourceKind: store.ProfileSourceBundle,
-			BundleID:   bundleID,
-			VersionID:  versionID,
-		}, now); err != nil {
-			t.Fatalf("Profiles().AddEntry (%s, bundle_ref): %v", label, err)
+
+		addResp, err := cl.AddProfileEntry(ctx, connect.NewRequest(&cpv1.AddProfileEntryRequest{
+			ProfileId:       profileID,
+			ExpectedVersion: 1,
+			Entry: &cpv1.ProfileEntry{
+				Kind:     cpv1.ProfileEntryKind_PROFILE_ENTRY_KIND_SKILL,
+				Name:     "my-bundle-" + label,
+				Source:   cpv1.ProfileEntrySource_PROFILE_ENTRY_SOURCE_BUNDLE_REF,
+				BundleId: bundleID, // version_id left empty — the RPC pins latest itself
+			},
+		}))
+		if err != nil {
+			t.Fatalf("AddProfileEntry (%s, bundle_ref): %v", label, err)
+		}
+		entryID = addResp.Msg.GetEntryId()
+		t.Logf("createBundleSpawn(%s): entry %s, warnings=%v", label, entryID, addResp.Msg.GetWarnings())
+
+		// Prove the RPC really pinned the version this closure just created (the seam
+		// sp-mwco.1.14 closes) — not some other/stale version of the same bundle.
+		getProfResp, err := cl.GetProfile(ctx, connect.NewRequest(&cpv1.GetProfileRequest{ProfileId: profileID}))
+		if err != nil {
+			t.Fatalf("GetProfile (%s): %v", label, err)
+		}
+		var entry *cpv1.ProfileEntry
+		for _, e := range getProfResp.Msg.GetProfile().GetEntries() {
+			if e.GetEntryId() == entryID {
+				entry = e
+				break
+			}
+		}
+		if entry == nil {
+			t.Fatalf("GetProfile (%s): entry %s not found", label, entryID)
+		}
+		if entry.GetVersionId() != versionID {
+			t.Fatalf("createBundleSpawn(%s): profile entry version_id=%q != created version_id=%q — RPC attach did not pin the version this test created",
+				label, entry.GetVersionId(), versionID)
+		}
+		if int(entry.GetMemberCount()) != len(members) {
+			t.Fatalf("createBundleSpawn(%s): entry.member_count=%d != %d bundle members", label, entry.GetMemberCount(), len(members))
 		}
 
 		cs, err := cl.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{
