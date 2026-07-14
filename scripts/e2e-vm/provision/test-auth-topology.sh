@@ -406,23 +406,65 @@ printf '%s\n' "$node_unit" | rg -q '^UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB
   echo "fresh spawnlet unit lacks the GitHub secret environment fence" >&2
   exit 1
 }
-if printf '%s\n' "$authsvc_unit" | rg -q '^InaccessiblePaths=.*(?:^| )-?/etc/spawnery/env.d(?:/gitea\.env)?(?: |$)'; then
-  echo "fresh authsvc unit cannot read its private fake-provider token" >&2
-  exit 1
-fi
+inaccessible_path_tokens() {
+  local unit_text="$1" line rhs token
+  local -a tokens=()
+  while IFS= read -r line; do
+    [[ "$line" == InaccessiblePaths=* ]] || continue
+    rhs="${line#InaccessiblePaths=}"
+    read -r -a tokens <<<"$rhs"
+    for token in "${tokens[@]}"; do
+      printf '%s\n' "$token"
+    done
+  done <<<"$unit_text"
+}
+
+unit_has_inaccessible_path() {
+  inaccessible_path_tokens "$1" | rg -Fqx -- "$2"
+}
+
+for first_fence_token in \
+  /etc/spawnery/env.d \
+  -/etc/spawnery/env.d \
+  /etc/spawnery/env.d/gitea.env \
+  -/etc/spawnery/env.d/gitea.env
+do
+  first_token_fixture="InaccessiblePaths=${first_fence_token} /unrelated"
+  unit_has_inaccessible_path "$first_token_fixture" "$first_fence_token" || {
+    echo "InaccessiblePaths test matcher misses first RHS token ${first_fence_token}" >&2
+    exit 1
+  }
+done
+for forbidden_authsvc_fence in \
+  /etc/spawnery/env.d \
+  -/etc/spawnery/env.d \
+  /etc/spawnery/env.d/gitea.env \
+  -/etc/spawnery/env.d/gitea.env
+do
+  if unit_has_inaccessible_path "$authsvc_unit" "$forbidden_authsvc_fence"; then
+    echo "fresh authsvc unit cannot read its private fake-provider token" >&2
+    exit 1
+  fi
+done
 for private_unit in cp node; do
   case "$private_unit" in
     cp) unit_text="$cp_unit" ;;
     node) unit_text="$node_unit" ;;
   esac
-  printf '%s\n' "$unit_text" | rg -q '^InaccessiblePaths=.*(?:^| )/etc/spawnery/env.d(?: |$)' || {
+  unit_has_inaccessible_path "$unit_text" /etc/spawnery/env.d || {
     echo "fresh ${private_unit} unit lacks the stable authsvc environment-directory fence" >&2
     exit 1
   }
-  if printf '%s\n' "$unit_text" | rg -q '(?:^| )-/etc/spawnery/env.d(?: |$)|(?:^| )-?/etc/spawnery/env.d/gitea\.env(?: |$)'; then
-    echo "fresh ${private_unit} unit uses an optional or exact-file custody fence" >&2
-    exit 1
-  fi
+  for weak_fence in \
+    -/etc/spawnery/env.d \
+    /etc/spawnery/env.d/gitea.env \
+    -/etc/spawnery/env.d/gitea.env
+  do
+    if unit_has_inaccessible_path "$unit_text" "$weak_fence"; then
+      echo "fresh ${private_unit} unit uses an optional or exact-file custody fence" >&2
+      exit 1
+    fi
+  done
   printf '%s\n' "$unit_text" | rg -q '^CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE$' || {
     echo "fresh ${private_unit} unit lost the CAP_SYS_ADMIN denial required by the file sandbox" >&2
     exit 1
