@@ -163,14 +163,16 @@ until `SetActive`, after the blocking `Provision` call. `scheduler.inflight` is 
 therefore not an authorization source. This design replaces that gap for **every** create, resume,
 recreate, migrate, and fork-target start, not only starts that happen to carry a GitHub mount.
 
-`spawn_containers` gains `node_class`, `node_account_id`, `placement_reserved_at`, and
-`control_protocol_version`. Its existing `node_id` participates in the same reservation. After
-`ClaimStarting` has created generation N, the CP performs this sequence before it sends `StartSpawn`:
+`spawn_containers` gains `placement_reservation_id`, `node_class`, `node_account_id`,
+`placement_reserved_at`, and `control_protocol_version`. Its existing `node_id` participates in the
+same reservation. `placement_reservation_id` is a CP-generated random 128-bit value; together these fields
+are the immutable **reservation tuple**. After `ClaimStarting` has created generation N, the CP performs
+this sequence before it sends `StartSpawn`:
 
 1. Pick one currently eligible node and read its class/account from the CP's mTLS-derived registry
    entry, never from self-asserted `Register` fields.
-2. In one store transaction call `ReservePlacement(spawn_id, generation, node_id, node_class,
-   node_account_id, control_protocol_version, reserved_at)`.
+2. In one store transaction call `ReservePlacement(spawn_id, generation, reservation_id, node_id,
+   node_class, node_account_id, control_protocol_version, reserved_at)`.
 3. `ReservePlacement` updates only the current live row with the exact generation, `phase=starting`,
    `ended_at IS NULL`, and empty placement fields. Repeating the exact tuple is idempotent; any different
    tuple or stale generation returns `ErrConflict`.
@@ -178,24 +180,31 @@ recreate, migrate, and fork-target start, not only starts that happen to carry a
    must not choose a different node. Register/await the A4 intent against the same durable tuple where
    that flow applies, then send `StartSpawn` carrying the reserved generation and protocol version.
 
-`SetActive` no longer assigns placement. It changes phase/status only if the existing reservation fields
-match the reporting authenticated node and generation. Re-adoption also verifies the existing tuple; it
+`SetActive` is replaced by a tuple-fenced `ActivatePlacement`; it no longer assigns placement. Every
+writer that can activate, error, roll back, end, or reassign an episode supplies the exact
+`(spawn_id, generation, reservation tuple)` it started with. The store transaction compares all of those
+fields and the allowed source phase before changing both the container row and high-level spawn status.
+An exact retry of the already-applied transition is idempotent; a stale generation, different tuple, or
+wrong source phase returns `ErrConflict` and changes nothing. Re-adoption verifies the existing tuple; it
 does not rewrite ownership. The AS authorization path never reads `scheduler.inflight`, pending-intent
 maps, router bindings, or an in-memory GitHub index.
 
 The reservation is immutable for one generation. A send failure, node loss, issuance denial, timeout, or
-pre-ACTIVE rollback ends that live container row through the existing error/revert compensation. Choosing
-another node requires `ClaimStarting` to create generation N+1; a workload SVID for N can therefore never
-become valid for a reassigned incarnation. Migration's defined rollback ends the failed target row and
-returns the spawn to suspended; its next target attempt also gets a new generation. No operation clears
-`node_id` and reuses the generation.
+pre-ACTIVE rollback calls a tuple-fenced terminal transition; it may end only the row and high-level state
+still owned by that exact operation. Choosing another node first ends N with N's tuple, then
+`ClaimStarting` creates generation N+1 and a new tuple. Those operations are separate committed store
+transactions in that order; N+1 is never exposed until N is durably terminal. Migration follows the same
+ordering when it returns the spawn to suspended before a later target attempt. A delayed failure callback
+from N after N+1 has been reserved or activated receives `ErrConflict` and cannot mark N+1 errored,
+suspended, or unplaced. No operation clears `node_id`, reuses a generation, or performs an unfenced
+high-level status write after its tuple-fenced transition fails.
 
 The authoritative query is a store method over the live `spawn_containers` row, keyed by
-`(spawn_id,generation)`. It returns the stamped node ID/class/account, protocol version, phase,
+`(spawn_id,generation)`. It returns the complete reservation tuple, protocol version, phase,
 `reserved_at`, and `ended_at`. A `starting` or `active` live row is authorizable even if a CP restart has
 temporarily projected the high-level spawn status as `unreachable`; delete, suspend completion, error,
-rollback, or reassignment ends the row and denies it. This preserves a `StartSpawn` already delivered
-before a CP crash while keeping generation fencing load-bearing.
+rollback, or reassignment atomically ends the row and denies it. This preserves a `StartSpawn` already
+delivered before a CP crash while keeping generation and operation fencing load-bearing.
 
 CP startup/recovery reconstructs no authority from scheduler memory. A required database-backed test
 commits a reservation, destroys the CP/server/scheduler objects, constructs a new CP on the same store,
@@ -205,20 +214,25 @@ and before issuance, followed by the node request; `scheduler.inflight` is empty
 
 #### 5.2.1 Mandatory reservation crash spike
 
-Before API implementation, a store-level spike runs the exact transaction concurrently against SQLite
+Before API implementation, a store-level spike runs the exact transactions concurrently against SQLite
 and Postgres: two nodes attempt the same generation, only one reserves; the process is reconstructed from
 the database; exact authorization survives; ending the row removes authority; generation N+1 cannot be
-authorized with N's tuple. It also proves `SetActive` cannot replace the reservation.
+authorized with N's tuple. It crash-tests reserve, activate, error, rollback, and reassignment before and
+after commit. After N+1 is active, it delivers delayed success and failure results carrying N's tuple and
+proves every container field and high-level spawn field for N+1 is byte-for-byte unchanged.
 
-**Kill criterion:** if empty/reserved/active cannot be distinguished and fenced atomically on the current
-container row, add an explicit placement-state column or generation-keyed placement table. Do not bridge
-the ambiguity with a scheduler map, router binding, timestamp guess, or best-effort cleanup.
+**Kill criterion:** if empty/reserved/active/terminal state and the high-level spawn transition cannot be
+compared and changed atomically by exact generation plus reservation tuple, add an explicit placement-state
+column and generation-keyed placement table owned by the same store transaction. Do not bridge the
+ambiguity with a scheduler map, router binding, timestamp guess, unfenced compensation, or best-effort
+cleanup.
 
 ### 5.3 AS to CP reservation confirmation
 
-Before every signature, the AS calls a new CP internal procedure, `AuthorizeSpawnWorkloadSVID`, over the
-existing AS-service-to-CP mTLS client. The request contains the AS-derived node class, node account, node
-ID, spawn ID, generation, and CSR SPKI digest. The CP route permits only an `authsvc` service principal.
+Before every signature, the AS calls `AuthorizeSpawnWorkloadSVID` on a new, separate protobuf service,
+`cpinternal.v1.WorkloadIssuanceAuthorizationService`, over the existing AS-service-to-CP mTLS client. The
+request contains the AS-derived node class, node account, node ID, spawn ID, generation, and CSR SPKI
+digest. The CP route permits only an `authsvc` service principal.
 
 The CP confirms from the durable placement query that:
 
@@ -244,11 +258,39 @@ honest service and gives the CP an authoritative audit point.
 CP/AS service principals, workload principals, malformed node principals, and wrong-role certificates
 are rejected before the issuance handler and signer are reached.
 
-`AuthorizeSpawnWorkloadSVID` is registered only on the CP direct-TLS internal listener and only for an
-`authsvc` service principal. It is absent from the browser/CLI/public Connect handler. Anonymous callers,
-nodes, CP service peers, workload principals, and wrong-role certificates are rejected before the store
-query. Route-matrix tests enumerate every principal kind on both listeners and assert that public-listener
-requests are unregistered rather than delegated to application authorization.
+`AuthorizeSpawnWorkloadSVID` is the only method on
+`cpinternal.v1.WorkloadIssuanceAuthorizationService`. That generated service handler is registered only on
+the CP direct-TLS internal mux and only for an `authsvc` service principal. The method is never added to
+the public `cp.v1.SpawnService`, and the generated internal service is never mounted wholesale or by path
+prefix on the browser/CLI handler. Anonymous callers, nodes, CP service peers, workload principals, and
+wrong-role certificates are rejected before the store query. Route-matrix tests enumerate every principal
+kind on both listeners and assert that public-listener requests are unregistered rather than delegated to
+application authorization.
+
+### 5.5 Root-revocation gate on issuance boundaries
+
+The AS and CP each open their own durable root-issuer CRL checkpoint and refresher before making their
+internal listener ready. Their internal server verifier and internal client transport compose ordinary
+chain/profile/leaf-CRL validation with the fresh root-issuer CRL check from section 8.2. Consequently the
+AS rejects a node whose node-intermediate serial is root-revoked, and the CP rejects an AS connection whose
+service-intermediate serial is root-revoked. The AS also applies the same check to the CP peer on its
+outbound confirmation call. A missing or stale root-issuer CRL poisons these internal verifiers; the public
+service may remain available, but workload issuance and confirmation are unavailable.
+
+Both internal listeners and the AS-to-CP client register actual connections by peer issuer serial. Applying
+a higher root CRL closes every socket chaining through a newly revoked issuer; reaching `NextUpdate`
+closes every socket dependent on the stale snapshot. `IssueSpawnWorkloadSVID` takes an immutable fresh
+root-CRL snapshot and rechecks the authenticated node issuer immediately before it calls CP. After CP
+authorization returns, it rechecks freshness, the authenticated node issuer, and the selected workload
+signing intermediate against the latest root CRL immediately before invoking the signer.
+`AuthorizeSpawnWorkloadSVID` performs the corresponding check on the authenticated AS service issuer
+immediately before its placement query. These checks close the verify-to-handler and confirmation-to-sign
+races; a root-revoked workload issuer cannot sign, and an already-established or pooled connection never
+preserves issuance authority across issuer revocation.
+
+AS/CP startup, readiness, socket eviction, and the pre-signer recheck land before the workload signer or
+either workload-issuance RPC is enabled. Tests pause at every boundary, advance the root CRL or its
+freshness clock, and prove the placement query and signer remain untouched.
 
 ## 6. Key custody and injection
 
@@ -257,16 +299,16 @@ AS or CP. The node writes one per-incarnation material directory below its exist
 
 ```text
 workload-svid/<spawn-id>/<generation>/
-  versions/<serial>/tls.crt
-  versions/<serial>/tls.key
-  versions/<serial>/root.pem
-  versions/<serial>/node-issuer.crt
-  versions/<serial>/root-issuer.crl
-  versions/<serial>/node-leaf.crl
-  versions/<serial>/workload-leaf.crl
-  versions/<serial>/revocation-sources.json
-  versions/<serial>/manifest.json
-  current -> versions/<serial>
+  versions/<version-id>/tls.crt
+  versions/<version-id>/tls.key
+  versions/<version-id>/root.pem
+  versions/<version-id>/node-issuers/<issuer-fingerprint>.crt
+  versions/<version-id>/root-issuer.crl
+  versions/<version-id>/node-leaf-crls/<issuer-fingerprint>.crl
+  versions/<version-id>/workload-leaf.crl
+  versions/<version-id>/revocation-sources.json
+  versions/<version-id>/manifest.json
+  current -> versions/<version-id>
 ```
 
 The host-private ancestor is `0700` and owned by the spawnlet account. The bind-source projection below
@@ -276,11 +318,13 @@ a rootless spawnlet cannot `chown` to the remap base. Host users still cannot tr
 ancestor, the agent never receives the bind mount, and the sidecar sees a read-only mount. Security rests
 on the private host ancestor plus mount-namespace separation, not on a UID mapping that differs by lane.
 
-`manifest.json` records the exact principal, serial, validity, protocol version, and SHA-256 of every
-file. A staging version is created with owner-only modes, fully written, synced, validated, then chmoded
-into its read-only projection before an atomic rename changes `current`. A partial version is never
-served. Teardown removes all versions after the pod is stopped; suspend/delete follows the existing
-spawn-incarnation cleanup rules.
+`version-id` is a unique monotonic node-local sequence, independent of the workload leaf serial, so a
+trust-only node-issuer update can publish a new coherent version without reissuing the workload leaf.
+`manifest.json` records that version, the exact principal, workload serial, validity, protocol version,
+accepted issuer-set generation, and SHA-256 of every file. A staging version is created with owner-only
+modes, fully written, synced, validated, then chmoded into its read-only projection before an atomic rename
+changes `current`. A partial version is never served. Teardown removes all versions after the pod is
+stopped; suspend/delete follows the existing spawn-incarnation cleanup rules.
 
 The whole per-incarnation projection is bind-mounted read-only into the sidecar at
 `/run/spawnery/workload`. It is a sidecar-only mount through `PodSpec.SidecarMounts`; it is never included
@@ -314,14 +358,20 @@ real lanes:
 - containerd/CRI with runsc under the production VM's enforcing SELinux policy.
 
 It must prove: the sidecar can read and use `tls.key`; the agent cannot stat any workload path; the
-sidecar cannot write the mount; an atomic `current` swap becomes visible without remount; CRI actually
-places every `SidecarMounts` entry on the sidecar and none on the agent; and SELinux relabeling remains
-scoped to the one spawn path. The spike captures host/container UID/GID and SELinux labels for both lanes.
+sidecar cannot write the mount; CRI actually places every `SidecarMounts` entry on the sidecar and none on
+the agent; and SELinux relabeling remains scoped to the one spawn path. After the pod and read-only mount
+are already running, the spike creates a wholly new `versions/<version-id>` directory with a new key,
+certificate, manifest, and inodes. It captures host and container UID/GID plus SELinux labels for the
+original files, new directory, new files, mount root, and resolved `current` target before and after the
+atomic swap. Without restarting or remounting the pod, it swaps `current`, forces a fresh TLS handshake,
+and proves the sidecar presents the new certificate fingerprint and can use the new private key.
 
-**Kill criterion:** if the common read-only projection cannot satisfy all those assertions without
-putting the key in env, an agent-visible/shared mount, or a host-traversable ancestor, implementation
-stops and this design is revised to a runtime-mediated secret injection mechanism. It must not silently
-fall back to plaintext or broaden the mount.
+**Kill criterion:** if the common read-only projection cannot give post-start newly created versions a
+usable private SELinux label, expose the atomic target change, and satisfy all separation assertions
+without putting the key in env, an agent-visible/shared mount, or a host-traversable ancestor,
+implementation stops and this design is revised to a runtime-mediated secret injection mechanism.
+Pre-creating future version directories, relabeling the private ancestor recursively, falling back to
+plaintext, or broadening the mount is not a pass.
 
 ## 7. TLS channel and exact peer verification
 
@@ -440,11 +490,17 @@ recreating the pod with a new generation.
 
 Every accepted chain requires two independently numbered revocation layers:
 
-1. **Issuer CRL:** the environment root signs a CRL whose entries are revoked role-bearing intermediate
-   serials. This is a new offline-root artifact and a distinct durable checkpoint; the current
-   intermediate-only `CreateCRL` API is not reused as if it covered its own issuer. Its profile requires
-   root signature/AKI, positive CRL number, canonical encoding, `ThisUpdate <= now < NextUpdate`, and only
-   intermediate serial entries from that environment.
+1. **Issuer CRL:** the environment root signs one CRL whose entries are serials of revoked intermediates
+   it issued. This is a new offline-root artifact and a distinct durable checkpoint; the current
+   intermediate-only `CreateCRL` API is not reused as if it covered its own issuer. Its consumer profile
+   requires the configured root's signature and issuer name, matching AKI when present, a positive CRL
+   number, canonical serial encoding, and `ThisUpdate <= now < NextUpdate`. A consumer cannot prove the
+   certificate type of an unknown serial from a CRL entry alone, so it does not reject unknown entries or
+   claim to validate that every entry names a CA. Instead, for each presented or configured intermediate
+   it compares that known certificate's canonical serial against the list and rejects an exact match.
+   The offline ceremony owns the stronger production invariant: it constructs entries only from the
+   root-issued intermediate inventory and refuses leaf, foreign-root, zero, duplicate, or malformed
+   serials before signing.
 2. **Leaf CRL:** each role-bearing intermediate signs the existing-form CRL for its leaves according to
    that issuer's custody ceremony. The AS-held workload and self-hosted-node issuers sign their online
    leaf CRLs. The offline cloud-node issuer signs its node-leaf CRL during the offline CRL ceremony. The
@@ -465,20 +521,23 @@ The operational profile is:
   least seven days before expiry and immediately after their respective revocation or issuer ceremony;
 - refresh poll: five minutes with bounded fetch timeout and response size.
 
-Node startup requires a fresh root issuer CRL plus a fresh workload-issuer leaf CRL for every accepted
-current/next workload intermediate. Sidecar control readiness requires a fresh root issuer CRL, its own
-workload-issuer leaf CRL, and the fresh leaf CRL for its exact parent node's issuer. A refresh failure
-retains the last verified snapshot only until `NextUpdate`; freshness expiry atomically poisons that
+AS and CP internal-listener readiness requires the fresh root issuer CRL described in section 5.5 in
+addition to their existing relevant leaf CRLs. Node startup requires a fresh root issuer CRL plus a fresh
+workload-issuer leaf CRL for every accepted current/next workload intermediate. Sidecar control readiness
+requires a fresh root issuer CRL, its own workload-issuer leaf CRL, and a fresh leaf CRL for every accepted
+current/next node issuer of its parent class. A refresh failure retains the last verified snapshot only
+until `NextUpdate`; freshness expiry atomically poisons that
 verifier, closes all dependent connections, and refuses new ones until a strictly current signed list is
 durably applied. Metrics and alerts distinguish fetch failure, signature/profile failure, rollback,
 equivocation, and freshness expiry.
 
-Nodes and sidecars run separate `CRLRefresher`/durable-state instances and hot-reload independently.
-Node state tracks root issuer CRLs and all overlapping workload issuer leaf CRLs. Each sidecar tracks the
-root issuer CRL, its own workload issuer leaf CRL, and only the cloud or self-hosted node issuer relevant
-to its parent path. On a newly revoked workload leaf, the node closes that sidecar transport and the
-sidecar closes its listener. On a newly revoked parent node leaf, the sidecar closes the parent
-connection. On an intermediate serial appearing in the root issuer CRL, both processes close every
+AS, CP, nodes, and sidecars run separate `CRLRefresher`/durable-state instances and hot-reload
+independently. AS and CP state protects their internal peer verifiers as specified in section 5.5. Node
+state tracks the root issuer CRL and all overlapping workload issuer leaf CRLs. Each sidecar tracks the
+root issuer CRL, its own workload issuer leaf CRL, and only the overlapping cloud or self-hosted node
+issuers relevant to its parent class. On a newly revoked workload leaf, the node closes that sidecar
+transport and the sidecar closes its listener. On a newly revoked parent node leaf, the sidecar closes the
+parent connection. On an intermediate serial appearing in the root issuer CRL, both processes close every
 connection chaining through it.
 
 Suspected workload-key compromise revokes the individual leaf; ordinary leaf rotation does not grow the
@@ -486,16 +545,22 @@ CRL. Workload-intermediate compromise is an offline-root CRL update followed by 
 trust domain remain unchanged, but spawns chaining through the revoked issuer become `EXPIRED`/unusable
 and must be recreated.
 
-Node-certificate rotation is independent. The workload client transport obtains the node's current leaf
-on each new handshake. The sidecar continues to require the same typed node principal, so a replacement
-node leaf works without changing the workload SVID.
+Node-certificate rotation is independent but its issuer trust is not assumed static. Before a node may
+switch to a leaf under a successor node intermediate, the operator publishes the root-validated successor
+certificate and its fresh empty leaf CRL. The node writes a trust-only workload material version containing
+current+next node issuers and leaf CRLs, atomically swaps `current`, and proves a fresh sidecar verifier
+snapshot accepts a test chain under next while still requiring the exact parent principal. Only then may
+the node's dynamic client-certificate callback present the successor leaf. Current's certificate and leaf
+CRL remain in every affected sidecar until no parent node leaf chains through it and those old leaves have
+expired or been revoked. The root, workload SVID, and exact node principal do not change.
 
 ### 8.3 Workload intermediate rollover
 
-The root issues a successor workload intermediate before the current one enters its final 180 days. The
-AS holds current and next keys as separate configured signers. The successor certificate, a fresh empty
-successor leaf CRL, and a fresh root issuer CRL from which the successor serial is absent are published
-before the AS may sign with it.
+The root issues a successor workload intermediate before the current one enters its final 180 days.
+During overlap the AS holds current and next keys as separate signer entries, but next is hot-added through
+the durable transaction below rather than preloaded at process start. The successor certificate, a fresh
+empty successor leaf CRL, and a fresh root issuer CRL from which the successor serial is absent are
+published before the AS may sign with it.
 
 Nodes must support overlapping intermediates with the same issuer role, keyed by issuer serial rather
 than rejecting duplicate roles. The AS starts signing new/renewed leaves with next no later than 120 days
@@ -507,20 +572,56 @@ current before its final 60 days.
 An issuance response chaining through an unknown successor is accepted only after the node validates the
 successor to the environment root, proves it absent from a fresh root issuer CRL, and obtains its fresh
 leaf CRL. The node then injects the successor chain and CRL bootstrap into the sidecar version. Rollover
-never changes the SPIFFE ID, root, or trust domain and does not require a sidecar restart.
+never changes the SPIFFE ID, root, or trust domain and does not require a process restart.
 
-### 8.4 Mandatory revocation-state spike
+Each process persists a generation-numbered immutable issuer-set snapshot. Its manifest identifies every
+accepted issuer by certificate fingerprint and serial, its verifier disposition, the AS-only signer
+disposition where applicable, the exact leaf-CRL checkpoint number/digest, and the root-CRL checkpoint
+number/digest against which admission was checked. Adding next is ordered as follows:
+
+1. validate next's certificate to the configured root and its exact workload-issuer profile; on the AS,
+   also stage the protected signer key and prove its public key matches the certificate;
+2. durably apply a fresh next-signed leaf CRL and a fresh root CRL from which next's serial is absent;
+3. write and fsync the candidate snapshot and directory, atomically publish its `current` pointer, then
+   publish the same coherent snapshot to the in-memory verifier; and
+4. only after the AS has published the coherent verifier snapshot may it atomically change its signer
+   state to issue new leaves from next; a node that first learns next from that issuance response performs
+   steps 1-3 locally before accepting the leaf.
+
+A crash before the `current` swap leaves next unaccepted even if its independent CRL checkpoints were
+already advanced; that is safe and retryable. A crash after the swap but before the in-memory publish
+loads the complete snapshot on restart. No reader infers issuer membership by scanning partially written
+files. Retirement reverses no checkpoint: next becomes `signing`, current becomes `verify-only`, and
+current is removed only after telemetry and a durable inventory query prove zero live leaves chaining
+through it and its last possible leaf validity has elapsed. Its CRL checkpoint may then be archived but is
+never reused for a different issuer.
+
+### 8.4 Mandatory revocation and rollover-state spike
 
 The current revocation store admits role-bearing intermediate CRLs and rejects duplicate issuer roles;
-it does not model a root-signed issuer CRL or overlapping workload intermediates. A compiled spike must
-prove a two-layer verifier with durable restart: apply root issuer CRL N and current+next workload leaf
-CRLs independently, restart from disk, reject rollback/equivocation at either layer, revoke one
-intermediate without affecting the other, and expire one CRL while the others remain fresh.
+it does not model a root-signed issuer CRL, dynamic issuer-set manifests, or overlapping workload
+intermediates. A compiled spike starts a real verifier and signer in **current-only** state, with next
+unknown to both. Without restarting either process it performs the ordered transaction above, adds next,
+and proves a next-signed leaf is accepted while current remains valid. It injects a crash after each
+certificate/signer-key staging, leaf-CRL checkpoint apply, root-CRL checkpoint apply, manifest fsync,
+snapshot rename, in-memory publish, and signer-state change. Each restart must expose either the complete
+prior snapshot or the complete next snapshot, preserve all independently monotonic checkpoints, and never
+accept an issuer without both fresh CRL layers. It then restarts with both issuers, moves current through
+verify-only, and retires current after the zero-live-leaf gate.
 
-**Kill criterion:** if one state object cannot preserve signer type, issuer serial, independent monotonic
-number, and freshness without ambiguous lookup, use separate `IssuerRevocationState` and leaf
-`RevocationState` objects with one composed verifier. Do not weaken the existing duplicate-role check or
-treat absence from a leaf CRL as proof that its issuing intermediate is unrevoked.
+The same spike rejects rollback/equivocation at either layer, revokes current without affecting next,
+expires one CRL while the others remain fresh, dynamically performs the analogous current+next node-issuer
+update consumed by a running sidecar, and proves a root-CRL update evicts AS/CP, node, and sidecar
+connections by exact issuer serial.
+
+**Kill criterion:** if one state object cannot preserve signer type, dynamic issuer membership, issuer
+serial, independent monotonic number, and freshness without ambiguous lookup, use separate
+`IssuerSetState`, `IssuerRevocationState`, leaf `RevocationState`, and signer-state objects with one
+composed snapshot. If any crash point can expose next before both CRLs are durable, lose a higher
+checkpoint, require a restart to learn next, or let a delayed current-only writer overwrite overlap state,
+the state format/order must be redesigned before issuance ships. Do not preload next to make the spike
+pass, weaken the existing duplicate-role check, or treat absence from a leaf CRL as proof that its issuing
+intermediate is unrevoked.
 
 ## 9. Re-adoption and recovery
 
@@ -561,24 +662,37 @@ downgrade from becoming permanent compatibility code.
 `spawnery.control-protocol=mtls-v1` on the sandbox, sidecar, and agent at creation. The CP stores the same
 value in the generation's durable placement reservation and includes it in `StartSpawn`.
 `ManagedPod.ControlProtocolVersion` carries the value returned by `ListManaged`; both Docker and CRI must
-reject inconsistent values across a pod's sandbox/containers. The node inventory/readoption wire carries
-it to the CP, and the CP returns `ADOPT` only when discovered, reserved, and node-supported versions are
-all exactly equal. Labels are never mutated in place; a protocol change requires a new generation.
+report inconsistent values across a pod's sandbox/containers as a typed incompatibility rather than
+selecting one. `ObservedPod` carries both the discovered value and a
+`control_protocol_status=unspecified|exact|missing|unknown|conflicting` result. `unspecified`, including an
+old sender's protobuf zero value, is incompatible. The CP returns `ADOPT` only when the status is `exact`
+and discovered, reserved, and node-supported versions are all `mtls-v1`. Labels are never mutated in
+place; a protocol change requires a new generation.
 
-Missing version means legacy bearer HTTP. Unknown or missing versions are incompatible with the new
-spawnlet: startup/readoption leaves the pod running, reports `incompatible-control-protocol`, and does not
-probe it with HTTP, TLS, or a recovered env token. This differs from corrupt `mtls-v1` material after an
-exact CP `ADOPT`, which follows the security-failure capture-before-reap rule in section 9.
+Missing version means legacy bearer HTTP. Unknown, missing, or conflicting versions are incompatible with
+the new spawnlet: it locally quarantines the pod, reports `incompatible-control-protocol`, and does not
+probe it with HTTP, TLS, or a recovered env token. On readoption, the CP checks protocol status **before
+every ledger lookup and every normal `REAP` predicate**. Any incompatible status returns `DEFER` even when
+the CP currently sees no live row, a deleted spawn, or a superseding generation. Thus a stale or partially
+restored ledger cannot turn version uncertainty into destruction. Only an exact `mtls-v1` observation may
+continue to the existing generation/orphan predicates and receive `ADOPT` or `REAP`; incompatible pods
+require an explicit operator cleanup path outside automatic re-adoption. This differs from corrupt
+`mtls-v1` material after an exact CP `ADOPT`, which follows the security-failure capture-before-reap rule
+in section 9.
 
 Rollout is ordered:
 
-1. Generate the workload intermediate in the offline-root ceremony, provision it to the AS, and deploy
-   the additive AS issuance and CP confirmation APIs plus CRL distribution. No node uses them yet.
-2. Publish the mTLS-only sidecar image and matching spawnlet, but do not roll nodes with live legacy pods.
-3. Drain or suspend/recreate every legacy pod on one node, then atomically roll that node's spawnlet and
+1. Publish the root issuer CRL and deploy its durable refresh/checkpoint, composed internal verifiers,
+   connection eviction, and freshness gates to AS and CP. Prove a root-revoked node/service issuer cannot
+   reach the future signer/query seams. No workload signer or issuance route exists yet.
+2. Generate the workload intermediate in the offline-root ceremony, provision it to the AS, and deploy
+   the additive internal-only issuance and confirmation services plus workload leaf-CRL distribution. No
+   node uses them yet.
+3. Publish the mTLS-only sidecar image and matching spawnlet, but do not roll nodes with live legacy pods.
+4. Drain or suspend/recreate every legacy pod on one node, then atomically roll that node's spawnlet and
    configured sidecar image. Its first new spawn proves issuance and mTLS before the node returns ready.
-4. Repeat node by node. A pre-roll inventory gate rejects a node upgrade while a bearer-era pod remains.
-5. After the fleet is converted, run source/config/image scans proving that the token and plaintext URL
+5. Repeat node by node. A pre-roll inventory gate rejects a node upgrade while a bearer-era pod remains.
+6. After the fleet is converted, run source/config/image scans proving that the token and plaintext URL
    paths are absent.
 
 AS/CP versions may overlap because their new APIs are additive and dormant. Node/sidecar versions may not
@@ -590,9 +704,12 @@ pre-transition binary without this guard is not an allowed rollback artifact aft
 emergency plaintext flag.
 
 Tests cover new-node/legacy-pod, new-node/unknown-version, CP expected/discovered mismatch, inconsistent
-CRI sandbox/container labels, and rollback-candidate/`mtls-v1` inventory. Every case proves zero handler
-requests and zero destructive reaps. A source test pins the label constant and verifies every creation and
-inventory lane carries it.
+CRI sandbox/container labels, and rollback-candidate/`mtls-v1` inventory. For missing, unknown, and
+conflicting observations, table tests pair each version state with unknown spawn, missing live row,
+deleted spawn, and stale generation; every combination returns `DEFER`, leaves the pod quarantined, and
+proves zero handler requests and zero destructive reaps. Exact `mtls-v1` stale-generation controls still
+return `REAP`. A source test pins the label constant and verifies every creation and inventory lane carries
+it.
 
 ### 10.1 Mandatory protocol-stamp spike
 
@@ -645,6 +762,11 @@ bodies, authorization headers, model keys, GitHub tokens, or request bodies carr
 - Prove AS ignores/has no request fields for node identity and derives them from mTLS context.
 - Prove CP denies an AS request for the wrong node/class/account, stale generation, missing reservation,
   suspended/deleted spawn, and non-AS caller. Prove AS signs nothing after denial or timeout.
+- Start AS and CP with fresh durable root-issuer CRL checkpoints; revoke the node issuer before AS entry,
+  revoke the AS service issuer before CP entry, revoke either on an established pooled connection, and
+  expire the CRL at each pre-query/pre-sign pause. Separately revoke the selected workload intermediate
+  after CP approval but before signing. Every case leaves the workload signer untouched; peer cases also
+  evict the matching socket, and pre-CP cases leave the placement query untouched.
 - Prove the node independently rejects an AS response for a different exact principal.
 - Prove the AS public listener has no issuance route and its internal route rejects anonymous, CP/AS
   services, workload, malformed-node, and wrong-role principals before the signer is called.
@@ -652,9 +774,12 @@ bodies, authorization headers, model keys, GitHub tokens, or request bodies carr
   CP-service, workload, and wrong-role principals before the placement query is called.
 - Commit a generation-fenced reservation, reconstruct the CP over the same database with empty scheduler
   state, and prove exact issuance authorization survives while rollback/reassignment ends authority.
+- Reserve and activate N, reserve/activate N+1, then deliver every delayed N success/failure/rollback path;
+  exact generation plus reservation-tuple fencing leaves all N+1 container and spawn fields unchanged on
+  SQLite and Postgres.
 - Cap leaf validity at each possible earliest chain member; rotate current/next workload intermediates
-  with overlapping same-role CRLs; reject issuer/leaf CRL rollback, equivocation, absence, and freshness
-  expiry independently across durable restart.
+  from current-only through hot-added initially unknown next, crash/restart every state boundary, retire
+  current, and reject issuer/leaf CRL rollback, equivocation, absence, and freshness expiry independently.
 
 ### Control-channel tests
 
@@ -681,8 +806,8 @@ bodies, authorization headers, model keys, GitHub tokens, or request bodies carr
 - Re-adoption succeeds without `ContainerEnv`; missing/corrupt/mismatched/revoked/expired material refuses
   adoption; CP unavailability still reaps nothing.
 - `mtls-v1` is stamped consistently on sandbox/sidecar/agent, round-trips through `ManagedPod` and node
-  inventory, and rejects legacy/unknown/conflicting labels and unsafe rollback without a handler call or
-  destructive reap.
+  inventory, and returns pre-ledger `DEFER` for legacy/unknown/conflicting labels even against stale,
+  missing, or superseded ledger rows, without a handler call or destructive reap.
 - The source tree, generated deployment config, and built sidecar image contain no
   `SIDECAR_CONTROL_TOKEN` or `http://<PodIP>:<control-port>` control path.
 
@@ -701,8 +826,10 @@ The prod-stack VM is load-bearing. Against the real runsc/CRI stack it must:
 5. force renewal, prove the sidecar serves the new leaf without restart, and verify a simulated repeated
    failure reports and later clears `STALE`;
 6. apply fresh node/workload leaf CRLs and a root issuer CRL while HTTP/2 control and event connections are
-   live, proving socket eviction and reauthentication; and
-7. restart the CP after durable placement reservation but before issuance, then complete issuance and
+   live, proving socket eviction and reauthentication;
+7. root-revoke a test node issuer at the AS boundary and the AS service issuer at the CP boundary while
+   their internal HTTP/2 connections are live, proving eviction and zero subsequent signatures; and
+8. restart the CP after durable placement reservation but before issuance, then complete issuance and
    spawn start from the reconstructed CP/store without `scheduler.inflight`.
 
 ## 13. Implementation decomposition
@@ -712,34 +839,41 @@ The implementation should be split into Beads children with these dependencies:
 1. **Mandatory feasibility spikes**: run sections 5.2.1, 6.1, 7.3, 8.4, and 10.1 on their required store,
    Docker, and VM/CRI lanes; record evidence against every kill criterion. Any kill stops dependent
    implementation and returns to design.
-2. **PKI profile, two-layer revocation, and rollover** (depends on spike 1): issuer role/OID, spawn typed
-   principal, server-only leaf profile, root-signed issuer CRL state, overlapping same-role workload
-   issuers and leaf CRLs, earliest-chain validity, composed verifier, vectors and durable freshness tests.
-3. **Durable placement and protocol contract** (depends on spike 1): store migration and
-   `ReservePlacement`, refactor every start path before `Provision`, immutable `mtls-v1` label,
-   `ManagedPod`/inventory/`StartSpawn` propagation, rollback/reassignment and CP-restart tests. This task
-   owns the shared protobuf edits and generated code.
-4. **Issuance and confirmation APIs** (depends on 2 and 3): AS node-only internal handler, CP AS-only
-   confirmation over the durable query, CSR validation, current/next signer choice, public-listener
-   absence tests, complete principal matrices, audit and rate limits.
-5. **Runtime material projection** (depends on 1, 2, and 3): key/CSR material manager, atomic versions,
+2. **Root-revocation substrate and internal-boundary enforcement** (depends on spike 1): implement the
+   offline root-CRL profile, separate durable issuer-revocation state, dynamic current/next issuer-set
+   snapshot, composed verifier, AS/CP refreshers, actual-socket eviction, readiness/freshness gates, and
+   pre-query/pre-signer gate APIs. This task exposes no workload issuance RPC and lands first.
+3. **Durable placement, protocol, and internal API contract** (depends on spike 1): own the store migration
+   and atomic exact-generation plus reservation-tuple-fenced reserve/activate/error/rollback/reassign
+   transitions; refactor every start path before `Provision`; add immutable `mtls-v1`, typed incompatible
+   inventory status, pre-ledger `DEFER`, and the separate
+   `cpinternal.v1.WorkloadIssuanceAuthorizationService`. This task owns all shared protobuf edits and
+   generated code plus delayed-N-after-N+1 tests.
+4. **Workload PKI, issuance, and confirmation** (depends on 2 and 3): add the issuer role/OID, typed spawn
+   principal, server-only chain-capped leaf profile, AS node-only internal handler, CP AS-only confirmation
+   handler on the already-generated internal service, CSR validation, current/next signer choice, leaf
+   CRLs, public-listener absence tests, complete principal matrices, audit, and rate limits. It may invoke
+   the signer only through task 2's fresh root-revocation gates.
+5. **Runtime material projection** (depends on 1, 2, 3, and 4): key/CSR material manager, atomic versions,
    userns-safe modes, private SELinux relabel, CRI `SidecarMounts`, lifecycle cleanup, and both real-lane
    mount/version contracts.
-6. **Sidecar mTLS and revocation runtime** (depends on 2 and 5): coherent material loader,
-   exact-parent verifier, TLS-only readiness, independent root/node CRL state+refresher, certificate hot
-   reload, listener connection registry and expiry timers.
+6. **Sidecar mTLS and revocation runtime** (depends on 2 and 5): coherent material and dynamic node-issuer
+   set loader, exact-parent verifier, TLS-only readiness, independent root/node CRL state+refresher,
+   certificate/trust hot reload, listener connection registry and expiry timers.
 7. **Spawn-specific node transport and bearer deletion** (depends on 4, 5, and 6): exact-spawn client,
    independent root/workload CRL state+refresher, socket eviction/expiry, migrate every route, HTTPS URLs,
    remove token/env/header/recovery and dead `ContainerEnv` APIs.
-8. **Rotation, conditions, rollover orchestration, and adoption** (depends on 7): retry scheduler,
-   `STALE`/`EXPIRED`, current/next issuer migration, restart reconstruction, protocol-version preflight,
-   incompatible rollback behavior, and fail-closed expiry.
+8. **Rotation, conditions, rollover orchestration, and adoption** (depends on 2, 3, and 7): retry
+   scheduler, `STALE`/`EXPIRED`, durable workload and node current/next issuer transitions, restart
+   reconstruction, zero-live-leaf retirement gate, protocol-version preflight/quarantine, incompatible
+   rollback behavior, and fail-closed expiry.
 9. **Deployment and full verification** (depends on all): offline issuer/issuer-CRL ceremony,
    deterministic CRL publication, transition/rollback guard, drain gate, source/image scans,
    hermetic/race/lint gates, and the production VM acceptance sequence.
 
-Task 3 serializes shared `proto/` and store-schema edits before branches that consume generated or
-placement code. The remaining tasks proceed in isolated worktrees only after their declared gates land.
+Task 2 must be deployed to AS and CP before task 4 enables either issuance RPC. Task 3 serializes shared
+`proto/` and store-schema edits before branches that consume generated or placement code. The remaining
+tasks proceed in isolated worktrees only after their declared gates land.
 
 ## 14. Acceptance criteria
 
@@ -753,19 +887,23 @@ placement code. The remaining tasks proceed in isolated worktrees only after the
   are absent.
 - Initial issuance and every renewal require an authenticated node principal plus CP confirmation of the
   exact durable live reservation; every start reserves before `StartSpawn`, and restart/reassignment does
-  not depend on `scheduler.inflight`.
+  not depend on `scheduler.inflight`; every lifecycle writer is fenced by exact generation and reservation
+  tuple, so a delayed N result cannot mutate N+1.
 - Requested one-year validity is capped at the earliest chain expiry and rotates 30 days early;
   current/next workload intermediates overlap without a root change; repeated failure surfaces `STALE`;
   expiry prevents control and refuses re-adoption.
 - Root-signed issuer CRLs and intermediate-signed leaf CRLs are independently monotonic, fresh, durable,
-  distributed, and hot-reloaded by both node and sidecar. Revocation or expiry closes existing sockets as
-  well as denying future handshakes.
+  distributed, and hot-reloaded by AS, CP, node, and sidecar wherever relevant. AS and CP reject and evict
+  root-revoked internal peers before placement confirmation or workload signing; revocation or expiry
+  closes existing sockets as well as denying future handshakes.
 - Sidecar keys are node-generated, atomically stored, mounted read-only only into the sidecar, and never
   exposed to the agent or control-plane services on either userns-remap or CRI/runsc/SELinux lanes.
 - `mtls-v1` is immutable and round-trips through CP reservation, pod labels, `ManagedPod`, and inventory;
-  incompatible upgrade/rollback paths neither downgrade nor reap.
+  incompatible upgrade/rollback paths quarantine and receive `DEFER` before all automatic `REAP`
+  predicates, including with a stale or missing ledger.
 - Issuance and confirmation procedures are absent from public listeners and reject every principal role
-  except the explicitly authorized node-to-AS and AS-to-CP callers.
+  except the explicitly authorized node-to-AS and AS-to-CP callers; CP confirmation lives on a separate
+  internal-only protobuf service, never public `SpawnService`.
 - Hermetic race tests, lint, both runtime-lane contracts, and the real prod-stack VM suite pass.
 
 ## Post-Implementation Notes
