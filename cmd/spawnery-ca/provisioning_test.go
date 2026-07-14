@@ -270,17 +270,25 @@ func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
 	}
 }
 
-func TestProductionCaddyPreservesHTTP2ToControlPlane(t *testing.T) {
+func TestProductionCaddyUsesProtocolSpecificControlPlaneTransports(t *testing.T) {
 	for _, script := range []string{
 		"../../scripts/e2e-vm/provision/provision.sh",
 		"../../scripts/e2e-vm/roll.sh",
 	} {
-		content := readRepoFile(t, script)
-		if strings.Contains(content, "reverse_proxy 127.0.0.1:8080") {
-			t.Errorf("%s uses a bare HTTP/1.1 control-plane upstream", script)
+		content := strings.ReplaceAll(readRepoFile(t, script), "'\\''", " ")
+		caddy := strings.Join(strings.Fields(content), " ")
+		if strings.Contains(caddy, "@cp path /cp.v1.* /ws*") {
+			t.Errorf("%s sends WebSocket upgrades through the h2c control-plane route", script)
 		}
-		if !strings.Contains(content, "reverse_proxy h2c://127.0.0.1:8080") {
-			t.Errorf("%s does not preserve cleartext HTTP/2 to the control plane", script)
+		for _, required := range []string{
+			"@cp path /cp.v1.*",
+			"@ws path /ws*",
+			"handle @cp { reverse_proxy h2c://127.0.0.1:8080 }",
+			"handle @ws { reverse_proxy 127.0.0.1:8080 }",
+		} {
+			if !strings.Contains(caddy, required) {
+				t.Errorf("%s Caddy config missing %q", script, required)
+			}
 		}
 	}
 }
