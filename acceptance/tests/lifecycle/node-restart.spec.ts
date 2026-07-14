@@ -48,11 +48,21 @@ test.describe("node restart", () => {
       const cfg = cli.configuration();
 
       // 1. A live spawn with a github mount (an `origin` remote is what makes the git-over-HTTPS check real).
-      const id = await cli.createSpawn(ctx, {
+      const id = await api.createSpawn({
         appId,
-        mounts: [{ name: "repo", backendUri: `github:${owner}/${repoName(runId)}`, create: true }],
+        model: process.env.ACC_TEST_MODEL ?? "openai/gpt-4o-mini",
+        name: ctx.ns("restart"),
+        image: "spawnery/agent:dev",
+        runnableId: "opencode-tui",
+        mounts: [
+          {
+            name: "repo",
+            backendUri: `github:${owner}/${repoName(runId)}`,
+            createIfMissing: true,
+          },
+        ],
       });
-      await cli.waitActive(ctx, id);
+      await waitForStatus(api, id, "ACTIVE");
 
       // 2. State that MUST survive: a marker file in the mount, and a tmux-supervised process in the agent.
       const marker = `restart-${runId}-${Date.now().toString(36)}`;

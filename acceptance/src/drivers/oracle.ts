@@ -51,6 +51,11 @@ export interface CreateSpawnApiRequest {
   profileId?: string;
   image?: string;
   runnableId?: string;
+  mounts?: Array<{
+    name: string;
+    backendUri: string;
+    createIfMissing?: boolean;
+  }>;
 }
 
 // --- Customization: profiles, catalog entries, secrets (sp-tq0t.8) ---
@@ -366,6 +371,7 @@ export class AcceptanceClient {
       profileId: req.profileId ?? "",
       image: req.image ?? "",
       runnableId: req.runnableId ?? "",
+      mounts: req.mounts,
     });
   }
 
