@@ -53,6 +53,7 @@ describe("agentAppId / agentModel", () => {
     env: "dev",
     targetHost: "blacky.dayton",
     authMode: "dev-token",
+    bootstrapFakeGitHubLinks: false,
     identityPool: [],
     nonprodHosts: [],
     targetRef: "dev",

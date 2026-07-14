@@ -36,6 +36,16 @@ describe("loadTargetConfig", () => {
     ACC_TARGET_REF: "dev",
     ACC_BUILD_REF: "dev",
   };
+  const oauthEnv = {
+    ...baseEnv,
+    ACC_AUTH_MODE: "oauth-pop",
+    ACC_ROOT_CA_PEM: "/run/root.pem",
+    ACC_TRUST_DOMAIN: "prod.spawnery.internal",
+    ACC_CLOUD_ACCOUNT_ID: "spawnery-system",
+    ACC_CRL_STATE: "/run/crl-state.json",
+    ACC_CRL_ISSUERS: "/run/cloud-intermediate.pem",
+    ACC_CRLS: "/run/cloud.crl.pem",
+  };
 
   it("throws naming the missing var when a required var is absent", () => {
     const env = { ...baseEnv };
@@ -64,17 +74,23 @@ describe("loadTargetConfig", () => {
   });
 
   it("accepts oauth-pop as a valid ACC_AUTH_MODE", () => {
-    const env = {
+    expect(loadTargetConfig(oauthEnv as unknown as NodeJS.ProcessEnv).authMode).toBe("oauth-pop");
+  });
+
+  it("defaults fake GitHub link bootstrap off and permits only an explicit oauth-pop 1", () => {
+    expect(loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv).bootstrapFakeGitHubLinks).toBe(false);
+    expect(loadTargetConfig({
+      ...oauthEnv,
+      ACC_BOOTSTRAP_FAKE_GITHUB_LINKS: "1",
+    } as unknown as NodeJS.ProcessEnv).bootstrapFakeGitHubLinks).toBe(true);
+    expect(() => loadTargetConfig({
       ...baseEnv,
-      ACC_AUTH_MODE: "oauth-pop",
-      ACC_ROOT_CA_PEM: "/run/root.pem",
-      ACC_TRUST_DOMAIN: "prod.spawnery.internal",
-      ACC_CLOUD_ACCOUNT_ID: "spawnery-system",
-      ACC_CRL_STATE: "/run/crl-state.json",
-      ACC_CRL_ISSUERS: "/run/cloud-intermediate.pem",
-      ACC_CRLS: "/run/cloud.crl.pem",
-    };
-    expect(loadTargetConfig(env as unknown as NodeJS.ProcessEnv).authMode).toBe("oauth-pop");
+      ACC_BOOTSTRAP_FAKE_GITHUB_LINKS: "1",
+    } as unknown as NodeJS.ProcessEnv)).toThrow(/oauth-pop/);
+    expect(() => loadTargetConfig({
+      ...oauthEnv,
+      ACC_BOOTSTRAP_FAKE_GITHUB_LINKS: "yes",
+    } as unknown as NodeJS.ProcessEnv)).toThrow(/ACC_BOOTSTRAP_FAKE_GITHUB_LINKS/);
   });
 
   it("requires every public trust input in oauth-pop mode", () => {

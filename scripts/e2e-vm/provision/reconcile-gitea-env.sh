@@ -72,9 +72,12 @@ done
 # Golden-image bootstrap scripts may still publish stale endpoint values; the atomic write below
 # replaces those values only after proving the new token against the local Gitea API.
 systemctl start spawnery-gitea-bootstrap.service
-token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
+token="$(sed -n 's/^AS_FAKE_GITHUB_TOKEN=//p' "$env_file" | tail -n1)"
+if [[ -z "$token" ]]; then
+  token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
+fi
 [[ -n "$token" && "$token" != *[[:space:]]* ]] || {
-  echo "missing or malformed GITHUB_STATIC_TOKEN in $env_file" >&2
+  echo "missing or malformed Gitea token in $env_file" >&2
   exit 1
 }
 curl -fsS -H "Authorization: token $token" "$local_api_base/user" >/dev/null
@@ -82,11 +85,8 @@ curl -fsS -H "Authorization: token $token" "$local_api_base/user" >/dev/null
 umask 077
 tmp="$(mktemp "${env_file}.tmp.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
-printf '%s\n' \
-  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
-  'GITHUB_HOST=github.com' \
-  "GITHUB_STATIC_TOKEN=$token" \
-  "AS_FAKE_GITHUB_TOKEN=$token" >"$tmp"
+printf '%s\n' "AS_FAKE_GITHUB_TOKEN=$token" >"$tmp"
 chmod 0600 "$tmp"
+chown root:root "$tmp"
 mv -f "$tmp" "$env_file"
 trap - EXIT

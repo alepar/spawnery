@@ -12,6 +12,7 @@ import { assertVersionPin } from "../config/version";
 import { runPreflight } from "../fixtures/preflight";
 import { preRunSweep } from "../fixtures/sweep";
 import { newRunId } from "../fixtures/namespace";
+import { bootstrapFakeGitHubLinks } from "../fixtures/fake-github-link";
 import { AcceptanceClient } from "../drivers/oracle";
 import { DevTokenAuth } from "../auth/devtoken";
 import { OAuthPoPAuth } from "../auth/oauthpop";
@@ -39,6 +40,14 @@ export default async function globalSetup(): Promise<void> {
   });
 
   await runPreflight(cfg, api);
+
+  if (cfg.bootstrapFakeGitHubLinks) {
+    await bootstrapFakeGitHubLinks({
+      asOrigin: cfg.asOrigin,
+      identities: cfg.identityPool,
+      auth,
+    });
+  }
 
   const runId = cfg.runId ?? newRunId();
   process.env.ACC_RUN_ID = runId;

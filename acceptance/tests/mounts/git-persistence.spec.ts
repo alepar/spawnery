@@ -16,10 +16,10 @@
  * TARGET PRECONDITIONS (the e2e-vm Gitea lane, scripts/e2e-vm/provision):
  *   - a seeded app with a github slot — `spawnery/github-app` (Ref examples/github-app), overridable
  *     via ACC_GITHUB_APP_ID;
- *   - the node runs with the github-static-token override (GITHUB_API_BASE_URL / GITHUB_HOST /
- *     GITHUB_ALLOW_INSECURE_HOST / GITHUB_STATIC_TOKEN) pointed at the VM's local Gitea; and
- *   - ACC_GITHUB_OWNER is the Gitea account that owns created repos (the token's user; default
- *     "spawnery", matching the provision bootstrap).
+ *   - authsvc alone receives the fixed local Gitea PAT as fake-provider output; CP preflights the
+ *     account-derived gh:<UUID> link and spawnlet dynamically mints through AS for its proxy/CA path;
+ *   - ACC_GITHUB_OWNER is the Gitea account backing that fake-provider output (default "spawnery",
+ *     matching the provision bootstrap).
  * As with suspend-fork's Garage dependency, this test FAILS (never skips) if the lane is absent.
  */
 
@@ -29,7 +29,7 @@ import { waitForStatus, GARAGE_HINT } from "../../src/scenarios/wait";
 
 // The seeded app exposing a github SLOT mount named "repo" at path "repo" (examples/github-app).
 const appId = process.env.ACC_GITHUB_APP_ID ?? "spawnery/github-app";
-// The Gitea account that owns created repos (the static token's user). Provision default: "spawnery".
+// The Gitea account backing authsvc's fixed fake-provider output. Provision default: "spawnery".
 const owner = process.env.ACC_GITHUB_OWNER ?? "spawnery";
 // examples/github-app declares the mount at path "repo" → bind-mounted at /app/repo (manager.go).
 const mountPath = "/app/repo";
@@ -47,9 +47,9 @@ test("github mount survives suspend/resume · cli", { tag: "@mutating" }, async 
   test.setTimeout(240_000);
   const cfg = cli.configuration();
 
-  // 1. Create a spawn on the seeded github-slot app, binding the slot to a fresh Gitea repo
-  //    (create_if_missing → clone-in of an empty repo; the CP derives the gh: credential, the node's
-  //    static token backs the clone).
+  // 1. Create a spawn on the seeded github-slot app, binding the slot to a fresh Gitea repo.
+  //    CP preflights and derives the gh:<UUID> reference; spawnlet dynamically mints through AS and
+  //    clones the empty repo through the per-spawn HTTPS proxy/CA path.
   const repo = giteaRepoName(runId);
   const id = await cli.createSpawn(ctx, {
     appId,
