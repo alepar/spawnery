@@ -449,12 +449,14 @@ mkdir -p "$transport_bin" "$transport_state/transport-witness" "$transport_stage
 cat >"$transport_bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-remote="${*: -1}"
 stdin_tmp="${TRANSPORT_STDIN_CAPTURE}.tmp.$$"
 cat >"$stdin_tmp"
-if [[ "$remote" == *"BEGIN POD_DNS_RECONCILIATION"* ]] \
-  || grep -Fq 'BEGIN POD_DNS_RECONCILIATION' "$stdin_tmp"; then
-  printf '%s' "$remote" >"$TRANSPORT_ARGV_CAPTURE"
+argv_has_routing_marker=0
+for arg in "$@"; do
+  [[ "$arg" != *"BEGIN POD_DNS_RECONCILIATION"* ]] || argv_has_routing_marker=1
+done
+if (( argv_has_routing_marker )) || grep -Fq 'BEGIN POD_DNS_RECONCILIATION' "$stdin_tmp"; then
+  printf '%s\0' "$@" >"$TRANSPORT_ARGV_CAPTURE"
   mv -f "$stdin_tmp" "$TRANSPORT_STDIN_CAPTURE"
   exit 97
 fi
@@ -476,8 +478,29 @@ if PATH="$transport_bin:$PATH" E2E_RUNID=transport-witness E2E_STATE_ROOT="$tran
   routing_failures=$((routing_failures + 1))
 fi
 transport_failures=0
-if [[ ! -f "$transport_argv" || "$(cat "$transport_argv")" != 'bash -se' ]]; then
+assert_exact_routing_ssh_argv() {
+  local argv_file="$1" destination="$2" destination_index=-1 i
+  local -a argv
+  mapfile -d '' -t argv <"$argv_file"
+  for (( i=0; i<${#argv[@]}; i++ )); do
+    if [[ "${argv[i]}" == "$destination" ]]; then
+      destination_index=$i
+      break
+    fi
+  done
+  (( destination_index >= 0 )) || return 1
+  (( ${#argv[@]} == destination_index + 2 )) || return 1
+  [[ "${argv[destination_index + 1]}" == 'bash -se' ]]
+}
+if [[ ! -f "$transport_argv" ]] \
+  || ! assert_exact_routing_ssh_argv "$transport_argv" 'spawnery@192.0.2.10'; then
   echo "roll routing payload is not sent to an explicit remote bash stdin" >&2
+  transport_failures=$((transport_failures + 1))
+fi
+mutated_transport_argv="$tmp/routing-remote-argv-mutated"
+printf '%s\0' 'spawnery@192.0.2.10' 'env INJECTED=1' 'bash -se' >"$mutated_transport_argv"
+if assert_exact_routing_ssh_argv "$mutated_transport_argv" 'spawnery@192.0.2.10'; then
+  echo "roll routing argv witness accepts an injected remote command argument before bash -se" >&2
   transport_failures=$((transport_failures + 1))
 fi
 if [[ ! -s "$transport_payload" ]]; then
