@@ -72,7 +72,7 @@ type AS struct {
 	RegistrationEnabled bool `koanf:"registration_enabled"`
 	MaxFamilies         int  `koanf:"max_families" validate:"min=1"`
 	RateLimits          struct {
-		DevicePerMin int `koanf:"device_per_min"`
+		DevicePerMin int `koanf:"device_per_min" validate:"min=1"`
 	} `koanf:"rate_limits"`
 
 	CP struct {

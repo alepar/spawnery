@@ -108,6 +108,20 @@ func TestASConfig_DeviceRateLimitEnvOverride(t *testing.T) {
 	}
 }
 
+func TestASConfig_DeviceRateLimitRejectsNonPositive(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := loadASTest(t, "dev", map[string]string{
+				"AS_DEV":            "1",
+				"AS_DEVICE_PER_MIN": value,
+			})
+			if err == nil {
+				t.Fatalf("AS_DEVICE_PER_MIN=%s loaded successfully, want validation error", value)
+			}
+		})
+	}
+}
+
 func TestASConfig_FakeGitHubEnvAliases(t *testing.T) {
 	cfg, err := loadASTest(t, "dev", map[string]string{
 		"AS_DEV":                  "1",

@@ -119,16 +119,38 @@ rg -q 'ACC_TEST_MODEL' "$REPO/acceptance/tests/customization/injection.spec.ts" 
   exit 1
 }
 
-common="$HERE/env/common.env"
-fake_profile="$HERE/env/profile.fake.env"
-rg -q '^AS_DEVICE_PER_MIN=100$' "$fake_profile" || {
-  echo "fake VM profile does not raise the disposable device-flow capacity to 100/minute" >&2
-  exit 1
+check_device_rate_limit_topology() {
+  local env_dir="$1"
+  local fake_profile="$env_dir/profile.fake.env"
+  local -a assignments=()
+
+  mapfile -t assignments < <(rg -n '^AS_DEVICE_PER_MIN=' "$env_dir"/*.env || true)
+  if (( ${#assignments[@]} != 1 )); then
+    printf '%s\n' "${assignments[@]}" >&2
+    echo "AS_DEVICE_PER_MIN must occur exactly once across VM profiles" >&2
+    return 1
+  fi
+  local assignment="${assignments[0]}"
+  if [[ "${assignment%%:*}" != "$fake_profile" || "${assignment##*:}" != "AS_DEVICE_PER_MIN=100" ]]; then
+    printf '%s\n' "$assignment" >&2
+    echo "AS_DEVICE_PER_MIN must be 100 and scoped only to profile.fake.env" >&2
+    return 1
+  fi
 }
-if rg -n '^AS_DEVICE_PER_MIN=' "$common"; then
-  echo "VM common.env weakens the production device-flow rate-limit default" >&2
+
+check_device_rate_limit_topology "$HERE/env"
+if (
+  fixture="$(mktemp -d)"
+  trap 'rm -rf "$fixture"' EXIT
+  cp -f "$HERE/env"/*.env "$fixture/"
+  printf '%s\n' 'AS_DEVICE_PER_MIN=100' >"$fixture/profile.extra.env"
+  check_device_rate_limit_topology "$fixture"
+) >/dev/null 2>&1; then
+  echo "device-flow rate-limit topology guard accepted an override outside profile.fake.env" >&2
   exit 1
 fi
+
+common="$HERE/env/common.env"
 if rg -n '^NODE_TERMINAL_ADDR=' "$common"; then
   echo "enforced VM node exposes a direct terminal listener" >&2
   exit 1
