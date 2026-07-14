@@ -516,6 +516,13 @@ ExecStart=/usr/local/bin/spawnery-render-env.sh
 WantedBy=multi-user.target
 EOF
 
+# Keep the node's host-loopback GitHub facade private to spawnlet's mount namespace. containerd
+# must read the unmodified VM-global /etc/hosts when it builds sandbox hosts files; otherwise its
+# copy shadows the pod's dnsmasq configuration and sends sidecar traffic to pod loopback.
+NODE_HOSTS=/etc/spawnery/node-hosts
+sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"
+printf '127.0.0.1 github.com codeload.github.com\n' | sudo tee -a "$NODE_HOSTS" >/dev/null
+
 # ---- spawnery systemd units (authsvc/cp/node) — no separate spawnery-web: Caddy already serves the
 #      web root and reverse-proxies the CP/AS routes (see Caddyfile above) ----
 log "writing spawnery systemd units…"
@@ -580,6 +587,7 @@ WorkingDirectory=/opt/spawnery
 # systemd reads EnvironmentFile entries before applying this execution sandbox.
 InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki /etc/spawnery/env.d
 ReadOnlyPaths=/etc/spawnery/node
+BindReadOnlyPaths=/etc/spawnery/node-hosts:/etc/hosts
 NoNewPrivileges=yes
 CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/spawnlet
@@ -590,16 +598,6 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable garage spawnery-garage-bootstrap gitea spawnery-gitea-bootstrap spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
-
-# ---- github.com -> this VM, for the NODE process (sp-wwtc.1) ----
-# MUST BE LAST. The pod's dnsmasq (above) serves the POD netns only; the node runs as a plain host
-# process on this VM and does its own clone-in, so it needs github.com to resolve here too.
-#
-# THIS IS DELIBERATELY THE FINAL STEP: provisioning itself downloads containerd, runc, the CNI plugins
-# and crictl FROM github.com (see the top of this script). Move this line any earlier and those fetches
-# resolve to 127.0.0.1 and the build dies. Anything added after this point must not fetch from github.com.
-log "pointing github.com/codeload.github.com at this VM for the node process (MUST be the last step)…"
-printf '127.0.0.1 github.com codeload.github.com\n' | sudo tee -a /etc/hosts >/dev/null
 
 # ---- self-check (best-effort) + clean shutdown handled by build-base.sh ----
 log "provision complete. runsc: $(runsc --version | head -1). containerd: $(/usr/local/bin/containerd --version)"

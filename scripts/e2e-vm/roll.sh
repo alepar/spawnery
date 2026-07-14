@@ -54,15 +54,80 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
   && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
   && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
   && sudo cp -f /etc/spawnery/authsvc/self-hosted-node.crl.pem /var/lib/spawnery/authsvc-revocations/self-hosted-node.crl.pem \
-  && sudo bash ~/incoming/provision/reconcile-gitea-env.sh /etc/spawnery/env.d/gitea.env \
-  && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
-  && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
-  && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \
-  && sudo install -d -m0755 /etc/systemd/system/spawnery-cp.service.d /etc/systemd/system/spawnery-node.service.d \
-  && printf '\''%s\n'\'' '\''[Service]'\'' '\''InaccessiblePaths=/etc/spawnery/env.d'\'' | sudo tee /etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf >/dev/null \
-  && printf '\''%s\n'\'' '\''[Service]'\'' '\''UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN'\'' '\''InaccessiblePaths=/etc/spawnery/env.d'\'' | sudo tee /etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf >/dev/null \
-  && sudo systemctl daemon-reload \
-  && sudo systemctl restart spawnery-render-env'
+  && sudo bash ~/incoming/provision/reconcile-gitea-env.sh /etc/spawnery/env.d/gitea.env'
+
+# Older goldens put GitHub aliases in the VM-global hosts file. Remove only those exact host tokens,
+# then give spawnlet its own loopback view. containerd remains in the global mount namespace and
+# therefore copies the clean hosts file into new CRI sandboxes.
+vm_ssh "$IP" '
+set -euo pipefail
+
+NODE_HOSTS=/etc/spawnery/node-hosts
+sudo sed -i -E -e "/^[[:space:]]*#/! s/(^|[[:space:]])github\.com([[:space:]]|$)/\1\2/g" -e "/^[[:space:]]*#/! s/(^|[[:space:]])codeload\.github\.com([[:space:]]|$)/\1\2/g" /etc/hosts
+sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"
+printf "127.0.0.1 github.com codeload.github.com\n" | sudo tee -a "$NODE_HOSTS" >/dev/null
+
+sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl
+sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/
+sudo sh -c "for f in /etc/spawnery/env.d/profile.*.env; do mv -f \"\$f\" \"\$f.tmpl\"; done"
+
+# Recompute the host-local gateway from the installed CNI subnet rather than carrying a second
+# address constant. The bridge is created lazily by CNI, so validate its live address when present;
+# the conflist and exact dnsmasq records are mandatory on every roll.
+CNI_SUBNET="$(sudo jq -er ".plugins[] | select(.type == \"bridge\" and .bridge == \"spawnery-cni0\") | .ipam.subnet" /etc/cni/net.d/10-spawnery.conflist)"
+[[ "$CNI_SUBNET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || {
+  echo "invalid spawnery CNI subnet: $CNI_SUBNET" >&2
+  exit 1
+}
+CNI_ADDR="${CNI_SUBNET%/*}"
+CNI_PREFIX="${CNI_SUBNET#*/}"
+IFS=. read -r CNI_O1 CNI_O2 CNI_O3 CNI_O4 <<<"$CNI_ADDR"
+for octet in "$CNI_O1" "$CNI_O2" "$CNI_O3" "$CNI_O4"; do
+  [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || {
+    echo "invalid IPv4 address in spawnery CNI subnet: $CNI_SUBNET" >&2
+    exit 1
+  }
+done
+(( 10#$CNI_PREFIX >= 1 && 10#$CNI_PREFIX <= 30 )) || {
+  echo "unsupported spawnery CNI prefix: $CNI_SUBNET" >&2
+  exit 1
+}
+CNI_O1=$((10#$CNI_O1)); CNI_O2=$((10#$CNI_O2)); CNI_O3=$((10#$CNI_O3)); CNI_O4=$((10#$CNI_O4))
+CNI_PREFIX=$((10#$CNI_PREFIX))
+CNI_ADDR_INT=$(( (CNI_O1 << 24) | (CNI_O2 << 16) | (CNI_O3 << 8) | CNI_O4 ))
+CNI_MASK=$(( (0xffffffff << (32 - CNI_PREFIX)) & 0xffffffff ))
+CNI_GATEWAY_INT=$(( (CNI_ADDR_INT & CNI_MASK) + 1 ))
+printf -v CNI_GATEWAY "%d.%d.%d.%d" \
+  "$(( (CNI_GATEWAY_INT >> 24) & 255 ))" "$(( (CNI_GATEWAY_INT >> 16) & 255 ))" \
+  "$(( (CNI_GATEWAY_INT >> 8) & 255 ))" "$(( CNI_GATEWAY_INT & 255 ))"
+
+DNSMASQ_CONF=/etc/dnsmasq.d/spawnery-github.conf
+[[ "$(sudo grep -Fxc "interface=spawnery-cni0" "$DNSMASQ_CONF" || true)" == 1 ]] || {
+  echo "spawnery dnsmasq bridge binding is missing or ambiguous" >&2
+  exit 1
+}
+[[ "$(sudo grep -Fxc "host-record=github.com,$CNI_GATEWAY" "$DNSMASQ_CONF" || true)" == 1 ]] || {
+  echo "github.com dnsmasq record does not match CNI gateway $CNI_GATEWAY" >&2
+  exit 1
+}
+[[ "$(sudo grep -Fxc "host-record=codeload.github.com,$CNI_GATEWAY" "$DNSMASQ_CONF" || true)" == 1 ]] || {
+  echo "codeload.github.com dnsmasq record does not match CNI gateway $CNI_GATEWAY" >&2
+  exit 1
+}
+if ip link show spawnery-cni0 >/dev/null 2>&1; then
+  ip -4 -o addr show dev spawnery-cni0 | awk "{print \$4}" | grep -Fqx "$CNI_GATEWAY/$CNI_PREFIX" || {
+    echo "live spawnery CNI bridge does not own $CNI_GATEWAY/$CNI_PREFIX" >&2
+    exit 1
+  }
+fi
+sudo sed -i "s#^POD_DNS=.*#POD_DNS=${CNI_GATEWAY}#" /etc/spawnery/env.d/common.env.tmpl
+
+sudo install -d -m0755 /etc/systemd/system/spawnery-cp.service.d /etc/systemd/system/spawnery-node.service.d
+printf "%s\n" "[Service]" "InaccessiblePaths=/etc/spawnery/env.d" | sudo tee /etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf >/dev/null
+printf "%s\n" "[Service]" "UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN" "InaccessiblePaths=/etc/spawnery/env.d" "BindReadOnlyPaths=/etc/spawnery/node-hosts:/etc/hosts" | sudo tee /etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart spawnery-render-env
+'
 
 # 5. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)
 # Re-copying config/ re-introduces cp.prod.yaml's ${sops:store.dsn} ref (pristine config ships it),

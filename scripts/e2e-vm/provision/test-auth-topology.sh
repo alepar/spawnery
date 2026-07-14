@@ -394,6 +394,95 @@ fi
 authsvc_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-authsvc.service/,/^EOF$/p' "$provision")"
 cp_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-cp.service/,/^EOF$/p' "$provision")"
 node_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-node.service/,/^EOF$/p' "$provision")"
+
+# The node process needs host-loopback resolution for clone-in, but containerd must inherit the
+# VM-global hosts file without those aliases so pod DNS can route GitHub traffic to the CNI gateway.
+routing_failures=0
+if rg -n '^[[:space:]]*printf .*github\.com.*tee -a /etc/hosts' "$provision"; then
+  echo "fresh provisioning contaminates the VM-global hosts file with pod-loopback aliases" >&2
+  routing_failures=$((routing_failures + 1))
+fi
+for private_hosts_binding in \
+  'NODE_HOSTS=/etc/spawnery/node-hosts' \
+  'sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"' \
+  'printf '\''127.0.0.1 github.com codeload.github.com\n'\'' | sudo tee -a "$NODE_HOSTS"'
+do
+  if ! rg -Fq "$private_hosts_binding" "$provision"; then
+    echo "fresh provisioning lacks node-private hosts binding: ${private_hosts_binding}" >&2
+    routing_failures=$((routing_failures + 1))
+  fi
+done
+if [[ "$(printf '%s\n' "$node_unit" | rg -Fc 'BindReadOnlyPaths=/etc/spawnery/node-hosts:/etc/hosts')" != 1 ]]; then
+  echo "fresh spawnlet unit does not receive exactly one read-only node-private hosts bind" >&2
+  routing_failures=$((routing_failures + 1))
+fi
+for global_hosts_unit in "$authsvc_unit" "$cp_unit"; do
+  if printf '%s\n' "$global_hosts_unit" | rg -q '^BindReadOnlyPaths=.*:/etc/hosts$'; then
+    echo "fresh non-node service unexpectedly receives the node-private hosts view" >&2
+    routing_failures=$((routing_failures + 1))
+  fi
+done
+for dnsmasq_record in \
+  'host-record=github.com,${GITHUB_DNS_ADDR}' \
+  'host-record=codeload.github.com,${GITHUB_DNS_ADDR}'
+do
+  if [[ "$(rg -Fc "$dnsmasq_record" "$provision")" != 1 ]]; then
+    echo "fresh provisioning lacks exact dnsmasq gateway record: ${dnsmasq_record}" >&2
+    routing_failures=$((routing_failures + 1))
+  fi
+done
+fresh_common_copy_line="$(rg -n 'cp -f .*common\.env /etc/spawnery/env.d/common\.env\.tmpl' "$provision" | head -n1 | cut -d: -f1 || true)"
+fresh_pod_dns_line="$(rg -n 'POD_DNS=\$\{GITHUB_DNS_ADDR\}.*common\.env\.tmpl' "$provision" | head -n1 | cut -d: -f1 || true)"
+if [[ -z "$fresh_common_copy_line" || -z "$fresh_pod_dns_line" || "$fresh_common_copy_line" -ge "$fresh_pod_dns_line" ]]; then
+  echo "fresh provisioning does not patch POD_DNS to the dnsmasq gateway after copying common.env" >&2
+  routing_failures=$((routing_failures + 1))
+fi
+
+roll="$REPO/scripts/e2e-vm/roll.sh"
+for roll_hosts_binding in \
+  'NODE_HOSTS=/etc/spawnery/node-hosts' \
+  'sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"' \
+  'BindReadOnlyPaths=/etc/spawnery/node-hosts:/etc/hosts'
+do
+  if ! rg -Fq "$roll_hosts_binding" "$roll"; then
+    echo "roll.sh lacks node-private hosts reconciliation: ${roll_hosts_binding}" >&2
+    routing_failures=$((routing_failures + 1))
+  fi
+done
+if ! rg -q 'printf [^|]*127\.0\.0\.1 github\.com codeload\.github\.com\\n[^|]* \| sudo tee -a "\$NODE_HOSTS"' "$roll"; then
+  echo "roll.sh does not publish both loopback aliases to the node-private hosts view" >&2
+  routing_failures=$((routing_failures + 1))
+fi
+roll_hosts_cleanup="$(rg 'sudo sed -i -E .* /etc/hosts$' "$roll" || true)"
+for stale_alias in 'github\.com' 'codeload\.github\.com'; do
+  if ! printf '%s\n' "$roll_hosts_cleanup" | rg -Fq "$stale_alias"; then
+    echo "roll.sh does not migrate stale ${stale_alias} aliases out of the VM-global hosts file" >&2
+    routing_failures=$((routing_failures + 1))
+  fi
+done
+for gateway_contract in \
+  '/etc/cni/net.d/10-spawnery.conflist' \
+  '/etc/dnsmasq.d/spawnery-github.conf' \
+  'POD_DNS=${CNI_GATEWAY}'
+do
+  if ! rg -Fq "$gateway_contract" "$roll"; then
+    echo "roll.sh lacks fail-closed CNI/dnsmasq gateway reconciliation: ${gateway_contract}" >&2
+    routing_failures=$((routing_failures + 1))
+  fi
+done
+roll_common_copy_line="$(rg -n 'cp -f .*common\.env /etc/spawnery/env.d/common\.env\.tmpl' "$roll" | head -n1 | cut -d: -f1 || true)"
+roll_pod_dns_line="$(rg -n 'POD_DNS=\$\{CNI_GATEWAY\}.*common\.env\.tmpl' "$roll" | head -n1 | cut -d: -f1 || true)"
+roll_render_line="$(rg -n 'systemctl restart spawnery-render-env' "$roll" | head -n1 | cut -d: -f1 || true)"
+if [[ -z "$roll_common_copy_line" || -z "$roll_pod_dns_line" || -z "$roll_render_line" \
+   || "$roll_common_copy_line" -ge "$roll_pod_dns_line" || "$roll_pod_dns_line" -ge "$roll_render_line" ]]; then
+  echo "roll.sh does not patch POD_DNS after template copy and before rendering" >&2
+  routing_failures=$((routing_failures + 1))
+fi
+if (( routing_failures != 0 )); then
+  echo "GitHub proxy routing topology has ${routing_failures} contract violation(s)" >&2
+  exit 1
+fi
+
 [[ "$(printf '%s\n' "$authsvc_unit" | rg -c '^EnvironmentFile=-/etc/spawnery/env.d/gitea.env$')" == 1 ]] || {
   echo "fresh authsvc unit does not consume the private Gitea environment exactly once" >&2
   exit 1
@@ -471,7 +560,6 @@ for private_unit in cp node; do
   }
 done
 
-roll="$REPO/scripts/e2e-vm/roll.sh"
 rg -Fq '/etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf' "$roll" || {
   echo "roll.sh does not install the spawnlet GitHub secret fence drop-in" >&2
   exit 1
