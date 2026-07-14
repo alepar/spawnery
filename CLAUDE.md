@@ -205,6 +205,29 @@ distrobox enter --root dev-spawnery -- bash -lc 'cd <repo-or-worktree> && <cmd>'
   wires runsc — the only runsc path is the `test-cri-delta` (`cri_delta_e2e`) recipe.
 - Prefer installing a proper tool in the distrobox over a host-side workaround (`distrobox enter --root
   dev-spawnery -- <install>`); don't shell out to a one-off binary in `/tmp`.
+- **NEVER `rpm-ostree install` on the host right now.** The workstation is booted into a
+  **transient-unlock** deployment whose origin has *lost* its `requested=` layer list, so an install
+  does not ADD to the layer set — it **REPLACES** it. A `sudo rpm-ostree install make` staged a pending
+  deployment containing *only* `make` ("Diff: 50 removed, 1 added"), which on the next reboot would have
+  wiped all nine layered packages (`btop duf ghostty htop just mosh neovim nvtop tmux`). Reverted with
+  `sudo rpm-ostree cleanup -p`. Host packages are queued in **`sp-sc50`** and installed **after** a
+  reboot, in one command. If you ever do run it, verify the pending deployment still lists *every*
+  package before rebooting: `rpm-ostree status` → both deployments must show the full `LayeredPackages`.
+
+## Configuration posture — the config system, not `os.Getenv`
+
+**All configurables go through the layered config system** ([config-framework-design](docs/superpowers/specs/2026-06-20-config-framework-design.md)) — schema-defined, file-first, with env as an override *layer*. Do **not** add ad-hoc `os.Getenv` parsing.
+
+- Declare every knob in the binary's config struct (`cmd/<binary>/config.go`, `koanf:"..."` tag) **and**
+  in the shipped YAML (`config/cp.yaml`, `config/spawnlet.yaml`, …) — **with an inline comment saying
+  what it is and what the default means.** A knob that exists only in Go is undiscoverable.
+- Env vars (`CP_*`, `SKILLS_*`, …) are the framework's **override layer**, not the source of truth.
+  Refer to a setting by its **config key** (`admin_owners`), not its env name (`CP_ADMIN_OWNERS`) — the
+  key is the contract; the env var is one way to set it.
+- Secrets follow the same path (`config/secrets.prod.sops.yaml`), never a bare env var in code.
+- Deliberate exceptions exist and must be **commented where they live** — e.g. the skillfetch host
+  allowlist is intentionally a code constant, not config, because config-adding a host is a security
+  downgrade with no legitimate use (see `internal/cp/skillfetch/fetch.go`).
 
 ## Architecture Overview
 

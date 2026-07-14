@@ -18,8 +18,9 @@ create a new `## [Unreleased]` block.
   entry (deliberately not `PermissionDenied`: no existence probe).
 - **Publishing is admin-only.** `PublishCatalogEntry` / `PublishBundle` are the only doors onto
   the global catalog, and `SetCatalogListing(listed=true)` now returns `PermissionDenied` for
-  non-admins. The admin allowlist is `CP_ADMIN_OWNERS` (`admin_owners`), **empty by default —
-  nobody is an admin until an operator sets it**. Unlisting is unchanged for creators, and
+  non-admins. The admin allowlist is the **`admin_owners` config key** (`config/cp.yaml`; overridable
+  per the config framework's env layer as `CP_ADMIN_OWNERS`), **empty by default — nobody is an admin
+  until an operator sets it**. Unlisting is unchanged for creators, and
   remains reference-guarded (counts-only `FailedPrecondition` unless `confirm=true`; a confirmed
   unlist terminates referencing spawns).
 - **Impact on existing callers:** a client that called `CreateCatalogEntry` and expected the
