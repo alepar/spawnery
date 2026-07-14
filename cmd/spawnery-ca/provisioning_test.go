@@ -270,6 +270,21 @@ func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
 	}
 }
 
+func TestProductionCaddyPreservesHTTP2ToControlPlane(t *testing.T) {
+	for _, script := range []string{
+		"../../scripts/e2e-vm/provision/provision.sh",
+		"../../scripts/e2e-vm/roll.sh",
+	} {
+		content := readRepoFile(t, script)
+		if strings.Contains(content, "reverse_proxy 127.0.0.1:8080") {
+			t.Errorf("%s uses a bare HTTP/1.1 control-plane upstream", script)
+		}
+		if !strings.Contains(content, "reverse_proxy h2c://127.0.0.1:8080") {
+			t.Errorf("%s does not preserve cleartext HTTP/2 to the control plane", script)
+		}
+	}
+}
+
 func TestForbiddenCaddyEnrollmentPath(t *testing.T) {
 	for _, test := range []struct {
 		path      string

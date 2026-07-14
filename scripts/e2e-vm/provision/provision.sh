@@ -362,7 +362,7 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
   @cp   path /cp.v1.* /ws*
   @as   path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens
   handle @cp {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy h2c://127.0.0.1:8080
   }
   handle @as {
     reverse_proxy 127.0.0.1:8090
