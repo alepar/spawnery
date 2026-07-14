@@ -3,8 +3,8 @@ set -euo pipefail
 
 env_file="${1:-/etc/spawnery/env.d/gitea.env}"
 app_ini="${2:-/etc/gitea/app.ini}"
-origin="http://127.0.0.1:3000"
-api_base="$origin/api/v1"
+local_origin="http://127.0.0.1:3000"
+local_api_base="$local_origin/api/v1"
 
 [[ -f "$env_file" ]] || {
   echo "missing generated Gitea environment: $env_file" >&2
@@ -36,8 +36,8 @@ awk '
       print "PROTOCOL = http"
       print "HTTP_ADDR = 127.0.0.1"
       print "HTTP_PORT = 3000"
-      print "DOMAIN = 127.0.0.1"
-      print "ROOT_URL = http://127.0.0.1:3000/"
+      print "DOMAIN = github.com"
+      print "ROOT_URL = https://github.com/"
       next
     }
     if (in_server && section ~ /^\[/) in_server = 0
@@ -57,14 +57,14 @@ trap - EXIT
 systemctl restart gitea
 healthy=0
 for _ in $(seq 1 60); do
-  if curl -fsS "$origin/api/healthz" >/dev/null 2>&1; then
+  if curl -fsS "$local_origin/api/healthz" >/dev/null 2>&1; then
     healthy=1
     break
   fi
   sleep 1
 done
 [[ "$healthy" == 1 ]] || {
-  echo "Gitea did not become healthy at $origin" >&2
+  echo "Gitea did not become healthy at $local_origin" >&2
   exit 1
 }
 
@@ -77,16 +77,16 @@ token="$(sed -n 's/^GITHUB_STATIC_TOKEN=//p' "$env_file" | tail -n1)"
   echo "missing or malformed GITHUB_STATIC_TOKEN in $env_file" >&2
   exit 1
 }
-curl -fsS -H "Authorization: token $token" "$api_base/user" >/dev/null
+curl -fsS -H "Authorization: token $token" "$local_api_base/user" >/dev/null
 
 umask 077
 tmp="$(mktemp "${env_file}.tmp.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 printf '%s\n' \
-  "GITHUB_API_BASE_URL=$api_base" \
-  "GITHUB_HOST=${origin#http://}" \
-  'GITHUB_ALLOW_INSECURE_HOST=1' \
-  "GITHUB_STATIC_TOKEN=$token" >"$tmp"
+  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
+  'GITHUB_HOST=github.com' \
+  "GITHUB_STATIC_TOKEN=$token" \
+  "AS_FAKE_GITHUB_TOKEN=$token" >"$tmp"
 chmod 0600 "$tmp"
 mv -f "$tmp" "$env_file"
 trap - EXIT

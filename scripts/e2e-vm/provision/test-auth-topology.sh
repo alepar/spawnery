@@ -198,16 +198,16 @@ if [[ "$*" == "start spawnery-gitea-bootstrap.service" ]]; then
   cat >"$GITEA_ENV_FILE" <<'ENVEOF'
 GITHUB_API_BASE_URL=https://github.com/api/v1
 GITHUB_HOST=github.com
-GITHUB_ALLOW_INSECURE_HOST=0
 GITHUB_STATIC_TOKEN=fresh-minted-token
+AS_FAKE_GITHUB_TOKEN=fresh-minted-token
 ENVEOF
 fi
 EOF
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *'/api/healthz'*) exit 0 ;;
-  *'/api/v1/user'*) [[ "$*" == *'Authorization: token fresh-minted-token'* ]] ;;
+  *'http://127.0.0.1:3000/api/healthz'*) exit 0 ;;
+  *'http://127.0.0.1:3000/api/v1/user'*) [[ "$*" == *'Authorization: token fresh-minted-token'* ]] ;;
   *) exit 1 ;;
 esac
 EOF
@@ -235,6 +235,7 @@ GITHUB_API_BASE_URL=https://github.com/api/v1
 GITHUB_HOST=github.com
 GITHUB_ALLOW_INSECURE_HOST=0
 GITHUB_STATIC_TOKEN=pre-restart-token
+AS_FAKE_GITHUB_TOKEN=pre-restart-token
 EOF
 GITEA_ENV_FILE="$tmp/gitea.env" SYSTEMCTL_LOG="$tmp/systemctl.log" PATH="$tmp/bin:$PATH" \
   "$gitea_reconcile" "$tmp/gitea.env" "$tmp/app.ini"
@@ -245,8 +246,8 @@ APP_NAME = Stale Golden Gitea
 PROTOCOL = http
 HTTP_ADDR = 127.0.0.1
 HTTP_PORT = 3000
-DOMAIN = 127.0.0.1
-ROOT_URL = http://127.0.0.1:3000/
+DOMAIN = github.com
+ROOT_URL = https://github.com/
 DISABLE_SSH = true
 [database]
 DB_TYPE = sqlite3
@@ -273,19 +274,37 @@ cmp -s "$tmp/expected-systemctl.log" "$tmp/systemctl.log" || {
 }
 expected_gitea_env="$tmp/expected-gitea.env"
 cat >"$expected_gitea_env" <<'EOF'
-GITHUB_API_BASE_URL=http://127.0.0.1:3000/api/v1
-GITHUB_HOST=127.0.0.1:3000
-GITHUB_ALLOW_INSECURE_HOST=1
+GITHUB_API_BASE_URL=https://github.com/api/v1
+GITHUB_HOST=github.com
 GITHUB_STATIC_TOKEN=fresh-minted-token
+AS_FAKE_GITHUB_TOKEN=fresh-minted-token
 EOF
 cmp -s "$expected_gitea_env" "$tmp/gitea.env" || {
-  echo "Gitea environment reconciler did not restore the HEAD-owned local topology" >&2
+  echo "Gitea environment reconciler did not publish the secure facade topology" >&2
   exit 1
 }
 [[ "$(stat -c %a "$tmp/gitea.env")" == 600 ]] || {
   echo "Gitea environment reconciler did not keep the static token private" >&2
   exit 1
 }
+provision="$HERE/provision.sh"
+for secure_gitea_binding in \
+  'DOMAIN = github.com' \
+  'ROOT_URL = https://github.com/' \
+  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
+  'GITHUB_HOST=github.com' \
+  'GITHUB_STATIC_TOKEN=\$TOKEN' \
+  'AS_FAKE_GITHUB_TOKEN=\$TOKEN'
+do
+  rg -Fq "$secure_gitea_binding" "$provision" || {
+    echo "fresh provisioning lacks secure Gitea binding: ${secure_gitea_binding}" >&2
+    exit 1
+  }
+done
+if rg -n '^[[:space:]]*GITHUB_ALLOW_INSECURE_HOST=' "$provision"; then
+  echo "fresh provisioning emits the insecure Gitea host override" >&2
+  exit 1
+fi
 for expected in \
   AS_AUTH_SIGNING_CURRENT_KEY_PEM \
   AS_AUTH_SIGNING_CURRENT_CHAIN_PEM \

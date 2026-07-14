@@ -223,11 +223,11 @@ ExecStart=/usr/local/bin/spawnery-garage-bootstrap.sh
 WantedBy=multi-user.target
 EOF
 
-# ---- Gitea (local GitHub-compatible git host) — backs the github: storage-mount lane so the
-# acceptance suite can prove a `github:` mount survives suspend/resume WITHOUT reaching github.com.
+# ---- Gitea (local GitHub-compatible git host) — backs the github: storage-mount lane behind the
+# VM's TLS github.com facade so acceptance exercises the production clone/API trust path.
 # Native single-node binary + sqlite; a per-boot oneshot creates an admin + access token + seed repo
 # and writes the node github-override env into /etc/spawnery/env.d/gitea.env (mirrors the garage
-# bootstrap). The node clones over http from 127.0.0.1 under GITHUB_ALLOW_INSECURE_HOST. ----
+# bootstrap). Gitea itself remains reachable only over host-loopback HTTP behind Caddy. ----
 GITEA_VER="${GITEA_VER:-1.22.6}"
 GITEA_PORT="${GITEA_PORT:-3000}"
 GITEA_ADMIN_USER="${GITEA_ADMIN_USER:-spawnery}"
@@ -249,7 +249,7 @@ WORK_PATH = /var/lib/gitea
 PROTOCOL = http
 HTTP_ADDR = 127.0.0.1
 HTTP_PORT = ${GITEA_PORT}
-DOMAIN = 127.0.0.1
+DOMAIN = github.com
 # github.com, not the loopback: sp-wwtc.1 fronts Gitea with a github.com-SAN cert (Caddy
 # reverse-proxies it), so Gitea's OWN generated URLs (clone_url, etc.) must say github.com too —
 # Gitea itself stays plain HTTP on loopback and never learns TLS; Caddy is what terminates it.
