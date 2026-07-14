@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
+	nodev1 "spawnery/gen/node/v1"
 	sidecarv1 "spawnery/gen/sidecar/v1"
 	"spawnery/internal/spawnlet"
 )
@@ -32,8 +33,14 @@ type caPair struct {
 	keyPEM  []byte
 }
 
+// spawnControlLookup resolves a spawn's sidecar control endpoint (its /control/model URL and the
+// SIDECAR_CONTROL_TOKEN bearer). Injected by node.Run over the Manager's spawn store: the async push
+// paths (rotation, re-adopt) run outside CreateWithSelection and have no other way to find the pod.
+type spawnControlLookup func(spawnID string) (controlURL, controlToken string, ok bool)
+
 // githubControlServer implements spawnlet.GitHubControlServer. It holds the per-spawn ECDSA-P256
-// CA store and drives the lane-aware HTTP control server (UDS or TCP) for GetToken + GetSpawnCA.
+// CA store, drives the lane-aware HTTP control server (UDS or TCP) for GetToken + GetSpawnCA, and
+// PUSHES the CA + GitHub token into the sidecar (sp-2tx8.9 §3.1 — see githubpush.go).
 type githubControlServer struct {
 	refresher *githubRefresher
 	cas       caStore // on-disk CA persistence (sp-2tx8.3.5); zero value = memory-only
@@ -41,17 +48,48 @@ type githubControlServer struct {
 	mu        sync.Mutex
 	cache     map[string]caPair       // spawnID -> CA pair (memoizes cas.Load / generateCA)
 	listeners map[string]net.Listener // spawnID -> active listener
+
+	// --- push plane (sp-2tx8.9.3) ---
+	doer   httpDoer           // POSTs /control/github; set by node.Run
+	lookup spawnControlLookup // resolves a spawn's control endpoint; set by node.Run
+
+	reporter     func(spawnID string, st nodev1.GitHubCredentialStatus) // per-CP-connection; nil until installed
+	lastStatus   map[string]nodev1.GitHubCredentialStatus               // sticky condition per spawn
+	pushedExpiry map[string]int64                                       // expiry of the last SUCCESSFULLY pushed token (unix; 0 = unknown)
+	pushes       map[string]*pushHandle                                 // in-flight async push loop per spawn
+
+	// Timing knobs (fields, not package vars, so parallel tests never race). Defaults in the constructor.
+	now                func() time.Time
+	pushBackoffBase    time.Duration
+	pushBackoffMax     time.Duration
+	pushFallbackWindow time.Duration
 }
+
+// Default push timings. The retry loop gives up when the last successfully pushed token expires
+// (spec §4: "if still undeliverable when the token expires, report STALE"); when no token was ever
+// pushed — or its expiry is unknown — pushFallbackWindow bounds the loop instead.
+const (
+	defaultPushBackoffBase    = 5 * time.Second
+	defaultPushBackoffMax     = 60 * time.Second
+	defaultPushFallbackWindow = 15 * time.Minute
+)
 
 // newGitHubControlServer creates a githubControlServer backed by the given refresher and the given
 // on-disk CA store. store's zero value (caStore{}) makes the CA memory-only, as before this bead —
 // it will not survive a restart, but nothing errors.
 func newGitHubControlServer(r *githubRefresher, store caStore) *githubControlServer {
 	return &githubControlServer{
-		refresher: r,
-		cas:       store,
-		cache:     make(map[string]caPair),
-		listeners: make(map[string]net.Listener),
+		refresher:          r,
+		cas:                store,
+		cache:              make(map[string]caPair),
+		listeners:          make(map[string]net.Listener),
+		lastStatus:         make(map[string]nodev1.GitHubCredentialStatus),
+		pushedExpiry:       make(map[string]int64),
+		pushes:             make(map[string]*pushHandle),
+		now:                time.Now,
+		pushBackoffBase:    defaultPushBackoffBase,
+		pushBackoffMax:     defaultPushBackoffMax,
+		pushFallbackWindow: defaultPushFallbackWindow,
 	}
 }
 
@@ -211,6 +249,12 @@ func (s *githubControlServer) Stop(spawnID string) {
 		delete(s.listeners, spawnID)
 	}
 	delete(s.cache, spawnID)
+	if h := s.pushes[spawnID]; h != nil {
+		h.cancel()
+		delete(s.pushes, spawnID)
+	}
+	delete(s.lastStatus, spawnID)
+	delete(s.pushedExpiry, spawnID)
 	s.mu.Unlock()
 
 	if err := s.cas.Remove(spawnID); err != nil {
