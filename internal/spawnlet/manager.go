@@ -171,9 +171,10 @@ type Manager struct {
 	// not be SecretInjector.DirFor(spawnID), because that path is bind-mounted into the agent.
 	githubCreds GitHubCredentialStore
 	// ghControl is the optional node-side GitHub credential control server (sp-n7iy.3). When set,
-	// CreateWithSelection wires the per-spawn GetToken/SpawnCA HTTP listener and passes the
-	// SIDECAR_GETTOKEN_* env vars to the sidecar. Nil = no control server (dev/insecure lane);
-	// the sidecar env omits the vars, and the proxy cannot fetch tokens.
+	// CreateWithSelection wires the sidecar's MITM proxy env (SIDECAR_GITHUB_PROXY_ADDR,
+	// SIDECAR_SPAWN_ID) and the node PUSHES the CA + token into the sidecar after StartPod
+	// (sp-2tx8.9 §3.1 — PushCredentials; there is no inbound listener any more). Nil = no control
+	// server (dev/insecure lane); the sidecar gets no proxy wiring and the proxy cannot fetch tokens.
 	ghControl GitHubControlServer
 
 	// watchersMu guards sp.journalWatchers on each Spawn against concurrent access from
