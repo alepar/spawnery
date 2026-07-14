@@ -270,6 +270,29 @@ func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
 	}
 }
 
+func TestProductionCaddyUsesProtocolSpecificControlPlaneTransports(t *testing.T) {
+	for _, script := range []string{
+		"../../scripts/e2e-vm/provision/provision.sh",
+		"../../scripts/e2e-vm/roll.sh",
+	} {
+		content := strings.ReplaceAll(readRepoFile(t, script), "'\\''", " ")
+		caddy := strings.Join(strings.Fields(content), " ")
+		if strings.Contains(caddy, "@cp path /cp.v1.* /ws*") {
+			t.Errorf("%s sends WebSocket upgrades through the h2c control-plane route", script)
+		}
+		for _, required := range []string{
+			"@cp path /cp.v1.*",
+			"@ws path /ws*",
+			"handle @cp { reverse_proxy h2c://127.0.0.1:8080 }",
+			"handle @ws { reverse_proxy 127.0.0.1:8080 }",
+		} {
+			if !strings.Contains(caddy, required) {
+				t.Errorf("%s Caddy config missing %q", script, required)
+			}
+		}
+	}
+}
+
 func TestForbiddenCaddyEnrollmentPath(t *testing.T) {
 	for _, test := range []struct {
 		path      string
