@@ -54,7 +54,7 @@ func main() {
 			&cli.StringSliceFlag{Name: "mount", Usage: "mount binding name=backend_uri[,create] (repeatable; e.g. repo=github:owner/repo,create) — CP mode only"},
 		},
 		Action:   rootAction,
-		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), statusCmd(), setModelCmd(), keyCmd(), moveCmd(), resumeCmd(), suspendCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), ghCmd()},
+		Commands: []*cli.Command{attachCmd(), execCmd(), shellCmd(), listCmd(), statusCmd(), setModelCmd(), keyCmd(), moveCmd(), resumeCmd(), suspendCmd(), forkCmd(), loginCmd(), logoutCmd(), profileCmd(), catalogCmd(), bundleCmd(), ghCmd()},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
