@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv, type UserConfig } from "vite";
 import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -6,6 +6,7 @@ import path from "path";
 import fs from "fs";
 import { sriHeadersPlugin } from "./build/sri-headers-plugin";
 import { createHeadersMiddleware } from "./e2e/preview-headers";
+import { validateTrustInputs } from "./build/trust-inputs";
 
 // Dev HTTPS: the Web Crypto auth flow (crypto.subtle) requires a SECURE CONTEXT. http://localhost is
 // one, but a LAN host over plain http (e.g. http://blacky.dayton:5173 for tunnel-free access) is not,
@@ -20,7 +21,7 @@ const devHttps =
       }
     : undefined;
 
-export default defineConfig({
+const config: UserConfig = {
   plugins: [
     react(),
     tailwindcss(),
@@ -91,4 +92,10 @@ export default defineConfig({
       ["build/**", "node"],
     ],
   },
+};
+
+export default defineConfig(({ mode }) => {
+  const buildEnv = { ...loadEnv(mode, __dirname, ""), ...process.env };
+  validateTrustInputs(buildEnv, mode === "production" || buildEnv.VITE_AUTH_ENABLED === "1");
+  return config;
 });

@@ -168,6 +168,28 @@ func TestStartAgentAndStopLifecycle(t *testing.T) {
 	}
 }
 
+func TestStartAgentPassesRunnableAsImageEntrypointArgs(t *testing.T) {
+	c, f := newFakeCRI(t)
+	b := NewCRIPodBackend(c, "runsc")
+	ctx := context.Background()
+
+	h, err := b.StartPod(ctx, runtime.PodSpec{ID: "spawn-runnable", SidecarImage: "sidecar:dev"})
+	if err != nil {
+		t.Fatalf("StartPod: %v", err)
+	}
+	if err := b.StartAgent(ctx, h, runtime.AgentSpec{Image: "agent:dev", Cmd: []string{"goose-acp"}}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	agent := f.created[1]
+	if len(agent.Command) != 0 {
+		t.Fatalf("CRI Command = %v, want empty so the image ENTRYPOINT remains active", agent.Command)
+	}
+	if len(agent.Args) != 1 || agent.Args[0] != "goose-acp" {
+		t.Fatalf("CRI Args = %v, want [goose-acp]", agent.Args)
+	}
+}
+
 func TestStartAgentCapPolicyEmission(t *testing.T) {
 	cases := []struct {
 		name        string

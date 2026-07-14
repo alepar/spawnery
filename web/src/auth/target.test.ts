@@ -6,32 +6,57 @@ import { verifyResolvedTarget } from "./target";
 
 const vector = JSON.parse(fs.readFileSync(path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../internal/secrets/subkey/testdata/subkey/verify_node.json",
+  "testdata/node-crl-vectors.json",
 ), "utf8")) as {
-  chain_pem: string;
-  root_pem: string;
-  expected_node_id: string;
-  expected_account_id: string;
-  expected_class: string;
-  not_before: string;
+  now: string;
+  rootPEM: string;
+  chainPEM: string;
+  validBundles: Array<{
+    class: "cloud" | "self-hosted";
+    issuerPEM: string;
+    crlPEM: string;
+  }>;
+  scenarios: Record<string, {
+    bundles: Array<{
+      class: "cloud" | "self-hosted";
+      issuerPEM: string;
+      crlPEM: string;
+    }>;
+  }>;
 };
 
 const target = {
-  nodeCertChain: new TextEncoder().encode(vector.chain_pem),
-  targetNodeId: vector.expected_node_id,
-  targetNodeClass: vector.expected_class,
-  targetNodeAccountId: vector.expected_account_id,
+  nodeCertChain: new TextEncoder().encode(vector.chainPEM),
+  targetNodeId: "node-1",
+  targetNodeClass: "self-hosted",
+  targetNodeAccountId: "acct-1",
 };
 const pins = {
-  rootCAPEM: vector.root_pem,
+  rootCAPEM: vector.rootPEM,
   trustDomain: "prod.spawnery.internal",
   cloudAccountId: "cloud-system",
+  nodeCRLs: vector.validBundles,
 };
-const now = new Date(new Date(vector.not_before).getTime() + 60 * 60 * 1000);
+const now = new Date(vector.now);
 
 describe("verifyResolvedTarget", () => {
+  it("rejects a revoked resolved target", async () => {
+    const revokedTarget = {
+      nodeCertChain: new TextEncoder().encode(vector.chainPEM),
+      targetNodeId: "node-1",
+      targetNodeClass: "self-hosted",
+      targetNodeAccountId: "acct-1",
+    };
+    await expect(verifyResolvedTarget(revokedTarget, "acct-1", {
+      rootCAPEM: vector.rootPEM,
+      trustDomain: "prod.spawnery.internal",
+      cloudAccountId: "cloud-system",
+      nodeCRLs: vector.scenarios.revoked.bundles,
+    }, now)).rejects.toThrow("revoked");
+  });
+
   it("accepts a root-verified self-hosted node matching every typed field and logged-in account", async () => {
-    await expect(verifyResolvedTarget(target, "alice", pins, now)).resolves.toBeUndefined();
+    await expect(verifyResolvedTarget(target, "acct-1", pins, now)).resolves.toBeUndefined();
   });
 
   it.each([
@@ -39,7 +64,7 @@ describe("verifyResolvedTarget", () => {
     ["class", { targetNodeClass: "cloud" }],
     ["typed account", { targetNodeAccountId: "mallory" }],
   ])("rejects a %s substitution", async (_name, mutation) => {
-    await expect(verifyResolvedTarget({ ...target, ...mutation }, "alice", pins, now)).rejects.toThrow();
+    await expect(verifyResolvedTarget({ ...target, ...mutation }, "acct-1", pins, now)).rejects.toThrow();
   });
 
   it("rejects a self-hosted target belonging to another account", async () => {
@@ -71,6 +96,7 @@ describe("verifyResolvedTarget", () => {
         trustDomain: "prod.spawnery.internal", kind: "node" as const, role: "cloud" as const,
         accountId: "cloud-system", nodeId: "node-c",
       }),
+      verifyNodeCertificateRevocation: async () => undefined,
     };
     const cloud = {
       nodeCertChain: new TextEncoder().encode("pem"), targetNodeId: "node-c",

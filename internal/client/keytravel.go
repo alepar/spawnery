@@ -307,10 +307,11 @@ type ForkResult struct {
 // Fork forks an active spawn to the same node, a node, or a node class (req.TargetNodeId /
 // req.TargetClass / neither). ForkSpawn blocks at the CP awaiting the client's SignedIntent for
 // the fork-spawn op (the CP registers the pending intent under the SOURCE spawn id), so Fork
-// signs concurrently via a SignProvision goroutine — kicking it off after the await would
-// deadlock. Unlike Migrate, this does NOT use provisionWithIntent: its retry-once-on-NACK would
-// issue a second ForkSpawn and create a duplicate fork. A single attempt is correct here; a STALE
-// NACK just surfaces for the caller to retry manually.
+// signs concurrently via the source-keyed pending intent — kicking it off after the await would
+// deadlock. The signed child id must then match ForkSpawnResponse before delivery continues.
+// Unlike Migrate, this does NOT use provisionWithIntent: its retry-once-on-NACK would issue a
+// second ForkSpawn and create a duplicate fork. A single attempt is correct here; a STALE NACK
+// just surfaces for the caller to retry manually.
 func (c *Client) Fork(ctx context.Context, dev *seal.Device, req *cpv1.ForkSpawnRequest, out io.Writer, now time.Time, opts MoveOptions) (ForkResult, error) {
 	return forkSpawnAuthorized(ctx, c.rpc, c.nodeCredentials, c.targetTrust, dev, req, out, now, opts)
 }
@@ -338,9 +339,14 @@ func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials Nod
 	operationCtx, cancelOperation := context.WithCancel(ctx)
 	defer cancelOperation()
 	params := IntentParams{Op: intent.OpForkSpawn, TargetNodeID: req.GetTargetNodeId(), TargetClass: req.GetTargetClass()}
-	signCh := make(chan error, 1)
+	type forkAuthorization struct {
+		spawnID string
+		err     error
+	}
+	signCh := make(chan forkAuthorization, 1)
 	go func() {
-		signCh <- pollAndSign(operationCtx, client, credentials, trust, sourceID, params)
+		spawnID, err := pollAndSignFork(operationCtx, client, credentials, trust, sourceID, params)
+		signCh <- forkAuthorization{spawnID: spawnID, err: err}
 	}()
 	type forkResponse struct {
 		resp *connect.Response[cpv1.ForkSpawnResponse]
@@ -352,16 +358,18 @@ func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials Nod
 		rpcCh <- forkResponse{resp: resp, err: err}
 	}()
 	var resp *connect.Response[cpv1.ForkSpawnResponse]
+	var authorizedForkID string
 	authDone, rpcDone := false, false
 	var firstErr error
 	ctxDone := ctx.Done()
 	for !authDone || !rpcDone {
 		select {
-		case signErr := <-signCh:
-			if signErr != nil && firstErr == nil {
-				firstErr = fmt.Errorf("fork %s authorization: %w", sourceID, signErr)
+		case result := <-signCh:
+			if result.err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("fork %s authorization: %w", sourceID, result.err)
 				cancelOperation()
 			}
+			authorizedForkID = result.spawnID
 			authDone = true
 			signCh = nil
 		case result := <-rpcCh:
@@ -383,6 +391,12 @@ func forkSpawnAuthorized(ctx context.Context, client forkClient, credentials Nod
 	cancelOperation()
 	if firstErr != nil {
 		return ForkResult{}, firstErr
+	}
+	if resp == nil || resp.Msg == nil {
+		return ForkResult{}, errors.New("fork: empty response")
+	}
+	if resp.Msg.GetForkSpawnId() != authorizedForkID {
+		return ForkResult{}, fmt.Errorf("fork: response fork_spawn_id %q does not match authorized %q", resp.Msg.GetForkSpawnId(), authorizedForkID)
 	}
 	return finishFork(ctx, client, dev, req, resp, out, now, opts)
 }

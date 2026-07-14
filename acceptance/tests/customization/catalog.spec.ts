@@ -14,8 +14,8 @@ import { CatalogCli, ProfileCli, buildSkillTar } from "../../src/drivers/customi
 test(
   "catalog: create -> list -> show -> update -> set-listing -> delete",
   { tag: "@mutating" },
-  async ({ target, identity, api, ns }) => {
-    const catalogCli = new CatalogCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+  async ({ identity, api, cli, ns }) => {
+    const catalogCli = new CatalogCli(cli.configuration(), identity);
     const name = ns("cat-crud");
 
     let catalogId: string | undefined;
@@ -33,7 +33,7 @@ test(
       expect(oracle.name).toBe(name);
       expect(oracle.kind).toBe("PROFILE_ENTRY_KIND_SKILL");
       expect(oracle.description).toBe("acceptance catalog entry");
-      expect(oracle.listed).toBe(false); // not listed until set-listing
+      expect(oracle.listed).toBe(true); // catalog entries are public until explicitly delisted
 
       // --- list ---
       const listOut = await catalogCli.list();
@@ -79,9 +79,9 @@ test(
 test(
   "catalog: a profile entry can source from a catalog entry (catalog-ref)",
   { tag: "@mutating" },
-  async ({ target, identity, api, ns }) => {
-    const catalogCli = new CatalogCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
-    const profileCli = new ProfileCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
+  async ({ identity, api, cli, ns }) => {
+    const catalogCli = new CatalogCli(cli.configuration(), identity);
+    const profileCli = new ProfileCli(cli.configuration(), identity);
 
     let catalogId: string | undefined;
     let profileId: string | undefined;

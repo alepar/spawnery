@@ -1,10 +1,9 @@
 /**
  * Phase 5 — profile-attach injection: attach a profile (custom skill entry) at spawn-create,
- * observe materialization inside the running spawn via `spawnctl exec` (the only Phase-5 surface
- * that needs the NODE directly reachable, not proxied through the CP — see target.nodeAddr).
+ * observe materialization inside the running spawn via authenticated, CP-relayed `spawnctl exec`.
  *
  * Preconditions (fail loud, never skip — design's "every dep-gated scenario fails loud, not a
- * skip"): a reachable node (target.nodeAddr) and a registered seed app whose agent installs skills
+ * skip"): a registered seed app whose agent installs skills
  * (target.seedSkillAppId; claude installs to `.claude/skills`, codex to `.codex/skills` —
  * internal/agentinstall/{claude,codex}.go). Both are documented in .env.example.
  *
@@ -29,9 +28,11 @@ test(
           "(claude or codex); see acceptance/.env.example.",
       );
     }
+    const model = process.env.ACC_TEST_MODEL;
+    if (!model) throw new Error("ACC_TEST_MODEL is unset — injection.spec.ts needs a model for the selected agent runnable");
 
-    const profileCli = new ProfileCli({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin }, identity);
-    const cliCfg = { cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin };
+    const profileCli = new ProfileCli(cli.configuration(), identity);
+    const cliCfg = cli.configuration();
 
     let profileId: string | undefined;
     let spawnId: string | undefined;
@@ -47,7 +48,15 @@ test(
       writeFileSync(tarPath, buildSkillTar(marker));
       await profileCli.entryAddCustom(profileId, { kind: "skill", name: entryName, customFilePath: tarPath });
 
-      spawnId = await cli.createSpawn(ctx, { appId: target.seedSkillAppId, profileId });
+      // spawnctl create cannot select an image/runnable. Use the production SDK oracle for the
+      // canonical agentinstall lane, then observe the result through spawnctl below.
+      spawnId = await api.createSpawn({
+        appId: target.seedSkillAppId,
+        model,
+        profileId,
+        image: "spawnery/agent:dev",
+        runnableId: "claude-tui",
+      });
       await cli.waitActive(ctx, spawnId);
 
       // Cross-check: the spawn is ACTIVE via the oracle too.
@@ -56,7 +65,7 @@ test(
 
       // Observe materialization: agent-agnostic via the `*skills/*` glob (claude: .claude/skills,
       // codex: .codex/skills — internal/agentinstall/{claude,codex}.go).
-      const result = await execInSpawn(cliCfg, identity, target.nodeAddr, spawnId, [
+      const result = await execInSpawn(cliCfg, identity, spawnId, [
         "sh",
         "-lc",
         `find "$HOME" -path "*skills/${entryName}/SKILL.md" -exec cat {} +`,

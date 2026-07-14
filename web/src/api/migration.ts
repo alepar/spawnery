@@ -23,7 +23,8 @@ import type { Envelope } from "@/keys/hpke";
 import { verifyNodeForSealing } from "@/keys/subkey";
 import type { DeviceKeys } from "@/keys/device";
 import { fromBase64, toBase64, encodeFields } from "@/keys/encoding";
-import { PINNED_TRUST_DOMAIN } from "@/config/trustAnchors";
+import { getTrustAnchors } from "@/config/trustAnchors";
+import { verifyNodeCertificateRevocation } from "@/auth/crl";
 
 // ── Typed migration errors ────────────────────────────────────────────────────
 
@@ -350,13 +351,21 @@ export async function deliverOwnerSealedJournalKeys(
     : undefined;
   let hpkePub: Uint8Array;
   try {
-    // Certificate revocation is enforced on the live CP/node mTLS path by issuer+leaf CRLs.
-    // The browser retains its independent pinned-root, SAN, issuer-policy, and sub-key checks.
+    const anchors = rootPEM.trim() === "" ? null : getTrustAnchors();
+    if (anchors) {
+      await verifyNodeCertificateRevocation(
+        nk.nodeCertChain,
+        rootPEM,
+        anchors.nodeCRLs,
+        now,
+        anchors.trustDomain,
+      );
+    }
     const verified = await verifyNodeForSealing(
       nk.nodeCertChain,
       rootPEM,
       nk.signedSubkey,
-      { trustDomain: PINNED_TRUST_DOMAIN, tenancy, accountId },
+      { trustDomain: anchors?.trustDomain ?? "", tenancy, accountId },
       now,
     );
     if (verified.identity.nodeId !== resolvedNodeId) {
@@ -407,8 +416,8 @@ export async function deliverOwnerSealedJournalKeys(
  *   1. Fetch owner-sealed journal key ciphertext (CP holds ciphertext only).
  *   2. Drive MigrateSpawn (suspend source → resume on target); intent flow is
  *      launched concurrently via the A4 pollAndSign path.
- *   3. Fetch the target node's key material + PKI-verify via verifyNodeForSealing
- *      (live issuer+leaf revocation is enforced by the CP/node mTLS path).
+ *   3. Fetch the target node's key material and verify its certificate, stamped CRL,
+ *      identity, issuer policy, and signed sealing sub-key.
  *   4. Unseal each journal key with this device key, re-seal to the target node.
  *   5. Deliver the resealed ciphertext to the CP (which relays to the node).
  *

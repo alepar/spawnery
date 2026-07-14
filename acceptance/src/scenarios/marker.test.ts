@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import * as execModule from "./exec";
 import { newMarker, markerPath, writeMarker, readMarker, assertFreshMarker } from "./marker";
 import type { ExecConfig } from "./exec";
+import type { Identity } from "../fixtures/identity-pool";
 
 describe("newMarker", () => {
   it("starts with `<runId>-<spawnId>-`", () => {
@@ -35,14 +36,16 @@ describe("assertFreshMarker", () => {
 });
 
 describe("writeMarker / readMarker", () => {
-  const cfg: ExecConfig = { spawnctlBin: "spawnctl", nodeAddr: "http://n:9092" };
+	const cfg = { spawnctlBin: "spawnctl", cpEndpoint: "https://cp", authArgs: [] } as ExecConfig;
+	const identity: Identity = { token: "ignored", owner: "alice" };
 
   it("writeMarker execs a shell write of the marker to markerPath(runId)", async () => {
     const spy = vi.spyOn(execModule, "execOrThrow").mockResolvedValue({ stdout: "", stderr: "", code: 0 });
-    await writeMarker(cfg, "sp-1", "r1", "the-marker");
+		await writeMarker(cfg, identity, "sp-1", "r1", "the-marker");
     expect(spy).toHaveBeenCalledTimes(1);
-    const [gotCfg, gotSpawnId, gotCmd] = spy.mock.calls[0];
-    expect(gotCfg).toBe(cfg);
+		const [gotCfg, gotIdentity, gotSpawnId, gotCmd] = spy.mock.calls[0];
+		expect(gotCfg).toBe(cfg);
+		expect(gotIdentity).toBe(identity);
     expect(gotSpawnId).toBe("sp-1");
     expect(gotCmd[0]).toBe("sh");
     expect(gotCmd.join(" ")).toContain(markerPath("r1"));
@@ -52,9 +55,9 @@ describe("writeMarker / readMarker", () => {
 
   it("readMarker execs `cat` on markerPath(runId) and returns stdout untrimmed", async () => {
     const spy = vi.spyOn(execModule, "execOrThrow").mockResolvedValue({ stdout: "the-marker\n", stderr: "", code: 0 });
-    const got = await readMarker(cfg, "sp-1", "r1");
+		const got = await readMarker(cfg, identity, "sp-1", "r1");
     expect(got).toBe("the-marker\n");
-    const [, , gotCmd] = spy.mock.calls[0];
+		const [, , , gotCmd] = spy.mock.calls[0];
     expect(gotCmd).toEqual(["cat", markerPath("r1")]);
     spy.mockRestore();
   });

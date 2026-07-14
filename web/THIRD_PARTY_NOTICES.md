@@ -4,6 +4,24 @@ This file credits third-party assets bundled with the Spawnery web frontend.
 
 ---
 
+## Cryptography
+
+### PKI.js
+- **Version:** 3.4.0
+- **License:** BSD-3-Clause
+- **Copyright:** Copyright (c) 2014, GlobalSign; Copyright (c) 2015-2019, Peculiar Ventures
+- **License file:** `node_modules/pkijs/LICENSE`
+- **Delivered via:** `pkijs` npm package
+
+### ASN.1.js
+- **Version:** 3.0.10
+- **License:** BSD-3-Clause
+- **Copyright:** Copyright (c) 2014, GMO GlobalSign; Copyright (c) 2015-2022, Peculiar Ventures
+- **License file:** `node_modules/asn1js/LICENSE`
+- **Delivered via:** `asn1js` npm package
+
+---
+
 ## Fonts
 
 All fonts are self-hosted and shipped unmodified. License texts are available at the paths listed below.

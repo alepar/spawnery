@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"io"
 	"strconv"
 
 	"spawnery/internal/runtime"
@@ -56,4 +57,8 @@ func (s *realSessionExec) DialACP(ctx context.Context, spawnID string, port int)
 
 func (s *realSessionExec) KillTmux(ctx context.Context, spawnID, tmuxName string) error {
 	return s.mgr.ExecRun(ctx, spawnID, []string{"tmux", "kill-session", "-t", tmuxName})
+}
+
+func (s *realSessionExec) ExecStream(ctx context.Context, spawnID string, argv []string, stdout, stderr io.Writer) (int, error) {
+	return s.mgr.ExecStream(ctx, spawnID, argv, stdout, stderr)
 }

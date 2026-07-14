@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { createHash, createPrivateKey, randomBytes, sign as nodeSign, X509Certificate } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
+import { lstat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { Code, ConnectError, createClient } from "@connectrpc/connect";
@@ -9,6 +11,7 @@ import {
   buildSignedIntent,
   cpv1,
   createTransport,
+  derToP1363,
   WebCryptoSessionSigner,
   toBase64Url,
 } from "@spawnery/client";
@@ -25,17 +28,30 @@ export interface VMAuthConfig {
   webOrigin: string;
   appId: string;
   model: string;
-  devToken: string;
   owner: string;
 }
 
+export interface DestructiveVMAuthConfig extends VMAuthConfig {
+  destructiveDevToken: string;
+  vmRunId: string;
+}
+
+type DestructiveSSH = (cfg: DestructiveVMAuthConfig, command: string) => Promise<string>;
+type SPABundleExec = (
+  file: string,
+  args: string[],
+  options: { maxBuffer: number },
+) => Promise<void>;
+
+function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
+  if (!value) throw new Error(`root-anchored-artifacts requires ${name}`);
+  return value;
+}
+
 export function loadVMAuthConfig(env: NodeJS.ProcessEnv = process.env): VMAuthConfig {
-  const required = (name: string): string => {
-    const value = env[name];
-    if (!value) throw new Error(`root-anchored-artifacts requires ${name}`);
-    return value;
-  };
-  const [devToken, owner] = required("ACC_IDENTITY_POOL").split(",", 1)[0].split("=", 2);
+  const required = (name: string): string => requiredEnv(env, name);
+  const [, owner] = required("ACC_IDENTITY_POOL").split(",", 1)[0].split("=", 2);
   return {
     ip: required("ACC_E2E_VM_IP"),
     sshKey: required("ACC_E2E_SSH_KEY"),
@@ -45,8 +61,17 @@ export function loadVMAuthConfig(env: NodeJS.ProcessEnv = process.env): VMAuthCo
     webOrigin: required("ACC_WEB_ORIGIN"),
     appId: required("ACC_TEST_APP_ID"),
     model: required("ACC_TEST_MODEL"),
-    devToken,
     owner,
+  };
+}
+
+export function loadDestructiveVMAuthConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): DestructiveVMAuthConfig {
+  return {
+    ...loadVMAuthConfig(env),
+    destructiveDevToken: requiredEnv(env, "ACC_DESTRUCTIVE_DEV_TOKEN"),
+    vmRunId: requiredEnv(env, "ACC_E2E_VM_RUNID"),
   };
 }
 
@@ -59,6 +84,19 @@ export async function ssh(cfg: VMAuthConfig, command: string): Promise<string> {
     command,
   ], { maxBuffer: 4 * 1024 * 1024 });
   return stdout.trim();
+}
+
+export async function expectNoRuntimeObjects(
+  cfg: VMAuthConfig,
+  spawnId: string,
+  executeSSH: (cfg: VMAuthConfig, command: string) => Promise<string> = ssh,
+): Promise<void> {
+  const label = posixShellQuote(`spawnery.spawn-id=${spawnId}`);
+  const pods = await executeSSH(cfg, `sudo crictl pods --label ${label} -q`);
+  const containers = await executeSSH(cfg, `sudo crictl ps -a --label ${label} -q`);
+  if (pods || containers) {
+    throw new Error(`node created a runtime pod or container for rejected spawn ${spawnId}`);
+  }
 }
 
 export function posixShellQuote(value: string): string {
@@ -97,53 +135,14 @@ export async function mintVMToken(
   signer: "current" | "next",
   audience: "cp" | "node",
   spki: Uint8Array,
+  accountId: string,
 ): Promise<string> {
   const base = "/etc/spawnery/authsvc";
   return ssh(cfg, remoteArgv(
     "sudo", "/usr/local/bin/spawnery-ca", "auth-token", `${base}/root.pem`,
     `${base}/auth-signer-${signer}-key.pem`, `${base}/auth-signer-${signer}-chain.pem`,
-    "prod", audience, cfg.owner, Buffer.from(spki).toString("base64"),
+    "prod", audience, accountId, Buffer.from(spki).toString("base64"),
   ));
-}
-
-export async function mintShortLivedNodeToken(
-  cfg: VMAuthConfig,
-  accountId: string,
-  spki: Uint8Array,
-  lifetimeSeconds: number,
-): Promise<string> {
-  if (lifetimeSeconds < 2 || lifetimeSeconds > 60) {
-    throw new Error(`short-lived node token lifetime must be between 2 and 60 seconds, got ${lifetimeSeconds}`);
-  }
-  const read = async (name: string) => Buffer.from(
-    await ssh(cfg, remoteArgv("sudo", "base64", "-w0", `/etc/spawnery/authsvc/${name}`)),
-    "base64",
-  );
-  const keyPEM = await read("auth-signer-current-key.pem");
-  const chainPEM = (await read("auth-signer-current-chain.pem")).toString("utf8");
-  const certPEMs = chainPEM.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
-  if (!certPEMs?.length) throw new Error("deployed auth signer chain contained no certificates");
-  const chain = certPEMs.map((pem) => new X509Certificate(pem));
-  const keyId = createHash("sha256").update(chain[0].publicKey.export({ format: "der", type: "spki" })).digest();
-  const now = Math.floor(Date.now() / 1000);
-  const payload = toBinary(authv1.SessionTokenBodySchema, create(authv1.SessionTokenBodySchema, {
-    accountId,
-    tokenId: randomBytes(16).toString("hex"),
-    audience: "node",
-    issuedAt: BigInt(now),
-    expiresAt: BigInt(now + lifetimeSeconds),
-    sessionKeyHash: createHash("sha256").update(spki).digest(),
-    keyId: keyId.toString("hex"),
-  }));
-  const message = Buffer.concat([Buffer.from("spawnery/session-token/v1"), payload]);
-  const signature = nodeSign(null, message, createPrivateKey(keyPEM));
-  return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
-    artifactType: "session-token",
-    payload,
-    signature,
-    signerChain: chain.map((cert) => cert.raw),
-    keyId,
-  })));
 }
 
 export function cpClient(cfg: VMAuthConfig, bearer: string) {
@@ -168,7 +167,7 @@ export async function submitSpawn(
   nodeToken: string,
   keyPair: CryptoKeyPair,
   suffix: string,
-  cpToken = cfg.devToken,
+  cpToken: string,
 ): Promise<{ spawnId: string; status: string; errorDetail: string }> {
   const client = cpClient(cfg, cpToken);
   const created = await client.createSpawn({ appId: cfg.appId, model: cfg.model, name: `acc-root-${suffix}` });
@@ -218,9 +217,134 @@ export async function submitSpawn(
   return { spawnId, status, errorDetail };
 }
 
+export function cpAuthModePlan(
+  cfg: Pick<DestructiveVMAuthConfig, "destructiveDevToken" | "owner">,
+  mode: "prod" | "dev",
+): { configureCommand: string; expectedLog: string } {
+  const envPath = "/etc/spawnery/env.d/zz-destructive.env";
+  const dropInDir = "/etc/systemd/system/spawnery-cp.service.d";
+  const dropInPath = `${dropInDir}/zz-destructive.conf`;
+  if (mode === "dev") {
+    const content = `CP_AUTH_MODE=dev\nCP_DEV_TOKENS=${cfg.destructiveDevToken}=${cfg.owner}\n`;
+    const dropIn = `[Service]\nEnvironmentFile=${envPath}\n`;
+    return {
+      configureCommand: `install -d ${dropInDir}; printf %s ${posixShellQuote(content)} > ${envPath}; printf %s ${posixShellQuote(dropIn)} > ${dropInPath}`,
+      expectedLog: "cp: auth mode=dev",
+    };
+  }
+  return {
+    configureCommand: `rm -f ${envPath} ${dropInPath}`,
+    expectedLog: "cp: auth mode=prod",
+  };
+}
+
+export function cpAuthModeReadinessCommand(expectedLog: string): string {
+  return "sudo systemctl is-active spawnery-cp >/dev/null && "
+    + "pid=$(sudo systemctl show --property MainPID --value spawnery-cp); "
+    + "test \"$pid\" -gt 0 && "
+    + "logs=$(sudo journalctl _SYSTEMD_UNIT=spawnery-cp.service _PID=\"$pid\" --no-pager); "
+    + `printf %s "$logs" | grep -Fq ${posixShellQuote(expectedLog)} && `
+    + `printf %s "$logs" | grep -Fq 'node connected' && echo ready`;
+}
+
+export function vmRunMarkerVerificationCommand(expectedRunId: string): string {
+  return "marker=/run/spawnery-e2e-runid; "
+    + `test "$(sudo cat "$marker")" = ${posixShellQuote(expectedRunId)} && `
+    + "test \"$(sudo stat -c '%U:%G:%a' \"$marker\")\" = root:root:600 && echo verified";
+}
+
+export async function assertDisposableVM(
+  cfg: DestructiveVMAuthConfig,
+  executeSSH: DestructiveSSH = ssh,
+): Promise<void> {
+  const verified = await executeSSH(cfg, vmRunMarkerVerificationCommand(cfg.vmRunId));
+  if (verified !== "verified") throw new Error("disposable VM run marker did not verify");
+}
+
+export async function spaBundlePublicationPlan(
+  cfg: DestructiveVMAuthConfig,
+  bundleDir: string,
+): Promise<{ file: string; args: string[]; options: { maxBuffer: number } }> {
+  if (bundleDir.trim() === "" || bundleDir.startsWith("-")) {
+    throw new Error("alternate SPA bundle directory is invalid");
+  }
+  const source = resolve(bundleDir);
+  let sourceStat;
+  try {
+    sourceStat = await lstat(source);
+  } catch {
+    throw new Error("alternate SPA bundle directory does not exist");
+  }
+  if (!sourceStat.isDirectory()) throw new Error("alternate SPA bundle path is not a directory");
+
+  let indexStat;
+  try {
+    indexStat = await lstat(join(source, "index.html"));
+  } catch {
+    throw new Error("alternate SPA bundle must contain a regular index.html");
+  }
+  if (!indexStat.isFile()) {
+    throw new Error("alternate SPA bundle must contain a regular index.html");
+  }
+
+  return {
+    file: "rsync",
+    args: [
+      "-a",
+      "--chmod=Dugo+rx",
+      "--delete",
+      "-e",
+      `ssh -i ${posixShellQuote(cfg.sshKey)} -o BatchMode=yes -o StrictHostKeyChecking=no`,
+      "--rsync-path",
+      "sudo rsync",
+      "--",
+      `${source}/`,
+      `${cfg.sshUser}@${cfg.ip}:/var/www/spawnery/`,
+    ],
+    options: { maxBuffer: 4 * 1024 * 1024 },
+  };
+}
+
+async function executeSPABundlePublication(
+  file: string,
+  args: string[],
+  options: { maxBuffer: number },
+): Promise<void> {
+  await execFileP(file, args, options);
+}
+
+/** Replace the VM's deployed SPA with a local alternate bundle. */
+export async function deployAlternateSPABundle(
+  cfg: DestructiveVMAuthConfig,
+  bundleDir: string,
+  executeSSH: DestructiveSSH = ssh,
+  executeFile: SPABundleExec = executeSPABundlePublication,
+): Promise<void> {
+  const plan = await spaBundlePublicationPlan(cfg, bundleDir);
+  await assertDisposableVM(cfg, executeSSH);
+  await executeFile(plan.file, plan.args, plan.options);
+}
+
+export async function setCPAuthMode(
+  cfg: DestructiveVMAuthConfig,
+  mode: "prod" | "dev",
+  executeSSH?: DestructiveSSH,
+): Promise<void> {
+  const runSSH = executeSSH ?? ssh;
+  await assertDisposableVM(cfg, runSSH);
+  const plan = cpAuthModePlan(cfg, mode);
+  await runSSH(cfg, remoteArgv("sudo", "sh", "-c", plan.configureCommand));
+  await runSSH(cfg, "sudo systemctl daemon-reload && sudo systemctl restart spawnery-cp");
+  for (let i = 0; i < 60; i++) {
+    const ready = await runSSH(cfg, cpAuthModeReadinessCommand(plan.expectedLog)).catch(() => "");
+    if (ready === "ready") return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`CP did not report ${mode} auth mode after restart`);
+}
+
 export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node", spki: Uint8Array): Promise<string> {
   const read = async (name: string) => Buffer.from(await ssh(cfg, remoteArgv("sudo", "base64", "-w0", `/etc/spawnery/node/${name}`)), "base64");
-  const keyPEM = await read("key.pem");
   const certPEM = await read("cert.pem");
   const chainPEM = await read("chain.pem");
   const leaf = new X509Certificate(certPEM);
@@ -236,7 +360,10 @@ export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node
     keyId: keyId.toString("hex"),
   }));
   const message = Buffer.concat([Buffer.from("spawnery/session-token/v1"), payload]);
-  const signature = nodeSign("sha256", message, { key: createPrivateKey(keyPEM), dsaEncoding: "ieee-p1363" });
+  const messageB64 = message.toString("base64");
+  const signatureDER = Buffer.from(await ssh(cfg,
+    `printf %s ${posixShellQuote(messageB64)} | base64 -d | sudo openssl dgst -sha256 -sign /etc/spawnery/node/key.pem | base64 -w0`), "base64");
+  const signature = derToP1363(signatureDER);
   const certDER = leaf.raw;
   const chainDER = new X509Certificate(chainPEM).raw;
   return toBase64Url(toBinary(authv1.SignedAuthArtifactSchema, create(authv1.SignedAuthArtifactSchema, {
@@ -248,19 +375,26 @@ export async function nodeLeafArtifact(cfg: VMAuthConfig, audience: "cp" | "node
   })));
 }
 
-export async function deployCurrentRevocation(cfg: VMAuthConfig, generation: number): Promise<void> {
+export async function deployCurrentRevocation(
+  cfg: DestructiveVMAuthConfig,
+  generation: number,
+  executeSSH?: DestructiveSSH,
+): Promise<void> {
+  const runSSH = executeSSH ?? ssh;
+  await assertDisposableVM(cfg, runSSH);
   const restartEpoch = Math.floor(Date.now() / 1000) - 1;
-  const wire = await ssh(cfg, remoteArgv(
+  const wire = await runSSH(cfg, remoteArgv(
     "sudo", "/usr/local/bin/spawnery-ca", "signer-revocation",
     "/var/lib/spawnery-offline/auth-signing-intermediate.pem",
     "/var/lib/spawnery-offline/auth-signing-intermediate-key.pem",
     "/etc/spawnery/authsvc/auth-signer-current-chain.pem", "prod", generation,
   ));
   const install = `printf '%s\\n' ${posixShellQuote(wire)} > /etc/spawnery/signer-revocations.artifact; grep -q ^CP_AUTH_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf '%s\\n' 'CP_AUTH_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact' >> /etc/spawnery/env.d/common.env; grep -q ^NODE_SIGNER_REVOCATION_STATEMENT= /etc/spawnery/env.d/common.env || printf '%s\\n' 'NODE_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/signer-revocations.artifact' >> /etc/spawnery/env.d/common.env; systemctl restart spawnery-cp spawnery-node`;
-  await ssh(cfg, remoteArgv("sudo", "sh", "-c", install));
+  await assertDisposableVM(cfg, runSSH);
+  await runSSH(cfg, remoteArgv("sudo", "sh", "-c", install));
   for (let i = 0; i < 60; i++) {
     const journal = remoteArgv("sudo", "journalctl", "-u", "spawnery-node", "--since", `@${restartEpoch}`, "--no-pager");
-    const ready = await ssh(cfg, `curl -fsS http://127.0.0.1:8080/healthz >/dev/null && ${journal} | grep -q 'node: connected to CP' && echo ready`).catch(() => "");
+    const ready = await runSSH(cfg, `curl -fsS http://127.0.0.1:8080/healthz >/dev/null && ${journal} | grep -q 'node: connected to CP' && echo ready`).catch(() => "");
     if (ready === "ready") return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }

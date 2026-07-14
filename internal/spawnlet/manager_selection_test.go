@@ -25,8 +25,7 @@ func TestCreateWithSelectionAcpUsesRunnableID(t *testing.T) {
 	if fb.agentSpec.Image != "selected:img" {
 		t.Fatalf("agent image = %q, want selected:img", fb.agentSpec.Image)
 	}
-	// Any runnable selection (including acp/served) now yields Cmd=[runnableID]; the image's
-	// dispatcher entrypoint resolves the actual launch (sp-9xr.13b).
+	// Any runnable selection (including acp/served) yields the dispatcher argument [runnableID].
 	if len(fb.agentSpec.Cmd) != 1 || fb.agentSpec.Cmd[0] != "goose-acp" {
 		t.Fatalf("acp selection should yield Cmd=[\"goose-acp\"], got %v", fb.agentSpec.Cmd)
 	}
@@ -54,7 +53,7 @@ func TestCreateWithSelectionTmuxPassesRunnableID(t *testing.T) {
 		t.Fatalf("tmux mode should launch, got error: %v", err)
 	}
 	cmd := fb.agentSpec.Cmd
-	// The dispatcher (image entrypoint) now owns tmux-wrapping; node just passes the runnable id.
+	// The dispatcher (image entrypoint) owns tmux-wrapping; the node passes the runnable ID as its arg.
 	if len(cmd) != 1 || cmd[0] != "opencode-tui" {
 		t.Fatalf("tmux launch cmd = %v, want [\"opencode-tui\"]", cmd)
 	}

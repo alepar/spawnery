@@ -478,6 +478,9 @@ func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationCheck
 		VerificationURI:     cfg.VerificationURI,
 		RegistrationEnabled: regEnabled,
 		MaxFamilies:         maxFamilies,
+		RateLimits: authsvc.RateLimitConfig{
+			DevicePerMin: cfg.RateLimits.DevicePerMin,
+		},
 	})
 	if err != nil {
 		return nil, err

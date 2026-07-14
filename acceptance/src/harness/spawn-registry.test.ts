@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { SpawnRegistry } from "./spawn-registry";
+import { cleanupNewSpawns, SpawnRegistry } from "./spawn-registry";
 
 describe("SpawnRegistry", () => {
   it("track returns the id it was given", () => {
@@ -53,5 +53,33 @@ describe("SpawnRegistry", () => {
     deleteSpawn.mockClear();
     await reg.cleanup();
     expect(deleteSpawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("cleanupNewSpawns", () => {
+  it("deletes only owner-visible ids added after the baseline snapshot", async () => {
+    const deleteSpawn = vi.fn().mockResolvedValue(undefined);
+    const listSpawns = vi.fn().mockResolvedValue([
+      { spawnId: "existing" },
+      { spawnId: "new-active" },
+      { spawnId: "new-error" },
+    ]);
+
+    await cleanupNewSpawns({ listSpawns, deleteSpawn }, new Set(["existing"]));
+
+    expect(deleteSpawn.mock.calls.map(([id]) => id)).toEqual(["new-active", "new-error"]);
+  });
+
+  it("continues deleting the post-test delta after one delete fails", async () => {
+    const deleteSpawn = vi.fn().mockImplementation((id: string) => (
+      id === "new-error" ? Promise.reject(new Error("boom")) : Promise.resolve()
+    ));
+    const listSpawns = vi.fn().mockResolvedValue([
+      { spawnId: "new-error" },
+      { spawnId: "new-active" },
+    ]);
+
+    await expect(cleanupNewSpawns({ listSpawns, deleteSpawn }, new Set())).resolves.toBeUndefined();
+    expect(deleteSpawn).toHaveBeenCalledTimes(2);
   });
 });

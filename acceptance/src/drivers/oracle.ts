@@ -18,7 +18,9 @@ import {
   createTransport,
   cpv1,
   type KeyStore,
+  type ResolvedTarget,
 } from "@spawnery/client";
+import { X509Certificate } from "node:crypto";
 import type { SpawnStatus } from "./types";
 
 export interface SpawnSummary {
@@ -47,6 +49,8 @@ export interface CreateSpawnApiRequest {
   name?: string;
   version?: string;
   profileId?: string;
+  image?: string;
+  runnableId?: string;
 }
 
 // --- Customization: profiles, catalog entries, secrets (sp-tq0t.8) ---
@@ -140,6 +144,60 @@ export interface AcceptanceClientOptions {
   /** Omit for read/delete-only oracle use. Lifecycle callers must provide the SDK's complete
    * node-authorization configuration; a key store alone is deliberately not sufficient. */
   keyStore?: KeyStore;
+  getNodeAccessToken?: () => Promise<string>;
+  verifyTarget?: (target: ResolvedTarget) => Promise<void>;
+}
+
+export interface KnownVMTargetPins {
+  rootCAPEM: string;
+  trustDomain: string;
+  expectedNodeId: string;
+  expectedNodeClass: string;
+  expectedNodeAccountId: string;
+  now?: () => Date;
+}
+
+function certificatePEMs(raw: string): string[] {
+  return raw.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+}
+
+/** Strict verifier for the disposable VM's one known node; it signs nothing on mismatch. */
+export function createKnownVMTargetVerifier(pins: KnownVMTargetPins) {
+  if (!pins.rootCAPEM.trim() || !pins.trustDomain || !pins.expectedNodeId ||
+      !pins.expectedNodeClass || !pins.expectedNodeAccountId) {
+    throw new Error("known VM target verifier requires root, trust domain, node id, class, and account");
+  }
+  const root = new X509Certificate(pins.rootCAPEM);
+  return async (target: ResolvedTarget): Promise<void> => {
+    if (target.targetNodeId !== pins.expectedNodeId || target.targetNodeClass !== pins.expectedNodeClass ||
+        target.targetNodeAccountId !== pins.expectedNodeAccountId) {
+      throw new Error("known VM target typed identity mismatch");
+    }
+    const certs = certificatePEMs(new TextDecoder().decode(target.nodeCertChain)).map((pem) => new X509Certificate(pem));
+    if (certs.length === 0) throw new Error("known VM target certificate chain is missing");
+    const now = (pins.now?.() ?? new Date()).getTime();
+    for (const cert of certs) {
+      if (now < Date.parse(cert.validFrom) || now > Date.parse(cert.validTo)) {
+        throw new Error("known VM target certificate is outside its validity window");
+      }
+    }
+    for (let i = 0; i + 1 < certs.length; i++) {
+      if (!certs[i].verify(certs[i + 1].publicKey)) throw new Error("known VM target chain signature is invalid");
+    }
+    if (!certs.at(-1)!.verify(root.publicKey)) throw new Error("known VM target chain is not rooted in the pinned CA");
+
+    const subjectAltName = certs[0]!.subjectAltName;
+    if (!subjectAltName) throw new Error("known VM target certificate has no subject alternative name");
+    const uris = [...subjectAltName.matchAll(/URI:([^,\n]+)/g)].map((match) => match[1]);
+    if (uris.length !== 1) throw new Error("known VM target must have exactly one URI SAN");
+    const uri = new URL(uris[0]!);
+    const segments = uri.pathname.split("/").filter(Boolean);
+    if (uri.protocol !== "spiffe:" || uri.hostname !== pins.trustDomain || segments.length !== 4 ||
+        segments[0] !== "node" || segments[1] !== pins.expectedNodeClass ||
+        segments[2] !== pins.expectedNodeAccountId || segments[3] !== pins.expectedNodeId) {
+      throw new Error("known VM target SPIFFE principal mismatch");
+    }
+  };
 }
 
 function bytesToB64(b: Uint8Array): string {
@@ -289,7 +347,12 @@ export class AcceptanceClient {
         getBearer: () => (typeof opts.bearer === "string" ? Promise.resolve(opts.bearer) : opts.bearer()),
       },
     });
-    this.sdk = new SpawnClient({ transport, keyStore: opts.keyStore });
+    this.sdk = new SpawnClient({
+      transport,
+      keyStore: opts.keyStore,
+      getNodeAccessToken: opts.getNodeAccessToken,
+      verifyTarget: opts.verifyTarget,
+    });
   }
 
   // --- Spawns ---
@@ -301,6 +364,8 @@ export class AcceptanceClient {
       name: req.name ?? "",
       version: req.version ?? "",
       profileId: req.profileId ?? "",
+      image: req.image ?? "",
+      runnableId: req.runnableId ?? "",
     });
   }
 

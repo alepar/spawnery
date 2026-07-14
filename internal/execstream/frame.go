@@ -1,9 +1,8 @@
 // Package execstream is the wire protocol for spawnctl's non-interactive `exec`: a length-prefixed
 // stream of typed frames carrying a command's stdout/stderr and, distinct from the output, its exit
-// code. The node side (internal/spawnlet) muxes a `docker`/`crictl exec`'s output into this stream
-// over a streaming HTTP response; the client side (cmd/spawnctl) demuxes it back to os.Stdout/Stderr
-// and exits with the propagated code. Kept dependency-free so the CLI can import it without pulling in
-// the runtime/spawnlet stack.
+// code. The node muxes a container exec's output into opaque CP relay frames; the client demuxes
+// them back to stdout/stderr and propagates the exit code. Kept dependency-free so both ends can
+// share the framing without pulling in the runtime stack.
 package execstream
 
 import (

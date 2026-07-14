@@ -38,9 +38,12 @@ vi.mock("@/keys/device", () => ({
 }));
 
 vi.mock("@/config/trustAnchors", () => ({
-  PINNED_ROOT_CA_PEM: "",
-  PINNED_TRUST_DOMAIN: "prod.spawnery.internal",
-  PINNED_CLOUD_ACCOUNT_ID: "cloud-system",
+  getTrustAnchors: () => ({
+    rootCAPEM: "",
+    trustDomain: "prod.spawnery.internal",
+    cloudAccountId: "cloud-system",
+    nodeCRLs: [],
+  }),
 }));
 
 import * as migrationMod from "@/api/migration";
@@ -205,7 +208,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
     expect(result.current.state.errorMsg).toContain("resume");
   });
 
-  it("delivery-leg failure → delivery-pending phase (WM3 / WM8 revocation path)", async () => {
+  it("keeps migration delivery pending when node certificate revocation rejects delivery", async () => {
     vi.mocked(migrationMod.listMigrationTargets).mockResolvedValue({ targets: [TARGET_A], spawnDurabilityClass: "ephemeral" });
     vi.mocked(migrationMod.getJournalKeyCiphertext).mockResolvedValue([ENTRY]);
     vi.mocked(migrationMod.classifyDurability).mockReturnValue("owner-sealed");
@@ -222,6 +225,7 @@ describe("useMoveTo per-leg error states (WM3)", () => {
 
     expect(result.current.state.phase).toBe("delivery-pending");
     expect(result.current.state.errorMsg).toContain("certificate is revoked");
+    expect(migrationMod.upgradeToOwnerSealed).not.toHaveBeenCalled();
   });
 
   it("network error → reconnecting phase", async () => {

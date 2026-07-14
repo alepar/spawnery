@@ -674,20 +674,29 @@ func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) e
 // ExecStream runs inner non-interactively in spawnID's agent container, streaming its stdout/stderr to
 // the given writers as they arrive, and returns the inner command's exit code. It is the user-facing
 // `spawnctl exec` path (sp-8v39). Unlike ExecRun (buffered, error-on-nonzero), a non-zero command exit
-// is returned as exitCode with a nil error; err is reserved for failures to LAUNCH the exec — an
-// unknown spawn / no agent container, or the runtime CLI (docker/crictl) failing to start. `docker
+// is returned as exitCode with a nil error; err is reserved for setup, transport, and cancellation
+// failures. `docker
 // exec` propagates the inner exit code and demuxes stdout/stderr natively; `crictl exec` (runsc/CRI
-// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit). NOTE:
-// cancelling ctx kills the docker/crictl client, which may leave the in-container process orphaned
-// until the spawn stops (documented limitation).
+// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit).
 func (m *Manager) ExecStream(ctx context.Context, spawnID string, inner []string, stdout, stderr io.Writer) (int, error) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok || sp.AgentID == "" {
 		return 1, fmt.Errorf("spawn %s has no agent container", spawnID)
 	}
-	prefix := ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime)
-	argv := execArgv(prefix, sp.AgentID, inner)
-	return runExecStream(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl")
+	if err := ctx.Err(); err != nil {
+		return 1, err
+	}
+	process, err := newExecProcess()
+	if err != nil {
+		return 1, err
+	}
+	wrapped, err := process.wrapArgv(inner)
+	if err != nil {
+		return 1, err
+	}
+	prefix := execPrefixWithStdin(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime))
+	argv := execArgv(prefix, sp.AgentID, wrapped)
+	return runExecStreamCancelable(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl", process)
 }
 
 // runExecStream runs argv to completion, streaming its stdout/stderr to the given writers, and returns
@@ -956,7 +965,7 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 }
 
 // CreateWithSelection is Create plus an explicit agent selection (image + runnable id + mode).
-// For any selected runnable the container command is set to [sel.RunnableID]; the image's
+// For any selected runnable the image-entrypoint argument vector is set to [sel.RunnableID]; the image's
 // dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
 // TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
@@ -1013,7 +1022,8 @@ func (m *Manager) createWithReservation(ctx context.Context, id, appPath, model,
 			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
 		}
 		// The image's dispatcher entrypoint owns the actual launch (serve+adapter / tmux-wrapped TUI);
-		// the node just names the runnable. (Replaces the old spawn-tmux + agentcaps.Launch prepend.)
+		// the node passes only the runnable ID as its argument. (Replaces the old spawn-tmux +
+		// agentcaps.Launch prepend.)
 		agentCmd = []string{sel.RunnableID}
 	}
 

@@ -29,9 +29,12 @@ vi.mock("@/keys/device", () => ({
 }));
 
 vi.mock("@/config/trustAnchors", () => ({
-  PINNED_ROOT_CA_PEM: "",
-  PINNED_TRUST_DOMAIN: "prod.spawnery.internal",
-  PINNED_CLOUD_ACCOUNT_ID: "cloud-system",
+  getTrustAnchors: () => ({
+    rootCAPEM: "",
+    trustDomain: "prod.spawnery.internal",
+    cloudAccountId: "cloud-system",
+    nodeCRLs: [],
+  }),
 }));
 
 const CURRENT_TARGET: MigrationTarget = {
@@ -139,6 +142,23 @@ describe("useForkSpawn", () => {
     expect(result.current.state.errorMsg).toContain("delivery failed");
   });
 
+  it("keeps a fork pending when node certificate revocation blocks key delivery", async () => {
+    vi.mocked(runFork).mockRejectedValue(new ForkError(
+      "Node verification failed: node certificate is revoked",
+      "delivery",
+      "123e4567-e89b-12d3-a456-426614174001",
+    ));
+    const { result } = renderHook(() => useForkSpawn());
+
+    await act(async () => { await result.current.open("source-1"); });
+    await act(async () => { await result.current.confirm(); });
+
+    expect(result.current.state.phase).toBe("delivery-pending");
+    expect(result.current.state.forkSpawnId).toBe("123e4567-e89b-12d3-a456-426614174001");
+    expect(result.current.state.errorMsg).toContain("certificate is revoked");
+    expect(loadDeviceKeys).not.toHaveBeenCalled();
+  });
+
   it("missing device keys during delivery enters needs-enroll", async () => {
     vi.mocked(runFork).mockRejectedValue(new ForkError(
       "Device enrollment required to deliver journal keys",
@@ -175,5 +195,20 @@ describe("useForkSpawn", () => {
     expect(result.current.state.phase).toBe("done");
     expect(result.current.state.result?.forkSpawnId).toBe("323e4567-e89b-12d3-a456-426614174000");
     expect(result.current.state.result?.journalKeysDelivered).toBe(1);
+  });
+
+  it("keeps retry pending when the current node certificate is revoked", async () => {
+    vi.mocked(runForkDelivery).mockRejectedValue(new ForkError(
+      "Node verification failed: node certificate is revoked",
+      "delivery",
+      "423e4567-e89b-12d3-a456-426614174000",
+    ));
+    const { result } = renderHook(() => useForkSpawn());
+    act(() => { result.current.openDeliveryPending("423e4567-e89b-12d3-a456-426614174000"); });
+
+    await act(async () => { await result.current.retryDelivery(); });
+
+    expect(result.current.state.phase).toBe("delivery-pending");
+    expect(result.current.state.errorMsg).toContain("certificate is revoked");
   });
 });

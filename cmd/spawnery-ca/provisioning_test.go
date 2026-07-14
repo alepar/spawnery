@@ -259,8 +259,37 @@ func TestProductionCaddyProxiesPublicEnrollmentTokenIssuanceOnly(t *testing.T) {
 	if !paths["/enrollment-tokens"] {
 		t.Errorf("Caddy AS matcher does not proxy public /enrollment-tokens: %s", asMatcher)
 	}
-	if !strings.Contains(provision, "reverse_proxy @as 127.0.0.1:8090") {
+	asHandleStart := strings.Index(provision, "handle @as {")
+	asHandleEnd := -1
+	if asHandleStart >= 0 {
+		asHandleEnd = strings.Index(provision[asHandleStart:], "}")
+	}
+	if asHandleStart < 0 || asHandleEnd < 0 ||
+		!strings.Contains(provision[asHandleStart:asHandleStart+asHandleEnd], "reverse_proxy 127.0.0.1:8090") {
 		t.Error("Caddy AS matcher is not proxied to the public authsvc listener")
+	}
+}
+
+func TestProductionCaddyUsesProtocolSpecificControlPlaneTransports(t *testing.T) {
+	for _, script := range []string{
+		"../../scripts/e2e-vm/provision/provision.sh",
+		"../../scripts/e2e-vm/roll.sh",
+	} {
+		content := strings.ReplaceAll(readRepoFile(t, script), "'\\''", " ")
+		caddy := strings.Join(strings.Fields(content), " ")
+		if strings.Contains(caddy, "@cp path /cp.v1.* /ws*") {
+			t.Errorf("%s sends WebSocket upgrades through the h2c control-plane route", script)
+		}
+		for _, required := range []string{
+			"@cp path /cp.v1.*",
+			"@ws path /ws*",
+			"handle @cp { reverse_proxy h2c://127.0.0.1:8080 }",
+			"handle @ws { reverse_proxy 127.0.0.1:8080 }",
+		} {
+			if !strings.Contains(caddy, required) {
+				t.Errorf("%s Caddy config missing %q", script, required)
+			}
+		}
 	}
 }
 

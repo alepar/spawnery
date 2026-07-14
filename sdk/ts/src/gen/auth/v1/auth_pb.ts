@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file auth/v1/auth.proto.
  */
 export const file_auth_v1_auth: GenFile = /*@__PURE__*/
-  fileDesc("ChJhdXRoL3YxL2F1dGgucHJvdG8SB2F1dGgudjEiXQoNR2l0SHViTGlua1JlZhIRCglzZWNyZXRfaWQYASABKAkSDwoHdmVyc2lvbhgCIAEoBBITCgtkZWxpdmVyeV9pZBgDIAEoCUoECAQQBVINcmVmcmVzaF90b2tlbiKZAQocTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEhAKCHNwYXduX2lkGAIgASgJEhIKCmdlbmVyYXRpb24YAyABKAQSKAoIbGlua19yZWYYBCABKAsyFi5hdXRoLnYxLkdpdEh1YkxpbmtSZWYSFQoNcmVwb3NpdG9yeV9pZBgFIAEoCSL7AQodTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRIUCgxhY2Nlc3NfdG9rZW4YAiABKAkSHgoWYWNjZXNzX2V4cGlyZXNfYXRfdW5peBgDIAEoAxISCgp0b2tlbl90eXBlGAYgASgJEhUKDXJlcG9zaXRvcnlfaWQYByABKAkSEQoJcmVmcmVzaGVkGAggASgIEg0KBWxvZ2luGAkgASgJEg8KB3VzZXJfaWQYCiABKANKBAgEEAVKBAgFEAZSDXJlZnJlc2hfdG9rZW5SF3JlZnJlc2hfZXhwaXJlc19hdF91bml4Ir4BChBTZXNzaW9uVG9rZW5Cb2R5EhIKCmFjY291bnRfaWQYASABKAkSDgoGaGFuZGxlGAIgASgJEhAKCHRva2VuX2lkGAMgASgJEhAKCGF1ZGllbmNlGAQgASgJEhEKCWlzc3VlZF9hdBgFIAEoAxISCgpleHBpcmVzX2F0GAYgASgDEhgKEHNlc3Npb25fa2V5X2hhc2gYByABKAwSDgoGa2V5X2lkGAggASgJEhEKCWZhbWlseV9pZBgJIAEoCSK+AQoPUmV2b2NhdGlvbkVudHJ5EgsKA3NlcRgBIAEoAxISCgphY2NvdW50X2lkGAIgASgJEhEKCWZhbWlseV9pZBgDIAEoCRISCgpyZXZva2VkX2F0GAUgASgDEi0KDnJldm9rZWRfdG9rZW5zGAYgAygLMhUuYXV0aC52MS5SZXZva2VkVG9rZW4SIwobcmV2b2tlX3Rva2Vuc19pc3N1ZWRfYmVmb3JlGAcgASgDSgQIBBAFUgl0b2tlbl9pZHMiNgoMUmV2b2tlZFRva2VuEhAKCHRva2VuX2lkGAEgASgJEhQKDHJldGFpbl91bnRpbBgCIAEoAyJ1ChJTaWduZWRBdXRoQXJ0aWZhY3QSFQoNYXJ0aWZhY3RfdHlwZRgBIAEoCRIPCgdwYXlsb2FkGAIgASgMEhEKCXNpZ25hdHVyZRgDIAEoDBIUCgxzaWduZXJfY2hhaW4YBCADKAwSDgoGa2V5X2lkGAUgASgMIrABChlTaWduZXJSZXZvY2F0aW9uU3RhdGVtZW50EhMKC2Vudmlyb25tZW50GAEgASgJEhIKCmdlbmVyYXRpb24YAiABKAQSEQoJaXNzdWVkX2F0GAMgASgDEhcKD3Jldm9rZWRfc2VyaWFscxgEIAMoDBIbChNyZXZva2VkX3Nwa2lfc2hhMjU2GAUgAygMEiEKGW1pbmltdW1fc2lnbmVyX25vdF9iZWZvcmUYBiABKAMifQoITW91bnRSZWYSDAoEbmFtZRgBIAEoCRITCgtiYWNrZW5kX3VyaRgCIAEoCRIcChRjcmVkZW50aWFsX3NlY3JldF9pZBgDIAEoCRIZChFjcmVhdGVfaWZfbWlzc2luZxgEIAEoCBIVCg1yZXBvc2l0b3J5X2lkGAUgASgJIqECCgpJbnRlbnRCb2R5EgsKA2p0aRgBIAEoCRIRCglpc3N1ZWRfYXQYAiABKAMSEAoIc3Bhd25faWQYAyABKAkSEgoKZ2VuZXJhdGlvbhgEIAEoBBIWCg50YXJnZXRfbm9kZV9pZBgFIAEoCRIKCgJvcBgGIAEoCRIPCgdhcHBfcmVmGAcgASgJEg0KBWltYWdlGAggASgJEg0KBW1vZGVsGAkgASgJEhAKCGRhdGFfcmVmGAogASgJEhIKCnNlc3Npb25faWQYCyABKAkSIQoGbW91bnRzGAwgAygLMhEuYXV0aC52MS5Nb3VudFJlZhIbChNhdHRhY2hlZF9zZWNyZXRfaWRzGA0gAygJEhQKDG5ld190b2tlbl9pZBgOIAEoCSJLCgxTaWduZWRJbnRlbnQSDgoGZG9tYWluGAEgASgJEgwKBGJvZHkYAiABKAwSCwoDc2lnGAMgASgMEhAKCHNwa2lfZGVyGAQgASgMIksKDEF1dGhFbnZlbG9wZRIUCgxhY2Nlc3NfdG9rZW4YASABKAkSJQoGaW50ZW50GAIgASgLMhUuYXV0aC52MS5TaWduZWRJbnRlbnQydQoLQXV0aFNlcnZpY2USZgoVTWludEdpdEh1YkFjY2Vzc1Rva2VuEiUuYXV0aC52MS5NaW50R2l0SHViQWNjZXNzVG9rZW5SZXF1ZXN0GiYuYXV0aC52MS5NaW50R2l0SHViQWNjZXNzVG9rZW5SZXNwb25zZUIdWhtzcGF3bmVyeS9nZW4vYXV0aC92MTthdXRodjFiBnByb3RvMw");
+  fileDesc("ChJhdXRoL3YxL2F1dGgucHJvdG8SB2F1dGgudjEiXQoNR2l0SHViTGlua1JlZhIRCglzZWNyZXRfaWQYASABKAkSDwoHdmVyc2lvbhgCIAEoBBITCgtkZWxpdmVyeV9pZBgDIAEoCUoECAQQBVINcmVmcmVzaF90b2tlbiKZAQocTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEhAKCHNwYXduX2lkGAIgASgJEhIKCmdlbmVyYXRpb24YAyABKAQSKAoIbGlua19yZWYYBCABKAsyFi5hdXRoLnYxLkdpdEh1YkxpbmtSZWYSFQoNcmVwb3NpdG9yeV9pZBgFIAEoCSL7AQodTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRIUCgxhY2Nlc3NfdG9rZW4YAiABKAkSHgoWYWNjZXNzX2V4cGlyZXNfYXRfdW5peBgDIAEoAxISCgp0b2tlbl90eXBlGAYgASgJEhUKDXJlcG9zaXRvcnlfaWQYByABKAkSEQoJcmVmcmVzaGVkGAggASgIEg0KBWxvZ2luGAkgASgJEg8KB3VzZXJfaWQYCiABKANKBAgEEAVKBAgFEAZSDXJlZnJlc2hfdG9rZW5SF3JlZnJlc2hfZXhwaXJlc19hdF91bml4Ir4BChBTZXNzaW9uVG9rZW5Cb2R5EhIKCmFjY291bnRfaWQYASABKAkSDgoGaGFuZGxlGAIgASgJEhAKCHRva2VuX2lkGAMgASgJEhAKCGF1ZGllbmNlGAQgASgJEhEKCWlzc3VlZF9hdBgFIAEoAxISCgpleHBpcmVzX2F0GAYgASgDEhgKEHNlc3Npb25fa2V5X2hhc2gYByABKAwSDgoGa2V5X2lkGAggASgJEhEKCWZhbWlseV9pZBgJIAEoCSK+AQoPUmV2b2NhdGlvbkVudHJ5EgsKA3NlcRgBIAEoAxISCgphY2NvdW50X2lkGAIgASgJEhEKCWZhbWlseV9pZBgDIAEoCRISCgpyZXZva2VkX2F0GAUgASgDEi0KDnJldm9rZWRfdG9rZW5zGAYgAygLMhUuYXV0aC52MS5SZXZva2VkVG9rZW4SIwobcmV2b2tlX3Rva2Vuc19pc3N1ZWRfYmVmb3JlGAcgASgDSgQIBBAFUgl0b2tlbl9pZHMiNgoMUmV2b2tlZFRva2VuEhAKCHRva2VuX2lkGAEgASgJEhQKDHJldGFpbl91bnRpbBgCIAEoAyJ1ChJTaWduZWRBdXRoQXJ0aWZhY3QSFQoNYXJ0aWZhY3RfdHlwZRgBIAEoCRIPCgdwYXlsb2FkGAIgASgMEhEKCXNpZ25hdHVyZRgDIAEoDBIUCgxzaWduZXJfY2hhaW4YBCADKAwSDgoGa2V5X2lkGAUgASgMIrABChlTaWduZXJSZXZvY2F0aW9uU3RhdGVtZW50EhMKC2Vudmlyb25tZW50GAEgASgJEhIKCmdlbmVyYXRpb24YAiABKAQSEQoJaXNzdWVkX2F0GAMgASgDEhcKD3Jldm9rZWRfc2VyaWFscxgEIAMoDBIbChNyZXZva2VkX3Nwa2lfc2hhMjU2GAUgAygMEiEKGW1pbmltdW1fc2lnbmVyX25vdF9iZWZvcmUYBiABKAMifQoITW91bnRSZWYSDAoEbmFtZRgBIAEoCRITCgtiYWNrZW5kX3VyaRgCIAEoCRIcChRjcmVkZW50aWFsX3NlY3JldF9pZBgDIAEoCRIZChFjcmVhdGVfaWZfbWlzc2luZxgEIAEoCBIVCg1yZXBvc2l0b3J5X2lkGAUgASgJIs0CCgpJbnRlbnRCb2R5EgsKA2p0aRgBIAEoCRIRCglpc3N1ZWRfYXQYAiABKAMSEAoIc3Bhd25faWQYAyABKAkSEgoKZ2VuZXJhdGlvbhgEIAEoBBIWCg50YXJnZXRfbm9kZV9pZBgFIAEoCRIKCgJvcBgGIAEoCRIPCgdhcHBfcmVmGAcgASgJEg0KBWltYWdlGAggASgJEg0KBW1vZGVsGAkgASgJEhAKCGRhdGFfcmVmGAogASgJEhIKCnNlc3Npb25faWQYCyABKAkSIQoGbW91bnRzGAwgAygLMhEuYXV0aC52MS5Nb3VudFJlZhIbChNhdHRhY2hlZF9zZWNyZXRfaWRzGA0gAygJEhQKDG5ld190b2tlbl9pZBgOIAEoCRIqCgxleGVjX3JlcXVlc3QYDyABKAsyFC5hdXRoLnYxLkV4ZWNSZXF1ZXN0IhsKC0V4ZWNSZXF1ZXN0EgwKBGFyZ3YYASADKAkiSwoMU2lnbmVkSW50ZW50Eg4KBmRvbWFpbhgBIAEoCRIMCgRib2R5GAIgASgMEgsKA3NpZxgDIAEoDBIQCghzcGtpX2RlchgEIAEoDCJLCgxBdXRoRW52ZWxvcGUSFAoMYWNjZXNzX3Rva2VuGAEgASgJEiUKBmludGVudBgCIAEoCzIVLmF1dGgudjEuU2lnbmVkSW50ZW50MnUKC0F1dGhTZXJ2aWNlEmYKFU1pbnRHaXRIdWJBY2Nlc3NUb2tlbhIlLmF1dGgudjEuTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVxdWVzdBomLmF1dGgudjEuTWludEdpdEh1YkFjY2Vzc1Rva2VuUmVzcG9uc2VCHVobc3Bhd25lcnkvZ2VuL2F1dGgvdjE7YXV0aHYxYgZwcm90bzM");
 
 /**
  * @generated from message auth.v1.GitHubLinkRef
@@ -430,7 +430,7 @@ export const MountRefSchema: GenMessage<MountRef> = /*@__PURE__*/
  * correspondence check compares exactly the fields it is about to execute.
  *
  * Domain tags: spawnery/intent/<op>/v1 for op ∈ {create-spawn, resume-spawn,
- * recreate-spawn, migrate-spawn, session-open, session-reauth}.
+ * recreate-spawn, migrate-spawn, session-open, session-reauth, exec-open}.
  *
  * @generated from message auth.v1.IntentBody
  */
@@ -530,6 +530,13 @@ export type IntentBody = Message<"auth.v1.IntentBody"> & {
    * @generated from field: string new_token_id = 14;
    */
   newTokenId: string;
+
+  /**
+   * exec-open: exact ordered command relayed separately to the node
+   *
+   * @generated from field: auth.v1.ExecRequest exec_request = 15;
+   */
+  execRequest?: ExecRequest | undefined;
 };
 
 /**
@@ -538,6 +545,26 @@ export type IntentBody = Message<"auth.v1.IntentBody"> & {
  */
 export const IntentBodySchema: GenMessage<IntentBody> = /*@__PURE__*/
   messageDesc(file_auth_v1_auth, 9);
+
+/**
+ * ExecRequest is the exact ordered command selected by an exec-open intent. The relay carries a
+ * separate copy unchanged; the node requires exact protobuf equality before execution.
+ *
+ * @generated from message auth.v1.ExecRequest
+ */
+export type ExecRequest = Message<"auth.v1.ExecRequest"> & {
+  /**
+   * @generated from field: repeated string argv = 1;
+   */
+  argv: string[];
+};
+
+/**
+ * Describes the message auth.v1.ExecRequest.
+ * Use `create(ExecRequestSchema)` to create a new message.
+ */
+export const ExecRequestSchema: GenMessage<ExecRequest> = /*@__PURE__*/
+  messageDesc(file_auth_v1_auth, 10);
 
 /**
  * SignedIntent carries a client-signed per-operation intent [AC1][AM11].
@@ -582,7 +609,7 @@ export type SignedIntent = Message<"auth.v1.SignedIntent"> & {
  * Use `create(SignedIntentSchema)` to create a new message.
  */
 export const SignedIntentSchema: GenMessage<SignedIntent> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 10);
+  messageDesc(file_auth_v1_auth, 11);
 
 /**
  * AuthEnvelope bundles the node-audience access token and the client's SignedIntent for
@@ -609,7 +636,7 @@ export type AuthEnvelope = Message<"auth.v1.AuthEnvelope"> & {
  * Use `create(AuthEnvelopeSchema)` to create a new message.
  */
 export const AuthEnvelopeSchema: GenMessage<AuthEnvelope> = /*@__PURE__*/
-  messageDesc(file_auth_v1_auth, 11);
+  messageDesc(file_auth_v1_auth, 12);
 
 /**
  * @generated from service auth.v1.AuthService

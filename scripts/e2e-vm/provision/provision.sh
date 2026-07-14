@@ -359,12 +359,23 @@ sudo sed -i 's#\${sops:store.dsn}#postgres://spawnery:spawnery@127.0.0.1:5432/sp
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 :443 {
   tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key
-  @cp   path /cp.v1.* /ws*
+  @cp   path /cp.v1.*
+  @ws   path /ws*
   @as   path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens
-  reverse_proxy @cp 127.0.0.1:8080
-  reverse_proxy @as 127.0.0.1:8090
-  root * /var/www/spawnery
-  file_server
+  handle @cp {
+    reverse_proxy h2c://127.0.0.1:8080
+  }
+  handle @ws {
+    reverse_proxy 127.0.0.1:8080
+  }
+  handle @as {
+    reverse_proxy 127.0.0.1:8090
+  }
+  handle {
+    root * /var/www/spawnery
+    try_files {path} /index.html
+    file_server
+  }
 }
 EOF
 sudo systemctl enable caddy

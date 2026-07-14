@@ -1,0 +1,4 @@
+# Spawnlet production overrides, deep-merged on top of spawnlet.yaml when SPAWNERY_ENV=prod.
+
+node:
+  terminal_addr: ""

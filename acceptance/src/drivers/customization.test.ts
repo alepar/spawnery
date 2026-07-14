@@ -196,21 +196,21 @@ describe("CatalogCli", () => {
 });
 
 describe("execInSpawn", () => {
-  it("builds exec -addr <n> -spawn <id> -token <t> -- <cmd> and returns stdout/stderr/code", async () => {
+  it("uses the shared exec argument builder and returns stdout/stderr/code", async () => {
     let seenArgs: string[] = [];
     await mockExecFile((args) => {
       seenArgs = args;
       return { stdout: "hello\n", stderr: "" };
     });
 
-    const result = await execInSpawn(cfg, identity, "http://node.example:9092", "spawn-1", ["sh", "-lc", "echo hi"]);
+		const result = await execInSpawn(cfg, identity, "spawn-1", ["sh", "-lc", "echo hi"]);
 
     expect(seenArgs).toEqual([
       "exec",
-      "-addr",
-      "http://node.example:9092",
       "-spawn",
       "spawn-1",
+			"-cp",
+      "https://cp.example",
       "-token",
       "tok-123",
       "--",
@@ -228,7 +228,7 @@ describe("execInSpawn", () => {
       err: Object.assign(new Error("Command failed"), { code: 7 }),
     }));
 
-    const result = await execInSpawn(cfg, identity, "http://node.example:9092", "spawn-1", ["false"]);
+		const result = await execInSpawn(cfg, identity, "spawn-1", ["false"]);
     expect(result).toEqual({ stdout: "partial\n", stderr: "failed\n", code: 7 });
   });
 
@@ -239,7 +239,7 @@ describe("execInSpawn", () => {
       err: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
     }));
 
-    const result = await execInSpawn(cfg, identity, "http://node.example:9092", "spawn-1", ["true"]);
+		const result = await execInSpawn(cfg, identity, "spawn-1", ["true"]);
     expect(result.code).toBe(1);
   });
 });

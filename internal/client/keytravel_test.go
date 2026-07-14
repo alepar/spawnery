@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -363,6 +365,7 @@ type fakeForkClient struct {
 
 	gotFork              *cpv1.ForkSpawnRequest
 	gotIntentPollSpawnID string
+	gotIntentSubmit      *cpv1.SubmitIntentRequest
 	gotJournalSpawnID    string
 	gotNodeKeySpawnID    string
 	gotDelivery          *cpv1.DeliverSecretsRequest
@@ -384,7 +387,7 @@ func TestForkWaitsForLateAuthorizationFailureAfterRPCSuccess(t *testing.T) {
 	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
 		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
 		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
-		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "source-1", Generation: 7, TargetNodeId: "node-a"},
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-1", Generation: 7, TargetNodeId: "node-a"},
 	}}
 	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
 		time.Sleep(25 * time.Millisecond)
@@ -397,6 +400,112 @@ func TestForkWaitsForLateAuthorizationFailureAfterRPCSuccess(t *testing.T) {
 	}
 	if base.gotJournalSpawnID != "" {
 		t.Fatal("fork continued to journal delivery before authorization completed")
+	}
+}
+
+func TestForkAuthorizationSignsReturnedChildAndSubmitsViaSource(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeForkClient{forkID: "fork-1", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+
+	result, err := forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err != nil {
+		t.Fatalf("forkSpawnAuthorized: %v", err)
+	}
+	if result.ForkSpawnID != "fork-1" {
+		t.Fatalf("fork id = %q, want fork-1", result.ForkSpawnID)
+	}
+	if base.gotIntentPollSpawnID != "source-1" {
+		t.Fatalf("GetPendingIntent spawn_id = %q, want source-1", base.gotIntentPollSpawnID)
+	}
+	if base.gotIntentSubmit == nil || base.gotIntentSubmit.GetSpawnId() != "source-1" {
+		t.Fatalf("SubmitIntent = %+v, want source-keyed submission", base.gotIntentSubmit)
+	}
+	body, err := intent.ParseBody(base.gotIntentSubmit.GetIntent().GetBody())
+	if err != nil {
+		t.Fatalf("parse submitted intent: %v", err)
+	}
+	if body.GetSpawnId() != "fork-1" || body.GetOp() != string(intent.OpForkSpawn) {
+		t.Fatalf("signed spawn/op = %q/%q, want fork-1/%s", body.GetSpawnId(), body.GetOp(), intent.OpForkSpawn)
+	}
+}
+
+func TestForkAuthorizationRejectsSourceAsPendingChild(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeForkClient{forkID: "source-1", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "source-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+
+	_, err = forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pending fork spawn_id must differ from source") {
+		t.Fatalf("error = %v, want source-as-child rejection", err)
+	}
+	if base.gotIntentSubmit != nil {
+		t.Fatalf("SubmitIntent called for source-as-child pending tuple: %+v", base.gotIntentSubmit)
+	}
+}
+
+func TestForkAuthorizationRejectsResponseChildSubstitution(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeForkClient{forkID: "fork-substituted", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-authorized", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+
+	_, err = forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), `response fork_spawn_id "fork-substituted" does not match authorized "fork-authorized"`) {
+		t.Fatalf("error = %v, want response child substitution rejection", err)
+	}
+	if base.gotIntentSubmit == nil || base.gotIntentSubmit.GetSpawnId() != "source-1" {
+		t.Fatalf("SubmitIntent = %+v, want source-keyed authorized submission", base.gotIntentSubmit)
+	}
+	if base.gotJournalSpawnID != "" {
+		t.Fatalf("journal delivery started for substituted child %q", base.gotJournalSpawnID)
 	}
 }
 
@@ -444,7 +553,7 @@ func TestForkAuthorizationErrorCancelsAndDrainsDelayedRPCPeer(t *testing.T) {
 	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
 		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
 		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
-		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "source-1", Generation: 7, TargetNodeId: "node-a"},
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-1", Generation: 7, TargetNodeId: "node-a"},
 	}}
 	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
 		return NodeCredentials{AccessToken: "node-token", Signer: signOnlyFailer{}}, nil
@@ -467,7 +576,8 @@ func (f *fakeForkClient) GetPendingIntent(_ context.Context, req *connect.Reques
 	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Ready: false}), nil
 }
 
-func (f *fakeForkClient) SubmitIntent(_ context.Context, _ *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+func (f *fakeForkClient) SubmitIntent(_ context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+	f.gotIntentSubmit = req.Msg
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
 }
 
