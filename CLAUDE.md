@@ -205,6 +205,38 @@ distrobox enter --root dev-spawnery -- bash -lc 'cd <repo-or-worktree> && <cmd>'
   wires runsc — the only runsc path is the `test-cri-delta` (`cri_delta_e2e`) recipe.
 - Prefer installing a proper tool in the distrobox over a host-side workaround (`distrobox enter --root
   dev-spawnery -- <install>`); don't shell out to a one-off binary in `/tmp`.
+- **Host packages: `rpm-ostree install` is fine — but ONLY when the booted deployment is not unlocked.**
+  Check first, every time:
+  ```bash
+  rpm-ostree status   # the booted (●) deployment must NOT say "Unlocked:" and must show the
+                      # ostree-image-signed:docker://ghcr.io/ublue-os/... image ref
+  ```
+  **Why it matters:** the box has (as of 2026-07-14) been booting into a **transient-unlock** deployment
+  whose origin is a bare commit refspec — it has *lost* both the image reference and the `requested=`
+  layer list. `rpm-ostree install` computes the new package set from `requested=`, not from the commit,
+  so on that deployment it does not ADD a package — it **REPLACES** the whole layer set. `sudo rpm-ostree
+  install make` staged a deployment containing *only* `make` ("Diff: 50 removed, 1 added"), which on the
+  next reboot would have wiped all nine layered packages (`btop duf ghostty htop just mosh neovim nvtop
+  tmux`). Caught pre-reboot and reverted with `sudo rpm-ostree cleanup -p`. (This has now happened three
+  times — see **`sp-sc50`**, which also carries the recovery: `rpm-ostree rollback` → reboot →
+  `cleanup -r` puts the machine back on the managed deployment, after which installs behave normally.)
+  **If you do stage an install, verify before rebooting** that the pending deployment lists *every*
+  package, not just the new one.
+
+## Configuration posture — the config system, not `os.Getenv`
+
+**All configurables go through the layered config system** ([config-framework-design](docs/superpowers/specs/2026-06-20-config-framework-design.md)) — schema-defined, file-first, with env as an override *layer*. Do **not** add ad-hoc `os.Getenv` parsing.
+
+- Declare every knob in the binary's config struct (`cmd/<binary>/config.go`, `koanf:"..."` tag) **and**
+  in the shipped YAML (`config/cp.yaml`, `config/spawnlet.yaml`, …) — **with an inline comment saying
+  what it is and what the default means.** A knob that exists only in Go is undiscoverable.
+- Env vars (`CP_*`, `SKILLS_*`, …) are the framework's **override layer**, not the source of truth.
+  Refer to a setting by its **config key** (`admin_owners`), not its env name (`CP_ADMIN_OWNERS`) — the
+  key is the contract; the env var is one way to set it.
+- Secrets follow the same path (`config/secrets.prod.sops.yaml`), never a bare env var in code.
+- Deliberate exceptions exist and must be **commented where they live** — e.g. the skillfetch host
+  allowlist is intentionally a code constant, not config, because config-adding a host is a security
+  downgrade with no legitimate use (see `internal/cp/skillfetch/fetch.go`).
 
 ## Architecture Overview
 
