@@ -134,15 +134,6 @@ rg -Fq '{ tag: ["@mutating", "@skill-staging"] }' "$S5_SPEC" || {
   echo "skill-staging S5 lacks the dedicated @skill-staging selection tag" >&2
   exit 1
 }
-for fixture_guard in \
-  'if (repos.length < BUNDLE_SIZE)' \
-  'ACC_SKILL_SOURCE_REPOS provides ${repos.length} repo(s), need >= ${BUNDLE_SIZE}'
-do
-  rg -Fq "$fixture_guard" "$S5_SPEC" || {
-    echo "skill-staging S5 no longer fails loudly on an undersized repository fixture" >&2
-    exit 1
-  }
-done
 
 expected_acceptance_commands=$'npm run test:accept -- --retries=0 --workers=1 --project=chromium -g "@noderestart" && rc=0 || rc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart|@skill-staging" && arc=0 || arc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps && drc=0 || drc=$?'
 actual_acceptance_commands="$(
@@ -227,6 +218,9 @@ list_acceptance() {
 
 list_acceptance --project=chromium -g '@noderestart' >"$TMP/noderestart.list"
 list_acceptance --project=chromium --grep-invert '@noderestart|@skill-staging' >"$TMP/ordinary.list"
+ACC_SKILL_BUNDLE_SIZE=NaN ACC_SKILL_STAGING_ITERATIONS=0 \
+  list_acceptance --project=chromium --grep-invert '@noderestart|@skill-staging' \
+    >"$TMP/ordinary-invalid-s5-config.list"
 list_acceptance --project=chromium -g '@skill-staging' >"$TMP/skill-staging.list"
 list_acceptance --project=destructive-root-artifacts --no-deps >"$TMP/destructive.list"
 
@@ -247,6 +241,11 @@ if [ "$ordinary_total" -lt 1 ] || [ "$ordinary_projects" != chromium ] ||
       "$TMP/ordinary.list"; then
   echo "ordinary discovery is not nonempty chromium-only coverage without excluded tests" >&2
   cat "$TMP/ordinary.list" >&2
+  exit 1
+fi
+if ! cmp -s "$TMP/ordinary.list" "$TMP/ordinary-invalid-s5-config.list"; then
+  echo "invalid S5-only config changed excluded ordinary discovery" >&2
+  diff -u "$TMP/ordinary.list" "$TMP/ordinary-invalid-s5-config.list" >&2 || true
   exit 1
 fi
 

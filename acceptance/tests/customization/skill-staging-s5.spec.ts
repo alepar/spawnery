@@ -48,8 +48,6 @@ const PRESIGN_TTL_MS = 30 * 60 * 1000;
 // spare (i.e. the measurement itself must be under 1/3 of the TTL).
 const TTL_HEADROOM_DIVISOR = 3;
 
-const { bundleSize: BUNDLE_SIZE, iterations: ITERATIONS } = loadSkillStagingConfig();
-
 interface SourceRepo {
   url: string;
   subdir?: string;
@@ -68,16 +66,17 @@ function parseSourceRepos(raw: string | undefined): SourceRepo[] {
 }
 
 test(
-  `staging S5: StartSpawn -> ACTIVE on a ${BUNDLE_SIZE}-member skill bundle stays well under the presign TTL (p_max over ${ITERATIONS} iterations)`,
+  "staging S5: StartSpawn -> ACTIVE on the configured skill bundle stays well under the presign TTL",
   { tag: ["@mutating", "@skill-staging"] },
   async ({ target, identity, api, cli, ctx, ns }) => {
+    const { bundleSize, iterations } = loadSkillStagingConfig();
     if (!target.seedSkillAppId) {
       throw new Error("ACC_SEED_SKILL_APP_ID is unset — see acceptance/.env.example (same precondition as injection.spec.ts).");
     }
     const repos = parseSourceRepos(process.env.ACC_SKILL_SOURCE_REPOS);
-    if (repos.length < BUNDLE_SIZE) {
+    if (repos.length < bundleSize) {
       throw new Error(
-        `ACC_SKILL_SOURCE_REPOS provides ${repos.length} repo(s), need >= ${BUNDLE_SIZE} (ACC_SKILL_BUNDLE_SIZE). ` +
+        `ACC_SKILL_SOURCE_REPOS provides ${repos.length} repo(s), need >= ${bundleSize} (ACC_SKILL_BUNDLE_SIZE). ` +
           `Set a comma-separated "owner/repo[:subdir]" list of small public GitHub repos each with a top-level SKILL.md.`,
       );
     }
@@ -92,7 +91,7 @@ test(
       // --- ingest K distinct skills, then attach every one to a single profile ---
       profileId = await profileCli.create(ns("prof-s5"));
       const catalogIds: string[] = [];
-      for (let i = 0; i < BUNDLE_SIZE; i++) {
+      for (let i = 0; i < bundleSize; i++) {
         const repo = repos[i];
         const { catalogId } = await oracle.ingestSkillFromURL({
           url: repo.url,
@@ -101,17 +100,17 @@ test(
         });
         catalogIds.push(catalogId);
       }
-      assertDistinctCatalogIds(catalogIds, BUNDLE_SIZE);
+      assertDistinctCatalogIds(catalogIds, bundleSize);
       for (const [i, catalogId] of catalogIds.entries()) {
         await profileCli.entryAddCatalog(profileId, { kind: "skill", name: ns(`s5-entry-${i}`), catalogId });
       }
 
       const oracleProfile = await api.getProfile(profileId);
-      expect(oracleProfile.entries).toHaveLength(BUNDLE_SIZE);
+      expect(oracleProfile.entries).toHaveLength(bundleSize);
 
       // --- R iterations of StartSpawn -> ACTIVE, take the max ---
       const elapsedMs: number[] = [];
-      for (let i = 0; i < ITERATIONS; i++) {
+      for (let i = 0; i < iterations; i++) {
         const start = Date.now();
         const spawnId = await cli.createSpawn(ctx, { appId: target.seedSkillAppId, profileId });
         spawnIds.push(spawnId);
@@ -126,14 +125,14 @@ test(
       const headroomMs = PRESIGN_TTL_MS / TTL_HEADROOM_DIVISOR;
       // This IS the §4.8 measurement; it must be visible in CI output.
       console.log(
-        `S5: StartSpawn -> ACTIVE elapsed over ${ITERATIONS} iteration(s) on a ${BUNDLE_SIZE}-member bundle: ` +
+        `S5: StartSpawn -> ACTIVE elapsed over ${iterations} iteration(s) on a ${bundleSize}-member bundle: ` +
           `[${elapsedMs.join(", ")}] ms, max=${maxElapsedMs}ms (presign TTL=${PRESIGN_TTL_MS}ms, headroom budget=${headroomMs}ms)`,
       );
 
       expect(
         maxElapsedMs,
         `max StartSpawn->ACTIVE (${maxElapsedMs}ms) must stay under presign_ttl/${TTL_HEADROOM_DIVISOR} (${headroomMs}ms) ` +
-          `for a ${BUNDLE_SIZE}-member bundle`,
+          `for a ${bundleSize}-member bundle`,
       ).toBeLessThan(headroomMs);
     } finally {
       for (const id of spawnIds) await api.deleteSpawn(id).catch(() => {});
