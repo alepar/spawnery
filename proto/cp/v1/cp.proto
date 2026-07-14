@@ -278,6 +278,13 @@ message SpawnSummary {
   // (sp-mwco.2.7). Ephemeral, in-memory (mirrors provision_step*) — empty on CP restart; the
   // fatal all-or-nothing-bundle-failure case survives restart anyway via error_step/error_detail.
   repeated SkillInstall skill_installs = 22;
+  // skill_install_outcome (field 23): the envelope verdict from the node's latest
+  // SkillInstallReport (sp-mwco.2.14) — "skills: ok / warn / failed" at a glance, alongside the
+  // per-entry skill_installs rows. UNSPECIFIED means no report has been recorded yet (same
+  // ephemeral lifetime as skill_installs); it is never the recorded value of an actually-received
+  // report — the CP normalizes a received UNSPECIFIED envelope (which must never happen; see
+  // skill_install.go) to ERROR before storing it.
+  SkillInstallOutcome skill_install_outcome = 23;
 }
 
 // SkillInstallStatus mirrors node.v1.SkillInstallStatus (this proto does not import node.proto;
@@ -288,6 +295,17 @@ enum SkillInstallStatus {
   SKILL_INSTALL_STATUS_SKIPPED     = 2;
   SKILL_INSTALL_STATUS_FAILED      = 3;
   SKILL_INSTALL_STATUS_UNKNOWN     = 4;
+}
+
+// SkillInstallOutcome mirrors node.v1.SkillInstallOutcome (this proto does not import node.proto;
+// the CP server converts at the boundary, and never stores UNSPECIFIED for a report it actually
+// received — sp-mwco.2.14).
+enum SkillInstallOutcome {
+  SKILL_INSTALL_OUTCOME_UNSPECIFIED    = 0;
+  SKILL_INSTALL_OUTCOME_OK             = 1;
+  SKILL_INSTALL_OUTCOME_WARN           = 2;
+  SKILL_INSTALL_OUTCOME_BUNDLE_FAILED  = 3;
+  SKILL_INSTALL_OUTCOME_ERROR          = 4;
 }
 
 // SkillInstall is the per (artifact x agent) install outcome surfaced on SpawnSummary, mirroring

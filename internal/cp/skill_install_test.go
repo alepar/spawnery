@@ -19,7 +19,7 @@ func TestSkillInstalls_SetGetClear(t *testing.T) {
 	if _, ok := si.get("sp1"); ok {
 		t.Fatal("expected no entry before set")
 	}
-	si.set("sp1", 1, []skillInstallEntry{{Kind: "skill", Name: "s1", Status: "applied"}})
+	si.set("sp1", 1, "ok", []skillInstallEntry{{Kind: "skill", Name: "s1", Status: "applied"}})
 	entries, ok := si.get("sp1")
 	if !ok || len(entries) != 1 || entries[0].Name != "s1" {
 		t.Fatalf("get after set: %+v, ok=%v", entries, ok)
@@ -32,24 +32,30 @@ func TestSkillInstalls_SetGetClear(t *testing.T) {
 
 func TestSkillInstalls_StaleGenerationDropped(t *testing.T) {
 	si := newSkillInstalls()
-	si.set("sp1", 5, []skillInstallEntry{{Name: "newer"}})
-	si.set("sp1", 3, []skillInstallEntry{{Name: "older"}}) // stale — must be dropped
+	si.set("sp1", 5, "ok", []skillInstallEntry{{Name: "newer"}})
+	si.set("sp1", 3, "ok", []skillInstallEntry{{Name: "older"}}) // stale — must be dropped
 	entries, ok := si.get("sp1")
 	if !ok || len(entries) != 1 || entries[0].Name != "newer" {
 		t.Fatalf("stale generation was not dropped: %+v", entries)
 	}
-	si.set("sp1", 5, []skillInstallEntry{{Name: "same-gen-overwrites"}}) // equal gen: not stale, overwrites
+	si.set("sp1", 5, "warn", []skillInstallEntry{{Name: "same-gen-overwrites"}}) // equal gen: not stale, overwrites
 	entries, _ = si.get("sp1")
 	if len(entries) != 1 || entries[0].Name != "same-gen-overwrites" {
 		t.Fatalf("equal-generation update should overwrite: %+v", entries)
+	}
+	if outcome, ok := si.getOutcome("sp1"); !ok || outcome != "warn" {
+		t.Fatalf("equal-generation update should overwrite outcome too: %q, ok=%v", outcome, ok)
 	}
 }
 
 func TestSkillInstalls_NilSafe(t *testing.T) {
 	var si *skillInstalls
-	si.set("sp1", 1, []skillInstallEntry{{Name: "x"}}) // must not panic
+	si.set("sp1", 1, "ok", []skillInstallEntry{{Name: "x"}}) // must not panic
 	if _, ok := si.get("sp1"); ok {
 		t.Fatal("nil skillInstalls.get should report not-found")
+	}
+	if _, ok := si.getOutcome("sp1"); ok {
+		t.Fatal("nil skillInstalls.getOutcome should report not-found")
 	}
 	si.clear("sp1") // must not panic
 }
@@ -96,7 +102,7 @@ func TestListSpawns_SkillInstallsVisible(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	makeSpawn(t, s, "sp1", "alice")
 
-	s.skillInstalls.set("sp1", 1, []skillInstallEntry{
+	s.skillInstalls.set("sp1", 1, "warn", []skillInstallEntry{
 		{Agent: "claude", Kind: "skill", Name: "s1", Status: "applied", Bundle: "b1"},
 		{Agent: "claude", Kind: "skill", Name: "s2", Status: "failed", Reason: "boom", Bundle: "b1"},
 	})
@@ -128,6 +134,9 @@ func TestListSpawns_SkillInstallsVisible(t *testing.T) {
 	if byName["s2"].Status != cpv1.SkillInstallStatus_SKILL_INSTALL_STATUS_FAILED || byName["s2"].Reason != "boom" {
 		t.Errorf("s2: %+v", byName["s2"])
 	}
+	if sp1.SkillInstallOutcome != cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN {
+		t.Errorf("SkillInstallOutcome: got %v, want WARN", sp1.SkillInstallOutcome)
+	}
 }
 
 // TestListSpawns_NoSkillInstalls_EmptyField verifies a spawn with no recorded report leaves
@@ -144,6 +153,9 @@ func TestListSpawns_NoSkillInstalls_EmptyField(t *testing.T) {
 	if len(resp.Msg.Spawns) != 1 || len(resp.Msg.Spawns[0].SkillInstalls) != 0 {
 		t.Fatalf("expected empty SkillInstalls, got %+v", resp.Msg.Spawns)
 	}
+	if got := resp.Msg.Spawns[0].SkillInstallOutcome; got != cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED {
+		t.Fatalf("expected UNSPECIFIED SkillInstallOutcome with no report recorded, got %v", got)
+	}
 }
 
 // TestDeleteSpawn_EvictsSkillInstalls verifies no map leak: deleting a spawn drops its
@@ -151,7 +163,7 @@ func TestListSpawns_NoSkillInstalls_EmptyField(t *testing.T) {
 func TestDeleteSpawn_EvictsSkillInstalls(t *testing.T) {
 	s, _, _ := newTestServer(t)
 	makeSpawn(t, s, "sp1", "alice")
-	s.skillInstalls.set("sp1", 1, []skillInstallEntry{{Name: "s1", Status: "applied"}})
+	s.skillInstalls.set("sp1", 1, "ok", []skillInstallEntry{{Name: "s1", Status: "applied"}})
 
 	ctx := auth.WithOwner(context.Background(), "alice")
 	if _, err := s.DeleteSpawn(ctx, connect.NewRequest(&cpv1.DeleteSpawnRequest{SpawnId: "sp1"})); err != nil {
@@ -233,5 +245,86 @@ func TestSkillInstallReportHandler_StaleGenerationIgnored(t *testing.T) {
 	entries, ok := s.skillInstalls.get("sp1")
 	if !ok || len(entries) != 1 || entries[0].Name != "newer" {
 		t.Fatalf("stale-generation report was applied: %+v", entries)
+	}
+}
+
+// TestSkillInstallReportHandler_UnspecifiedOutcomeFlagged is the sp-mwco.2.14 acceptance test:
+// an UNSPECIFIED envelope outcome must never arrive (sp-mwco.2.12/.2.13 floors it to WARN on the
+// node side before send), so if it somehow does, the CP must not accept it as a passing/neutral
+// verdict. It is fed through the real wire handler (not the map type directly) and asserted to be
+// normalized to "error" in the stored state and surfaced as ERROR on ListSpawns — not silently
+// stored/surfaced as UNSPECIFIED (which SpawnSummary otherwise reserves for "no report yet").
+func TestSkillInstallReportHandler_UnspecifiedOutcomeFlagged(t *testing.T) {
+	s, reg, _ := newTestServer(t)
+	makeSpawn(t, s, "sp1", "alice")
+
+	in := make(chan *nodev1.NodeMessage, 8)
+	go s.runNode(context.Background(), &capSender{}, recvFromChan(in))
+	feedRegister(in, "n1", "")
+	waitNodeClass(t, reg, "n1", "cloud")
+
+	in <- &nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SkillInstallReport{SkillInstallReport: &nodev1.SkillInstallReport{
+		SpawnId: "sp1", Generation: 1,
+		Outcome: nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED, // must never arrive; must be flagged
+		Entries: []*nodev1.SkillInstallEntry{{Name: "s1", Status: nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_APPLIED}},
+	}}}
+
+	waitCondition(t, "outcome normalized to error", func() bool {
+		outcome, ok := s.skillInstalls.getOutcome("sp1")
+		return ok && outcome == "error"
+	})
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	resp, err := s.ListSpawns(ctx, connect.NewRequest(&cpv1.ListSpawnsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sp1 *cpv1.SpawnSummary
+	for _, sm := range resp.Msg.Spawns {
+		if sm.SpawnId == "sp1" {
+			sp1 = sm
+		}
+	}
+	if sp1 == nil {
+		t.Fatal("sp1 not in ListSpawns response")
+	}
+	if sp1.SkillInstallOutcome != cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR {
+		t.Fatalf("UNSPECIFIED envelope outcome must be flagged as ERROR, got %v", sp1.SkillInstallOutcome)
+	}
+}
+
+// TestSkillInstallOutcomeProtoRoundTrip exercises the outcome string<->proto conversions directly
+// (mirrors TestSkillInstallStatusProtoRoundTrip), including the UNSPECIFIED-arrival guard.
+func TestSkillInstallOutcomeProtoRoundTrip(t *testing.T) {
+	cases := []struct {
+		str  string
+		wire cpv1.SkillInstallOutcome
+	}{
+		{"ok", cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK},
+		{"warn", cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN},
+		{"bundle_failed", cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED},
+		{"error", cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR},
+		{"", cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED},
+	}
+	for _, c := range cases {
+		if got := skillInstallOutcomeToProto(c.str); got != c.wire {
+			t.Errorf("skillInstallOutcomeToProto(%q) = %v, want %v", c.str, got, c.wire)
+		}
+	}
+
+	nodeCases := []struct {
+		wire nodev1.SkillInstallOutcome
+		str  string
+	}{
+		{nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK, "ok"},
+		{nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN, "warn"},
+		{nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED, "bundle_failed"},
+		{nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR, "error"},
+		{nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED, "error"}, // must never arrive; flagged+normalized
+	}
+	for _, c := range nodeCases {
+		if got := skillInstallOutcomeFromProto("sp-test", c.wire); got != c.str {
+			t.Errorf("skillInstallOutcomeFromProto(%v) = %q, want %q", c.wire, got, c.str)
+		}
 	}
 }

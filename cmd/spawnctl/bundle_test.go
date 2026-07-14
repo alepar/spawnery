@@ -117,9 +117,13 @@ func TestRunBundleShow(t *testing.T) {
 		"SEQ", "VERSION ID", "COMMIT", "CREATED",
 		"ver-1", "ver-2", "111111111111", "222222222222",
 		"Members (latest version v2):",
-		"#", "NAME", "SUBDIR", "SHA256", "DESCRIPTION",
-		"skills/a", "a", "skill a", "333333333333",
-		"skills/b", "b", "skill b", "444444444444",
+		"#", "NAME", "SUBDIR", "CATALOG ID", "SHA256", "DESCRIPTION",
+		"skills/a", "a", "skill a", "cat-1",
+		"skills/b", "b", "skill b", "cat-2",
+		// the member sha must be printed in FULL (not shortHash-truncated like the version commit
+		// column above) so it can be pasted straight into `catalog deny <sha>` (sp-mwco.3.6).
+		"3333333333333333333333333333333333333333333333333333333333cccc",
+		"4444444444444444444444444444444444444444444444444444444444dddd",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("show output missing %q; got:\n%s", want, s)

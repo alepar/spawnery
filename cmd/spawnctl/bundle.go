@@ -74,10 +74,12 @@ func runBundleShow(ctx context.Context, c bundleClient, out io.Writer, bundleID 
 
 	fmt.Fprintf(out, "\nMembers (latest version v%d):\n", b.GetLatestSeq())
 	mw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(mw, "#\tNAME\tSUBDIR\tSHA256\tDESCRIPTION")
+	fmt.Fprintln(mw, "#\tNAME\tSUBDIR\tCATALOG ID\tSHA256\tDESCRIPTION")
 	for _, m := range resp.Msg.GetMembers() {
-		fmt.Fprintf(mw, "%d\t%s\t%s\t%s\t%s\n",
-			m.GetPosition(), m.GetName(), m.GetSourceSubdir(), shortHash(m.GetSha256()), m.GetDescription())
+		// catalog_id and the full (untruncated) sha256 are printed, not shortened, so this row can
+		// drive `catalog deny <sha>` or a per-member attach directly — no second lookup (sp-mwco.3.6).
+		fmt.Fprintf(mw, "%d\t%s\t%s\t%s\t%s\t%s\n",
+			m.GetPosition(), m.GetName(), m.GetSourceSubdir(), m.GetCatalogId(), m.GetSha256(), m.GetDescription())
 	}
 	return mw.Flush()
 }
