@@ -437,6 +437,108 @@ do
 done
 
 roll="$REPO/scripts/e2e-vm/roll.sh"
+
+# Exercise the real roll.sh -> vm_ssh -> ssh boundary. Source-text extraction alone misses local
+# shell quote removal, which can mutate the remote program before SSH sees it.
+transport_bin="$tmp/transport-bin"
+transport_state="$tmp/transport-state"
+transport_stage="$tmp/transport-stage"
+transport_argv="$tmp/routing-remote-argv"
+transport_payload="$tmp/routing-remote-stdin"
+mkdir -p "$transport_bin" "$transport_state/transport-witness" "$transport_stage/bin"
+cat >"$transport_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+stdin_tmp="${TRANSPORT_STDIN_CAPTURE}.tmp.$$"
+cat >"$stdin_tmp"
+argv_has_routing_marker=0
+for arg in "$@"; do
+  [[ "$arg" != *"BEGIN POD_DNS_RECONCILIATION"* ]] || argv_has_routing_marker=1
+done
+if (( argv_has_routing_marker )) || grep -Fq 'BEGIN POD_DNS_RECONCILIATION' "$stdin_tmp"; then
+  printf '%s\0' "$@" >"$TRANSPORT_ARGV_CAPTURE"
+  mv -f "$stdin_tmp" "$TRANSPORT_STDIN_CAPTURE"
+  exit 97
+fi
+rm -f "$stdin_tmp"
+EOF
+cat >"$transport_bin/scp" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$transport_bin/ssh" "$transport_bin/scp"
+cat >"$transport_state/transport-witness/acc.env" <<'EOF'
+E2E_VM_IP=192.0.2.10
+E2E_VM_HOST=transport-witness.e2e.test
+EOF
+if PATH="$transport_bin:$PATH" E2E_RUNID=transport-witness E2E_STATE_ROOT="$transport_state" \
+  STAGE="$transport_stage" TRANSPORT_ARGV_CAPTURE="$transport_argv" \
+  TRANSPORT_STDIN_CAPTURE="$transport_payload" "$roll" </dev/null >"$tmp/transport-roll.out" 2>&1; then
+  echo "roll transport witness did not stop at the routing SSH call" >&2
+  routing_failures=$((routing_failures + 1))
+fi
+transport_failures=0
+assert_exact_routing_ssh_argv() {
+  local argv_file="$1" destination="$2" destination_index=-1 i
+  local -a argv
+  mapfile -d '' -t argv <"$argv_file"
+  for (( i=0; i<${#argv[@]}; i++ )); do
+    if [[ "${argv[i]}" == "$destination" ]]; then
+      destination_index=$i
+      break
+    fi
+  done
+  (( destination_index >= 0 )) || return 1
+  (( ${#argv[@]} == destination_index + 2 )) || return 1
+  [[ "${argv[destination_index + 1]}" == 'bash -se' ]]
+}
+if [[ ! -f "$transport_argv" ]] \
+  || ! assert_exact_routing_ssh_argv "$transport_argv" 'spawnery@192.0.2.10'; then
+  echo "roll routing payload is not sent to an explicit remote bash stdin" >&2
+  transport_failures=$((transport_failures + 1))
+fi
+mutated_transport_argv="$tmp/routing-remote-argv-mutated"
+printf '%s\0' 'spawnery@192.0.2.10' 'env INJECTED=1' 'bash -se' >"$mutated_transport_argv"
+if assert_exact_routing_ssh_argv "$mutated_transport_argv" 'spawnery@192.0.2.10'; then
+  echo "roll routing argv witness accepts an injected remote command argument before bash -se" >&2
+  transport_failures=$((transport_failures + 1))
+fi
+if [[ ! -s "$transport_payload" ]]; then
+  echo "roll routing SSH call does not carry its program as stdin" >&2
+  transport_failures=$((transport_failures + 1))
+else
+  rg -Fq "printf '%d.%d.%d.%d\\n'" "$transport_payload" || {
+    echo "serialized routing payload lost the gateway printf quotes or newline escape" >&2
+    transport_failures=$((transport_failures + 1))
+  }
+  rg -Fq "grep -c '^POD_DNS='" "$transport_payload" || {
+    echo "serialized routing payload lost single quotes around the POD_DNS matcher" >&2
+    transport_failures=$((transport_failures + 1))
+  }
+  [[ "$(tail -c 1 "$transport_payload" | od -An -tu1 | tr -d ' ')" == 10 ]] || {
+    echo "serialized routing payload is not newline terminated" >&2
+    transport_failures=$((transport_failures + 1))
+  }
+  bash -n "$transport_payload" || {
+    echo "serialized routing payload is not valid Bash" >&2
+    transport_failures=$((transport_failures + 1))
+  }
+  serialized_gateway_logic="$tmp/serialized-ipv4-network-gateway.sh"
+  sed -n '/^# BEGIN IPV4_NETWORK_GATEWAY$/,/^# END IPV4_NETWORK_GATEWAY$/p' \
+    "$transport_payload" >"$serialized_gateway_logic"
+  if ! (
+    # shellcheck disable=SC1090
+    source "$serialized_gateway_logic"
+    [[ "$(ipv4_network_gateway 10.234.0.0/16)" == 10.234.0.1 ]]
+  ); then
+    echo "serialized routing gateway helper does not return exactly 10.234.0.1" >&2
+    transport_failures=$((transport_failures + 1))
+  fi
+fi
+if (( transport_failures != 0 )); then
+  routing_failures=$((routing_failures + 1))
+fi
+
 provision_pod_dns_logic="$tmp/provision-pod-dns-reconciliation.sh"
 roll_pod_dns_logic="$tmp/roll-pod-dns-reconciliation.sh"
 sed -n '/^# BEGIN POD_DNS_RECONCILIATION$/,/^# END POD_DNS_RECONCILIATION$/p' \
@@ -675,7 +777,7 @@ if printf '%s\n' "$post_stop_block" | rg -q 'systemctl (start|restart) spawnery-
   echo "roll.sh restarts spawnery-node from the post-stop failure path" >&2
   routing_failures=$((routing_failures + 1))
 fi
-rg -Fq "&& sudo systemctl start spawnery-node'" "$roll" || {
+rg -Fq '&& sudo systemctl start spawnery-node' "$roll" || {
   echo "roll.sh does not make spawnery-node the final fallible restart step" >&2
   routing_failures=$((routing_failures + 1))
 }

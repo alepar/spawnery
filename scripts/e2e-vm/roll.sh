@@ -59,7 +59,7 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
 # Older goldens put GitHub aliases in the VM-global hosts file. Stage and validate a clean global
 # view plus spawnlet's private loopback view while the old node still resolves locally, then stop the
 # node before the atomic global swap. containerd subsequently copies only the clean view into pods.
-vm_ssh "$IP" '
+vm_ssh "$IP" 'bash -se' <<'ROUTING_EOF'
 set -euo pipefail
 
 # BEGIN POD_DNS_RECONCILIATION
@@ -254,7 +254,7 @@ sudo mv -f "$HOSTS_STAGE" /etc/hosts
 HOSTS_STAGE=
 cleanup_routing_staging
 trap - EXIT
-'
+ROUTING_EOF
 
 # 5. Atomic swap + restart the stack. Start node last: every earlier failure leaves the node stopped,
 # and there is no fallible command after it joins the clean-global/private-node routing topology.
