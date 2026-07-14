@@ -83,6 +83,7 @@ if [ "$BUILD" = 1 ]; then
   dbox "make -B images DOCKER='distrobox-host-exec docker'"
   "$DOCKER_BIN" save spawnery/sidecar:dev spawnery/agent:dev -o "$STAGE/images.tar"
   test -s "$STAGE/images.tar"
+  dbox "npm ci && PATH=\"\$(go env GOPATH)/bin:\$PATH\" npm run gen --workspace @spawnery/client && npm run build --workspace @spawnery/client && test -f sdk/ts/dist/index.js"
   dbox "cd acceptance && npm ci"
   cp -rf "$REPO_ROOT/config/." "$STAGE/config/"
 else

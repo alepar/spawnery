@@ -20,7 +20,7 @@
  */
 
 import { test, expect } from "../../src/harness/test";
-import { execConfigFromTarget, execOrThrow, execInSpawn } from "../../src/scenarios/exec";
+import { execOrThrow, execInSpawn } from "../../src/scenarios/exec";
 import { nodeAdminFromEnv, restartNode } from "../../src/scenarios/nodeadmin";
 import { waitForStatus } from "../../src/scenarios/wait";
 
@@ -41,11 +41,11 @@ test.describe("node restart", () => {
   test(
     "a spawnlet restart leaves the spawn running · @noderestart",
     { tag: ["@mutating", "@noderestart"] },
-    async ({ ctx, cli, api, runId, target }) => {
+    async ({ ctx, cli, api, runId }) => {
       // create + clone-in + a full node restart + re-adoption is well past Playwright's 30s default.
       test.setTimeout(300_000);
       const admin = nodeAdminFromEnv(); // throws (loudly) if the lane cannot restart the node
-      const cfg = execConfigFromTarget(target);
+      const cfg = cli.configuration();
 
       // 1. A live spawn with a github mount (an `origin` remote is what makes the git-over-HTTPS check real).
       const id = await cli.createSpawn(ctx, {
@@ -56,16 +56,24 @@ test.describe("node restart", () => {
 
       // 2. State that MUST survive: a marker file in the mount, and a long-running process in the agent.
       const marker = `restart-${runId}-${Date.now().toString(36)}`;
-      await execOrThrow(cfg, id, ["sh", "-c", `printf %s '${marker}' > ${mountPath}/acc-restart-marker.txt`]);
+      await execOrThrow(cfg, ctx.identity, id, [
+        "sh",
+        "-c",
+        `printf %s '${marker}' > ${mountPath}/acc-restart-marker.txt`,
+      ]);
       const pid = (
-        await execOrThrow(cfg, id, ["sh", "-c", "nohup sleep 900 >/dev/null 2>&1 & echo $!"])
+        await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", "nohup sleep 900 >/dev/null 2>&1 & echo $!"])
       ).stdout.trim();
       expect(pid, "the long-running process must report a pid").toMatch(/^\d+$/);
-      await execOrThrow(cfg, id, ["sh", "-c", `kill -0 ${pid}`]); // it really is running
+      await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${pid}`]); // it really is running
 
       // 3. Baseline: in-agent git-over-HTTPS works (through the node's git proxy, trusting the per-spawn
       //    MITM CA). If THIS fails, the lane's git proxy is broken — not the restart.
-      const before = await execInSpawn(cfg, id, ["sh", "-c", `cd ${mountPath} && git ls-remote origin`]);
+      const before = await execInSpawn(cfg, ctx.identity, id, [
+        "sh",
+        "-c",
+        `cd ${mountPath} && git ls-remote origin`,
+      ]);
       expect(
         before.code,
         `precondition: git-over-HTTPS inside the agent does not work even BEFORE the restart: ${before.stderr}`,
@@ -84,16 +92,24 @@ test.describe("node restart", () => {
       expect(await api.listSpawns()).toContainSpawn(id, { status: "ACTIVE" });
 
       // 6. The pod, its files and its in-flight work all survived.
-      const restored = await execOrThrow(cfg, id, ["cat", `${mountPath}/acc-restart-marker.txt`]);
+      const restored = await execOrThrow(cfg, ctx.identity, id, ["cat", `${mountPath}/acc-restart-marker.txt`]);
       expect(restored.stdout.trim()).toBe(marker);
-      const alive = await execInSpawn(cfg, id, ["sh", "-c", `kill -0 ${pid}`]);
+      const alive = await execInSpawn(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${pid}`]);
       expect(alive.code, `the long-running process (pid ${pid}) did not survive the restart`).toBe(0);
-      const cmdline = await execOrThrow(cfg, id, ["sh", "-c", `tr '\\0' ' ' < /proc/${pid}/cmdline`]);
+      const cmdline = await execOrThrow(cfg, ctx.identity, id, [
+        "sh",
+        "-c",
+        `tr '\\0' ' ' < /proc/${pid}/cmdline`,
+      ]);
       expect(cmdline.stdout, "pid was recycled by a different process").toContain("sleep");
 
       // 7. git-over-HTTPS still works: the agent's cached CA bundle is still the CA the node's proxy
       //    presents (sp-2tx8.3.5 — the CA is persisted, not regenerated on a cache miss).
-      const after = await execInSpawn(cfg, id, ["sh", "-c", `cd ${mountPath} && git ls-remote origin`]);
+      const after = await execInSpawn(cfg, ctx.identity, id, [
+        "sh",
+        "-c",
+        `cd ${mountPath} && git ls-remote origin`,
+      ]);
       expect(
         after.code,
         `git-over-HTTPS broke after the restart (the per-spawn MITM CA changed under the agent): ${after.stderr}`,

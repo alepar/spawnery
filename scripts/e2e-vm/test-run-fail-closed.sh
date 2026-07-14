@@ -24,6 +24,9 @@ case "$cmd" in
   *"make -B images"*)
     if [ "${FAIL_PHASE:-}" = images ]; then exit 42; fi
     ;;
+  *"npm run gen --workspace @spawnery/client"*)
+    if [ "${FAIL_PHASE:-}" = sdk ]; then exit 46; fi
+    ;;
   *"cd web && npm ci"*)
     if [ "${FAIL_PHASE:-}" = web ]; then exit 43; fi
     if [ "${FAIL_PHASE:-}" = staging ]; then exit 0; fi
@@ -54,7 +57,7 @@ exit 46
 EOF
 chmod +x "$TMP/distrobox" "$TMP/docker"
 
-for phase in binaries images image-save web staging acceptance-npm; do
+for phase in binaries images image-save sdk web staging acceptance-npm; do
   out="$TMP/$phase.out"
   if FAIL_PHASE="$phase" E2E_RUN_BUILD_ONLY=1 E2E_DISTROBOX_BIN="$TMP/distrobox" \
       E2E_DOCKER_BIN="$TMP/docker" E2E_STATE_ROOT="$TMP/state-$phase" \
@@ -89,6 +92,16 @@ rg -q 'VITE_NODE_CRL_BUNDLE_JSON' "$TMP/pins.out" || {
   echo "run.sh did not pass the generated issuer/CRL bundle to the fresh web build" >&2
   exit 1
 }
+for sdk_build_step in \
+  'npm run gen --workspace @spawnery/client' \
+  'npm run build --workspace @spawnery/client' \
+  'test -f sdk/ts/dist/index.js'
+do
+  rg -Fq -- "$sdk_build_step" "$TMP/pins.out" || {
+    echo "run.sh lacks required SDK build step: ${sdk_build_step}" >&2
+    exit 1
+  }
+done
 for public_binding in \
   '--rawfile cloud_issuer "$public_dir/cloud-intermediate.pem"' \
   '--rawfile cloud_crl "$public_dir/cloud-node.crl.pem"' \
