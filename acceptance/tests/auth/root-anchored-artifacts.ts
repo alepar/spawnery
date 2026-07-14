@@ -291,6 +291,7 @@ export async function spaBundlePublicationPlan(
     file: "rsync",
     args: [
       "-a",
+      "--chmod=Dugo+rx",
       "--delete",
       "-e",
       `ssh -i ${posixShellQuote(cfg.sshKey)} -o BatchMode=yes -o StrictHostKeyChecking=no`,
