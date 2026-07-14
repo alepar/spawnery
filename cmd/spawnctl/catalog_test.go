@@ -103,6 +103,15 @@ func TestRunCatalogCreate(t *testing.T) {
 	if !strings.Contains(out.String(), "cat-1") {
 		t.Fatalf("output missing id: %q", out.String())
 	}
+	if !strings.Contains(out.String(), "unlisted") || !strings.Contains(out.String(), "admin") {
+		t.Fatalf("output missing unlisted-default/admin-publish hint: %q", out.String())
+	}
+}
+
+func TestCatalogCreateHelpMentionsUnlistedDefault(t *testing.T) {
+	if !strings.Contains(catalogCreateCmd().Usage, "unlisted") {
+		t.Fatalf("catalog create Usage missing unlisted default: %q", catalogCreateCmd().Usage)
+	}
 }
 
 // ---- list ----
@@ -311,6 +320,9 @@ func TestRunCatalogIngest(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "cat-9") {
 		t.Fatalf("output missing id: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "unlisted") || !strings.Contains(out.String(), "admin") {
+		t.Fatalf("output missing unlisted-default/admin-publish hint: %q", out.String())
 	}
 }
 

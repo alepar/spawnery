@@ -77,6 +77,7 @@ func runCatalogCreate(ctx context.Context, c catalogClient, out io.Writer, p cat
 		return fmt.Errorf("create catalog entry: %w", err)
 	}
 	fmt.Fprintf(out, "created catalog entry %s\n", resp.Msg.GetCatalogId())
+	fmt.Fprintln(out, "entry is unlisted (visible only to you); publishing to the global catalog is admin-only")
 	return nil
 }
 
@@ -207,6 +208,7 @@ func runCatalogIngest(ctx context.Context, c catalogClient, out io.Writer, p cat
 	if !resp.Msg.GetChanged() {
 		fmt.Fprintln(out, "already ingested; no new version")
 	}
+	fmt.Fprintln(out, "entry is unlisted (visible only to you); publishing to the global catalog is admin-only")
 	return nil
 }
 
@@ -279,7 +281,7 @@ func catalogCmd() *cli.Command {
 func catalogCreateCmd() *cli.Command {
 	return &cli.Command{
 		Name:      "create",
-		Usage:     "create a new catalog entry",
+		Usage:     "create a new catalog entry (unlisted by default; publishing is admin-only)",
 		ArgsUsage: "<name>",
 		Flags: append(cpGroupFlags(),
 			&cli.StringFlag{Name: "kind", Required: true, Usage: "entry kind: skill|mcp|config|plugin"},
@@ -420,7 +422,7 @@ func catalogDeleteCmd() *cli.Command {
 func catalogIngestCmd() *cli.Command {
 	return &cli.Command{
 		Name:      "ingest",
-		Usage:     "ingest a skill from a GitHub repo URL",
+		Usage:     "ingest a skill from a GitHub repo URL (unlisted by default; publishing is admin-only)",
 		ArgsUsage: "<url>",
 		Flags: append(cpGroupFlags(),
 			&cli.StringFlag{Name: "ref", Usage: "branch/tag/commit (default: repo default branch)"},
@@ -454,10 +456,10 @@ func catalogIngestCmd() *cli.Command {
 func catalogSetListingCmd() *cli.Command {
 	return &cli.Command{
 		Name:      "set-listing",
-		Usage:     "set the public listing flag for a catalog entry",
+		Usage:     "set the public listing flag for a catalog entry (--listed requires admin)",
 		ArgsUsage: "<catalog-id>",
 		Flags: append(cpGroupFlags(),
-			&cli.BoolFlag{Name: "listed", Usage: "whether the entry should be publicly listed"},
+			&cli.BoolFlag{Name: "listed", Usage: "publish the entry to the global catalog (admin-only); omit to unlist"},
 		),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 1 {
