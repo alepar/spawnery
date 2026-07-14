@@ -79,10 +79,20 @@ E2E_SSH_USER=build vm_ssh "$IP" 'chmod +x ~/payload/provision.sh ~/payload/gen-p
 log "pulling CA cert out for host trust…"
 # Read the root CA directly over ssh+sudo (robust — no dependency on the /home/build/ca.crt copy or
 # scp perms/timing). The build user has NOPASSWD sudo (cloud-init).
-ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -i "$E2E_SSH_KEY" "build@$IP" 'sudo cat /etc/spawnery/pki/root.pem' > "${OUT%.qcow2}-ca.crt" 2>/dev/null
-if [ -s "${OUT%.qcow2}-ca.crt" ]; then log "CA written to ${OUT%.qcow2}-ca.crt"; else
-  rm -f "${OUT%.qcow2}-ca.crt"; warn "could not fetch CA (check gen-pki output)"; fi
+#
+# The unified-mTLS migration (sp-dvke.2.7) DISTRIBUTES the PKI into per-workload dirs and then wipes the
+# staging dir (provision.sh: `sudo rm -rf /etc/spawnery/pki/*`). This script still read the wiped
+# /etc/spawnery/pki/root.pem, so the ssh cat failed, `set -e` aborted BEFORE "finalize golden", the golden
+# was silently never replaced, and a 0-BYTE ca.crt was left behind — which then gets installed into host
+# trust as a bogus anchor. Try the post-migration locations first, and FAIL LOUDLY rather than leaving an
+# empty file: a truncated trust anchor is worse than none.
+CA_OUT="${OUT%.qcow2}-ca.crt"
+for p in /etc/spawnery/authsvc/root.pem /etc/spawnery/node/root.pem /etc/spawnery/cp/root.pem /etc/spawnery/pki/root.pem; do
+  ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -i "$E2E_SSH_KEY" "build@$IP" "sudo cat $p" > "$CA_OUT" 2>/dev/null || true
+  if [ -s "$CA_OUT" ]; then log "CA written to $CA_OUT (from $p)"; break; fi
+done
+[ -s "$CA_OUT" ] || { rm -f "$CA_OUT"; die "could not fetch the root CA from the build VM (tried the post-migration paths and the legacy one) — the golden would ship without a usable host-trust anchor"; }
 
 log "clean shutdown + finalize golden…"
 E2E_SSH_USER=build vm_ssh "$IP" 'sudo cloud-init clean --logs && sudo shutdown -h now' || true
