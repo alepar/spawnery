@@ -124,6 +124,11 @@ if rg -n '^NODE_TERMINAL_ADDR=' "$common"; then
   echo "enforced VM node exposes a direct terminal listener" >&2
   exit 1
 fi
+spawnlet_prod="$REPO/config/spawnlet.prod.yaml"
+rg -Uq '^node:\n  terminal_addr: ""$' "$spawnlet_prod" || {
+  echo "production spawnlet config does not explicitly disable the inherited direct terminal listener" >&2
+  exit 1
+}
 if rg -n 'ACC_NODE_(ADDR|TERMINAL_ADDR)' "$REPO/scripts/e2e-vm/up.sh" "$REPO/acceptance/.env.example"; then
   echo "acceptance topology still advertises a direct node endpoint" >&2
   exit 1
