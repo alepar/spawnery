@@ -21,15 +21,25 @@ func newAS(t *testing.T, opts ...authsvc.Option) *authsvc.Service {
 	return authsvc.New(root.Cert, inter, opts...)
 }
 
+func boundTokenForCSR(t *testing.T, service *authsvc.Service, accountID string, csr []byte) string {
+	t.Helper()
+	fingerprint, err := pki.CSRPublicKeyFingerprint(csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.IssueBoundEnrollmentToken(accountID, pki.ClassSelfHosted, fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
 // An enrollment token issued for account A, when redeemed with a node CSR, yields a self-hosted cert
 // bound to account A + the requested nodeId + the node's own key — verifiable against the root.
 func TestEnrollIssuesAccountBoundCert(t *testing.T) {
 	s := newAS(t)
-	tok, err := s.IssueEnrollmentToken("acct-A")
-	if err != nil {
-		t.Fatalf("IssueEnrollmentToken: %v", err)
-	}
 	csr, key, _ := pki.NewNodeCSR()
+	tok := boundTokenForCSR(t, s, "acct-A", csr)
 	certPEM, chainPEM, err := s.Enroll(tok, csr, "node-1")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
@@ -43,7 +53,7 @@ func TestEnrollIssuesAccountBoundCert(t *testing.T) {
 		t.Fatalf("parse chain: %v", err)
 	}
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -55,11 +65,33 @@ func TestEnrollIssuesAccountBoundCert(t *testing.T) {
 	}
 }
 
+func TestEnrollUsesConfiguredTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	service := authsvc.New(root.Cert, intermediate, authsvc.WithTrustDomain("prod.spawnery.internal"))
+	csr, _, err := pki.NewNodeCSR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := boundTokenForCSR(t, service, "acct", csr)
+	certPEM, _, err := service.Enroll(token, csr, "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := pki.ParseCertPEM(certPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cert.URIs[0].String(); got != "spiffe://prod.spawnery.internal/node/self-hosted/acct/node" {
+		t.Fatalf("URI SAN = %q", got)
+	}
+}
+
 // A token is single-use: a second redemption fails.
 func TestEnrollTokenSingleUse(t *testing.T) {
 	s := newAS(t)
-	tok, _ := s.IssueEnrollmentToken("a")
 	csr1, _, _ := pki.NewNodeCSR()
+	tok := boundTokenForCSR(t, s, "a", csr1)
 	csr2, _, _ := pki.NewNodeCSR()
 	if _, _, err := s.Enroll(tok, csr1, "n1"); err != nil {
 		t.Fatalf("first enroll: %v", err)
@@ -73,9 +105,9 @@ func TestEnrollTokenSingleUse(t *testing.T) {
 func TestEnrollTokenExpires(t *testing.T) {
 	clk := &fakeClock{now: time.Now()}
 	s := newAS(t, authsvc.WithClock(clk.Now), authsvc.WithEnrollTokenTTL(10*time.Minute))
-	tok, _ := s.IssueEnrollmentToken("a")
-	clk.now = clk.now.Add(11 * time.Minute)
 	csr, _, _ := pki.NewNodeCSR()
+	tok := boundTokenForCSR(t, s, "a", csr)
+	clk.now = clk.now.Add(11 * time.Minute)
 	if _, _, err := s.Enroll(tok, csr, "n"); err == nil {
 		t.Fatal("an expired enrollment token must be rejected")
 	}

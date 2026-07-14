@@ -5,12 +5,15 @@ import type { Identity } from "../fixtures/identity-pool";
 const identity: Identity = { token: "tok-abc", owner: "acc-owner-1" };
 
 describe("DevTokenAuth", () => {
-  it("cliArgs returns -token <token>", async () => {
-    expect(await new DevTokenAuth().cliArgs(identity)).toEqual(["-token", "tok-abc"]);
+  it("prepareCli returns the explicit test-only token", async () => {
+    expect(await new DevTokenAuth().prepareCli({}, identity, {
+      spawnctlBin: "spawnctl", asOrigin: "http://as", configHome: "/tmp/auth",
+    })).toEqual({ authArgs: ["-token", "tok-abc"] });
   });
 
-  it("oracleToken returns the identity's token", async () => {
-    expect(await new DevTokenAuth().oracleToken(identity)).toBe("tok-abc");
+  it("returns the identity's token for both dev audiences", async () => {
+    expect(await new DevTokenAuth().cpAccessToken(identity)).toBe("tok-abc");
+    expect(await new DevTokenAuth().nodeAccessToken(identity)).toBe("tok-abc");
   });
 
   it("seedWeb calls page.addInitScript with the override key and the identity's token", async () => {

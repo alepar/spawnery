@@ -18,14 +18,21 @@ import (
 // Expectation is what the client requires of the hosting node. Tenancy is "self-hosted" or "cloud"; for
 // self-hosted, AccountID must be the client's own account.
 type Expectation struct {
-	Tenancy   string
-	AccountID string
+	TrustDomain string
+	Tenancy     string
+	AccountID   string
 }
 
 // VerifyHost verifies the host node's cert chain against the pinned root and checks its SAN identity
 // against the expectation. It returns the verified identity, or an error if the chain is invalid or the
 // identity is not the expected host.
-func VerifyHost(leafPEM, chainPEM, rootPEM []byte, want Expectation, now time.Time) (pki.Identity, error) {
+func VerifyHost(leafPEM, chainPEM, rootPEM []byte, want Expectation, revoked pki.CertificateRevocationChecker, now time.Time) (pki.Identity, error) {
+	if revoked == nil {
+		return pki.Identity{}, errors.New("clientverify: certificate revocation checker is required")
+	}
+	if want.TrustDomain == "" {
+		return pki.Identity{}, errors.New("clientverify: expected trust domain is required")
+	}
 	leaf, err := pki.ParseCertPEM(leafPEM)
 	if err != nil {
 		return pki.Identity{}, fmt.Errorf("clientverify: leaf: %w", err)
@@ -42,10 +49,20 @@ func VerifyHost(leafPEM, chainPEM, rootPEM []byte, want Expectation, now time.Ti
 		}
 		chain = append(chain, c)
 	}
-	id, err := pki.Verify(leaf, chain, root, now)
+	principal, err := pki.VerifyPrincipal(leaf, chain, pki.VerifyOptions{
+		Root:        root,
+		TrustDomain: want.TrustDomain,
+		CurrentTime: now,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		IsRevoked:   revoked,
+	})
 	if err != nil {
 		return pki.Identity{}, fmt.Errorf("clientverify: host cert does not chain to the pinned root: %w", err)
 	}
+	if principal.Kind != pki.KindNode {
+		return pki.Identity{}, errors.New("clientverify: host principal is not a node")
+	}
+	id := pki.Identity{NodeID: principal.NodeID, AccountID: principal.AccountID, Class: principal.Role}
 	switch want.Tenancy {
 	case pki.ClassCloud:
 		if id.Class != pki.ClassCloud {

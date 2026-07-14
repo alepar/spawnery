@@ -10,6 +10,16 @@ import (
 
 type refreshSessionRepo struct{ db bun.IDB }
 
+const (
+	maxExplicitRevocationTokenIDs                = 1024
+	explicitRevocationTokenIDMargin              = 256
+	accessTokenIDsPerGeneration                  = 2
+	maxRetainedAccessGenerationsPerScope         = (maxExplicitRevocationTokenIDs - explicitRevocationTokenIDMargin) / accessTokenIDsPerGeneration
+	maxRetainedAccessGenerationsPerFamily        = maxRetainedAccessGenerationsPerScope
+	maxRetainedAccessGenerationsPerAccountSecond = maxRetainedAccessGenerationsPerScope
+	maxAccessTokenIDBytes                        = 64
+)
+
 func (r *refreshSessionRepo) Get(ctx context.Context, tokenHash string) (RefreshSession, error) {
 	var s RefreshSession
 	err := r.db.NewSelect().Model(&s).Where("token_hash = ?", tokenHash).Scan(ctx)
@@ -20,6 +30,37 @@ func (r *refreshSessionRepo) Get(ctx context.Context, tokenHash string) (Refresh
 }
 
 func (r *refreshSessionRepo) Insert(ctx context.Context, s RefreshSession) error {
+	if top, ok := r.db.(*bun.DB); ok {
+		return top.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+			return (&refreshSessionRepo{db: tx}).insert(ctx, s)
+		})
+	}
+	return r.insert(ctx, s)
+}
+
+func (r *refreshSessionRepo) insert(ctx context.Context, s RefreshSession) error {
+	if s.AccessExpiresAt <= 0 || s.CPAccessTokenID == "" || s.NodeAccessTokenID == "" ||
+		len(s.CPAccessTokenID) > maxAccessTokenIDBytes || len(s.NodeAccessTokenID) > maxAccessTokenIDBytes {
+		return errors.New("authsvc/store: invalid paired access token")
+	}
+	var retainableGenerations int
+	if err := r.db.NewSelect().Model((*RefreshSession)(nil)).ColumnExpr("COUNT(*)").
+		Where("family_id = ? AND access_expires_at > ?", s.FamilyID, s.CreatedAt).
+		Scan(ctx, &retainableGenerations); err != nil {
+		return err
+	}
+	if retainableGenerations >= maxRetainedAccessGenerationsPerFamily {
+		return errors.New("authsvc/store: refresh family has too many retained access generations")
+	}
+	var accountSecondGenerations int
+	if err := r.db.NewSelect().Model((*RefreshSession)(nil)).ColumnExpr("COUNT(*)").
+		Where("account_id = ? AND created_at = ?", s.AccountID, s.CreatedAt).
+		Scan(ctx, &accountSecondGenerations); err != nil {
+		return err
+	}
+	if accountSecondGenerations >= maxRetainedAccessGenerationsPerAccountSecond {
+		return errors.New("authsvc/store: account has too many access generations in one second")
+	}
 	_, err := r.db.NewInsert().Model(&s).Exec(ctx)
 	return err
 }
@@ -49,26 +90,41 @@ func (r *refreshSessionRepo) Supersede(ctx context.Context, predecessorHash stri
 	return r.Insert(ctx, successor)
 }
 
-func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string) ([]string, error) {
+func (r *refreshSessionRepo) RevokeFamily(ctx context.Context, familyID string, now int64) ([]RevokedToken, error) {
+	return r.revoke(ctx, "family_id", familyID, now, false)
+}
+
+func (r *refreshSessionRepo) RevokeAccount(ctx context.Context, accountID string, now int64) ([]RevokedToken, error) {
+	return r.revoke(ctx, "account_id", accountID, now, true)
+}
+
+func (r *refreshSessionRepo) revoke(ctx context.Context, column, value string, now int64, cutoffEvent bool) ([]RevokedToken, error) {
 	var live []RefreshSession
-	if err := r.db.NewSelect().Model(&live).
-		Column("access_token_id").
-		Where("family_id = ? AND revoked = 0", familyID).
-		Scan(ctx); err != nil {
+	query := r.db.NewSelect().Model(&live).
+		Column("cp_access_token_id", "node_access_token_id", "access_expires_at").
+		Where(column+" = ? AND revoked = 0 AND access_expires_at > ?", value, now).
+		OrderExpr("created_at ASC, token_hash ASC")
+	if cutoffEvent {
+		query = query.Where("created_at >= ?", now)
+	}
+	if err := query.Scan(ctx); err != nil {
 		return nil, err
 	}
 	if _, err := r.db.NewUpdate().Model((*RefreshSession)(nil)).
 		Set("revoked = 1").
 		Set("successor_cache = NULL").
-		Where("family_id = ?", familyID).
+		Where(column+" = ?", value).
 		Exec(ctx); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(live))
+	tokens := make([]RevokedToken, 0, len(live)*2)
 	for _, s := range live {
-		ids = append(ids, s.AccessTokenID)
+		tokens = append(tokens,
+			RevokedToken{TokenID: s.CPAccessTokenID, RetainUntil: s.AccessExpiresAt},
+			RevokedToken{TokenID: s.NodeAccessTokenID, RetainUntil: s.AccessExpiresAt},
+		)
 	}
-	return ids, nil
+	return tokens, nil
 }
 
 func (r *refreshSessionRepo) CountFamilies(ctx context.Context, accountID string) (int, error) {

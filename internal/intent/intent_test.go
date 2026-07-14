@@ -124,6 +124,7 @@ func TestDomainTagsAreDistinct(t *testing.T) {
 	ops := []intent.Op{
 		intent.OpCreateSpawn, intent.OpResumeSpawn, intent.OpRecreateSpawn,
 		intent.OpMigrateSpawn, intent.OpForkSpawn, intent.OpSessionOpen,
+		intent.OpSessionReauth,
 	}
 	seen := map[string]bool{}
 	for _, op := range ops {
@@ -132,6 +133,26 @@ func TestDomainTagsAreDistinct(t *testing.T) {
 			t.Fatalf("duplicate domain %q for op %q", d, op)
 		}
 		seen[d] = true
+	}
+}
+
+func TestSessionReauthContract(t *testing.T) {
+	if got := intent.DomainFor(intent.OpSessionReauth); got != "spawnery/intent/session-reauth/v1" {
+		t.Fatalf("session reauth domain = %q", got)
+	}
+	body := testBody(intent.OpSessionReauth)
+	body.SessionId = "session-1"
+	body.NewTokenId = "token-2"
+	si, err := intent.Build(intent.OpSessionReauth, body, testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := intent.ParseBody(si.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.GetNewTokenId() != "token-2" {
+		t.Fatalf("new token id = %q", parsed.GetNewTokenId())
 	}
 }
 

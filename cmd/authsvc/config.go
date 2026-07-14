@@ -2,8 +2,15 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"spawnery/internal/config"
+)
+
+const (
+	defaultNodeCRLRenewInterval = time.Hour
+	defaultNodeCRLRenewBefore   = 6 * time.Hour
+	selfHostedNodeCRLValidity   = 24 * time.Hour
 )
 
 // AS is the auth-service configuration schema. Documented defaults live in config/authsvc.yaml;
@@ -16,6 +23,8 @@ type AS struct {
 	FakeGithub     bool   `koanf:"fake_github"`
 	Listen         string `koanf:"listen" validate:"required,hostname_port"`
 	AllowedOrigins string `koanf:"allowed_origins"`
+
+	Internal ASInternalTLS `koanf:"internal"`
 
 	// Reachable, multi-user fake GitHub (T2, sp-tq0t.13): opt-in fields for a black-box acceptance
 	// suite that needs to reach the fake's browser-facing authorize redirect from another host and
@@ -33,15 +42,17 @@ type AS struct {
 	FakeGitHubToken string `koanf:"fake_github_token"`
 
 	CA struct {
-		RootPEM          string `koanf:"root_pem"`
-		IntermediateCert string `koanf:"intermediate_cert"`
-		IntermediateKey  string `koanf:"intermediate_key"`
+		TrustDomain                  string        `koanf:"trust_domain" validate:"required"`
+		RootPEM                      string        `koanf:"root_pem"`
+		IntermediateCert             string        `koanf:"intermediate_cert"`
+		IntermediateKey              string        `koanf:"intermediate_key"`
+		RevocationCRL                string        `koanf:"revocation_crl"`
+		RevocationRenewInterval      time.Duration `koanf:"revocation_renew_interval"`
+		RevocationRenewBefore        time.Duration `koanf:"revocation_renew_before"`
+		LegacyRevocationCertificates string        `koanf:"legacy_revocation_certificates"`
 	} `koanf:"ca"`
 
-	Session struct {
-		KeyPEM     string `koanf:"key_pem"`
-		KeyNextPEM string `koanf:"key_next_pem"`
-	} `koanf:"session"`
+	Signing ASAuthSigning `koanf:"signing"`
 
 	DB struct {
 		Driver string `koanf:"driver"`
@@ -67,26 +78,40 @@ type AS struct {
 
 	RegistrationEnabled bool `koanf:"registration_enabled"`
 	MaxFamilies         int  `koanf:"max_families" validate:"min=1"`
+	RateLimits          struct {
+		DevicePerMin int `koanf:"device_per_min" validate:"min=1"`
+	} `koanf:"rate_limits"`
 
 	CP struct {
-		URL       string        `koanf:"url"`
-		RPCSecret config.Secret `koanf:"rpc_secret"`
-		Secret    config.Secret `koanf:"secret"`
+		URL        string `koanf:"url"`
+		ServerName string `koanf:"server_name"`
 	} `koanf:"cp"`
+}
 
-	DevRelaxNodeAuth bool `koanf:"dev_relax_node_auth"`
+type ASInternalTLS struct {
+	Listen                    string        `koanf:"listen"`
+	TrustDomain               string        `koanf:"trust_domain"`
+	RootCA                    string        `koanf:"root_ca"`
+	Cert                      string        `koanf:"cert"`
+	Chain                     string        `koanf:"chain"`
+	Key                       string        `koanf:"key"`
+	ServerName                string        `koanf:"server_name"`
+	RevocationState           string        `koanf:"revocation_state"`
+	RevocationIssuers         string        `koanf:"revocation_issuers"`
+	RevocationCRLs            string        `koanf:"revocation_crls"`
+	RevocationURLs            string        `koanf:"revocation_urls"`
+	RevocationRefreshInterval time.Duration `koanf:"revocation_refresh_interval"`
+}
 
-	// TLS makes the node-mTLS identity path (nodeIdentityMiddleware) reachable in the shipped
-	// binary. Cert/Key are the server identity; both empty (the default) is a fatal-error-free
-	// no-op that keeps today's plain ListenAndServe byte-for-byte. ClientCA is the
-	// HANDSHAKE-level pool that a presented client cert is verified against — distinct from
-	// ca.root_pem, which feeds nodeIdentityMiddleware's CHAIN verification one layer up. They
-	// will usually be the same file, but they are different layers.
-	TLS struct {
-		Cert     string `koanf:"cert"`
-		Key      string `koanf:"key"`
-		ClientCA string `koanf:"client_ca"`
-	} `koanf:"tls"`
+// ASAuthSigning names the purpose-constrained online leaf credentials used for authorization
+// artifacts. The auth-signing intermediate private key is deliberately absent: it stays offline.
+type ASAuthSigning struct {
+	Environment     string `koanf:"environment"`
+	RootPEM         string `koanf:"root_pem"`
+	CurrentKeyPEM   string `koanf:"current_key_pem"`
+	CurrentChainPEM string `koanf:"current_chain_pem"`
+	NextKeyPEM      string `koanf:"next_key_pem"`
+	NextChainPEM    string `koanf:"next_chain_pem"`
 }
 
 // derive fills origin/callback/redirect fields from Common.PublicURL when they are left empty. An
@@ -112,7 +137,7 @@ func (c *AS) derive() {
 	if c.VerificationURI == "" {
 		c.VerificationURI = o + "/device/verify"
 	}
-	if c.GitHub.ClientID != "" && c.GitHub.RedirectURI == "" {
+	if (c.GitHub.ClientID != "" || c.FakeGithub) && c.GitHub.RedirectURI == "" {
 		c.GitHub.RedirectURI = o + "/oauth/callback"
 	}
 	// github.link_redirect_uri is intentionally NOT derived: a non-empty value ACTIVATES the
@@ -126,13 +151,66 @@ func (c AS) Validate() error {
 	if err := c.Common.Validate(); err != nil {
 		return err
 	}
+	if (c.Signing.NextKeyPEM == "") != (c.Signing.NextChainPEM == "") {
+		return fmt.Errorf("signing.next_key_pem and signing.next_chain_pem must be configured together")
+	}
 	if !c.Dev {
-		if c.Session.KeyPEM == "" {
-			return fmt.Errorf("session.key_pem is required in production (set dev=true for development)")
+		required := []struct {
+			name  string
+			value string
+		}{
+			{"signing.environment", c.Signing.Environment},
+			{"signing.root_pem", c.Signing.RootPEM},
+			{"signing.current_key_pem", c.Signing.CurrentKeyPEM},
+			{"signing.current_chain_pem", c.Signing.CurrentChainPEM},
+		}
+		for _, field := range required {
+			if field.value == "" {
+				return fmt.Errorf("%s is required in production (set dev=true for development)", field.name)
+			}
 		}
 		if string(c.GitHub.TokenEncKey) == "" && c.GitHub.TokenEncKeyFile == "" {
 			return fmt.Errorf("github.token_enc_key (or github.token_enc_key_file) is required for at-rest github token encryption")
 		}
+		internalRequired := []struct {
+			name  string
+			value string
+		}{
+			{"internal.listen", c.Internal.Listen},
+			{"ca.revocation_crl", c.CA.RevocationCRL},
+			{"internal.trust_domain", c.Internal.TrustDomain},
+			{"internal.root_ca", c.Internal.RootCA},
+			{"internal.cert", c.Internal.Cert},
+			{"internal.chain", c.Internal.Chain},
+			{"internal.key", c.Internal.Key},
+			{"internal.server_name", c.Internal.ServerName},
+			{"internal.revocation_state", c.Internal.RevocationState},
+			{"internal.revocation_issuers", c.Internal.RevocationIssuers},
+			{"internal.revocation_crls or internal.revocation_urls", c.Internal.RevocationCRLs + c.Internal.RevocationURLs},
+			{"cp.url", c.CP.URL},
+			{"cp.server_name", c.CP.ServerName},
+		}
+		for _, field := range internalRequired {
+			if field.value == "" {
+				return fmt.Errorf("%s is required in production (set dev=true for development)", field.name)
+			}
+		}
+	}
+	if c.Internal.TrustDomain != "" && c.CA.TrustDomain != "" && c.Internal.TrustDomain != c.CA.TrustDomain {
+		return fmt.Errorf("internal.trust_domain must match ca.trust_domain")
+	}
+	if (c.CP.URL == "") != (c.CP.ServerName == "") {
+		return fmt.Errorf("cp.url and cp.server_name must be configured together")
+	}
+	if c.Internal.RevocationCRLs != "" && c.Internal.RevocationURLs != "" {
+		return fmt.Errorf("configure exactly one of internal.revocation_crls or internal.revocation_urls")
+	}
+	renewInterval, renewBefore := c.nodeCRLRenewalSettings()
+	if renewBefore <= 0 || renewBefore >= selfHostedNodeCRLValidity {
+		return fmt.Errorf("ca.revocation_renew_before must be between 0 and %s", selfHostedNodeCRLValidity)
+	}
+	if renewInterval <= 0 || renewInterval > renewBefore {
+		return fmt.Errorf("ca.revocation_renew_interval must be positive and no greater than ca.revocation_renew_before")
 	}
 	// Real GitHub requires client credentials unless fake_github=true or dev mode with no client_id
 	// (dev fallback to in-process fake).
@@ -145,55 +223,77 @@ func (c AS) Validate() error {
 			return fmt.Errorf("github.client_secret is required when not using fake_github")
 		}
 	}
-	// tls.cert and tls.key gate the optional TLS listener: both empty is the plain-HTTP default,
-	// both set turns TLS on, but exactly ONE set is a half-configured listener that would quietly
-	// serve HTTP — the single worst outcome for an auth service, so it is fatal here rather than a
-	// silent downgrade.
-	if (c.TLS.Cert == "") != (c.TLS.Key == "") {
-		return fmt.Errorf("tls.cert and tls.key must both be set or both be empty (half-configured TLS is not a silent downgrade to plaintext)")
-	}
 	return nil
+}
+
+func (c AS) nodeCRLRenewalSettings() (time.Duration, time.Duration) {
+	interval := c.CA.RevocationRenewInterval
+	if interval == 0 {
+		interval = defaultNodeCRLRenewInterval
+	}
+	renewBefore := c.CA.RevocationRenewBefore
+	if renewBefore == 0 {
+		renewBefore = defaultNodeCRLRenewBefore
+	}
+	return interval, renewBefore
 }
 
 // asEnvAliases maps existing AS_* and bare GITHUB_* environment variable names to dotted config
 // keys, so current deployments keep working unchanged (the env layer sits above the files).
 var asEnvAliases = map[string]string{
-	"AS_PUBLIC_URL":                  "public_url",
-	"AS_DEV":                         "dev",
-	"AS_FAKE_GITHUB":                 "fake_github",
-	"AS_FAKE_GITHUB_ADDR":            "fake_github_addr",
-	"AS_FAKE_GITHUB_BASE_URL":        "fake_github_base_url",
-	"AS_FAKE_GITHUB_USERS":           "fake_github_users",
-	"AS_FAKE_GITHUB_TOKEN":           "fake_github_token",
-	"AS_LISTEN":                      "listen",
-	"AS_ALLOWED_ORIGINS":             "allowed_origins",
-	"AS_ROOT_CA_PEM":                 "ca.root_pem",
-	"AS_INTERMEDIATE_CERT_PEM":       "ca.intermediate_cert",
-	"AS_INTERMEDIATE_KEY_PEM":        "ca.intermediate_key",
-	"AS_SESSION_KEY_PEM":             "session.key_pem",
-	"AS_SESSION_KEY_NEXT_PEM":        "session.key_next_pem",
-	"AS_DB_DSN":                      "db.dsn",
-	"AS_DB_DRIVER":                   "db.driver",
-	"AS_GITHUB_TOKEN_ENC_KEY":        "github.token_enc_key",
-	"AS_GITHUB_TOKEN_ENC_KEY_FILE":   "github.token_enc_key_file",
-	"GITHUB_CLIENT_ID":               "github.client_id",
-	"GITHUB_CLIENT_SECRET":           "github.client_secret",
-	"GITHUB_WEB_URL":                 "github.web_url",
-	"GITHUB_API_URL":                 "github.api_url",
-	"AS_GITHUB_REDIRECT_URI":         "github.redirect_uri",
-	"AS_GITHUB_LINK_REDIRECT_URI":    "github.link_redirect_uri",
-	"AS_GITHUB_POST_REDEEM_REDIRECT": "github.post_redeem_redirect",
-	"GITHUB_DEFAULT_HOST":            "github.default_host",
-	"AS_SPA_ORIGINS":                 "spa_origins",
-	"AS_REDIRECT_URIS":               "redirect_uris",
-	"AS_VERIFICATION_URI":            "verification_uri",
-	"REGISTRATION_ENABLED":           "registration_enabled",
-	"AS_MAX_FAMILIES":                "max_families",
-	"AS_CP_URL":                      "cp.url",
-	"AS_CP_RPC_SECRET":               "cp.rpc_secret",
-	"AS_CP_SECRET":                   "cp.secret",
-	"AS_DEV_RELAX_NODE_AUTH":         "dev_relax_node_auth",
-	"AS_TLS_CERT":                    "tls.cert",
-	"AS_TLS_KEY":                     "tls.key",
-	"AS_CLIENT_CA":                   "tls.client_ca",
+	"AS_PUBLIC_URL":                           "public_url",
+	"AS_DEV":                                  "dev",
+	"AS_FAKE_GITHUB":                          "fake_github",
+	"AS_FAKE_GITHUB_ADDR":                     "fake_github_addr",
+	"AS_FAKE_GITHUB_BASE_URL":                 "fake_github_base_url",
+	"AS_FAKE_GITHUB_USERS":                    "fake_github_users",
+	"AS_FAKE_GITHUB_TOKEN":                    "fake_github_token",
+	"AS_LISTEN":                               "listen",
+	"AS_INTERNAL_LISTEN":                      "internal.listen",
+	"AS_INTERNAL_TRUST_DOMAIN":                "internal.trust_domain",
+	"AS_INTERNAL_ROOT_CA":                     "internal.root_ca",
+	"AS_INTERNAL_CERT":                        "internal.cert",
+	"AS_INTERNAL_CHAIN":                       "internal.chain",
+	"AS_INTERNAL_KEY":                         "internal.key",
+	"AS_INTERNAL_SERVER_NAME":                 "internal.server_name",
+	"AS_INTERNAL_REVOCATION_STATE":            "internal.revocation_state",
+	"AS_INTERNAL_REVOCATION_ISSUERS":          "internal.revocation_issuers",
+	"AS_INTERNAL_REVOCATION_CRLS":             "internal.revocation_crls",
+	"AS_INTERNAL_REVOCATION_URLS":             "internal.revocation_urls",
+	"AS_INTERNAL_REVOCATION_REFRESH_INTERVAL": "internal.revocation_refresh_interval",
+	"AS_NODE_CRL_RENEW_INTERVAL":              "ca.revocation_renew_interval",
+	"AS_NODE_CRL_RENEW_BEFORE":                "ca.revocation_renew_before",
+	"AS_ALLOWED_ORIGINS":                      "allowed_origins",
+	"AS_ROOT_CA_PEM":                          "ca.root_pem",
+	"AS_TRUST_DOMAIN":                         "ca.trust_domain",
+	"AS_INTERMEDIATE_CERT_PEM":                "ca.intermediate_cert",
+	"AS_INTERMEDIATE_KEY_PEM":                 "ca.intermediate_key",
+	"AS_SELF_HOSTED_REVOCATION_CRL":           "ca.revocation_crl",
+	"AS_LEGACY_NODE_REVOCATION_CERTIFICATES":  "ca.legacy_revocation_certificates",
+	"AS_AUTH_SIGNING_ENVIRONMENT":             "signing.environment",
+	"AS_AUTH_SIGNING_ROOT_PEM":                "signing.root_pem",
+	"AS_AUTH_SIGNING_CURRENT_KEY_PEM":         "signing.current_key_pem",
+	"AS_AUTH_SIGNING_CURRENT_CHAIN_PEM":       "signing.current_chain_pem",
+	"AS_AUTH_SIGNING_NEXT_KEY_PEM":            "signing.next_key_pem",
+	"AS_AUTH_SIGNING_NEXT_CHAIN_PEM":          "signing.next_chain_pem",
+	"AS_DB_DSN":                               "db.dsn",
+	"AS_DB_DRIVER":                            "db.driver",
+	"AS_GITHUB_TOKEN_ENC_KEY":                 "github.token_enc_key",
+	"AS_GITHUB_TOKEN_ENC_KEY_FILE":            "github.token_enc_key_file",
+	"GITHUB_CLIENT_ID":                        "github.client_id",
+	"GITHUB_CLIENT_SECRET":                    "github.client_secret",
+	"GITHUB_WEB_URL":                          "github.web_url",
+	"GITHUB_API_URL":                          "github.api_url",
+	"AS_GITHUB_REDIRECT_URI":                  "github.redirect_uri",
+	"AS_GITHUB_LINK_REDIRECT_URI":             "github.link_redirect_uri",
+	"AS_GITHUB_POST_REDEEM_REDIRECT":          "github.post_redeem_redirect",
+	"GITHUB_DEFAULT_HOST":                     "github.default_host",
+	"AS_SPA_ORIGINS":                          "spa_origins",
+	"AS_REDIRECT_URIS":                        "redirect_uris",
+	"AS_VERIFICATION_URI":                     "verification_uri",
+	"REGISTRATION_ENABLED":                    "registration_enabled",
+	"AS_MAX_FAMILIES":                         "max_families",
+	"AS_DEVICE_PER_MIN":                       "rate_limits.device_per_min",
+	"AS_CP_URL":                               "cp.url",
+	"AS_CP_SERVER_NAME":                       "cp.server_name",
 }

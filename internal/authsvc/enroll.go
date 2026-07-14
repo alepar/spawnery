@@ -18,7 +18,7 @@ var ErrBadEnrollToken = errors.New("authsvc: invalid or expired enrollment token
 var ErrTokenFingerprintMismatch = errors.New("authsvc: CSR key does not match the token's bound fingerprint")
 
 // ErrUnsignableClass is returned when a token is requested for a class the AS cannot sign. The AS holds
-// only the name-constrained self-hosted intermediate (node-auth §4); it can never issue a cloud identity,
+// only the self-hosted role intermediate (node-auth §4); it can never issue an accepted cloud identity,
 // so binding a token to class=cloud is rejected at issuance — class scoping prevents escalation.
 var ErrUnsignableClass = errors.New("authsvc: AS cannot issue this class (only self-hosted)")
 
@@ -57,21 +57,6 @@ func (s *Service) IssueBoundEnrollmentToken(accountID, class, fingerprint string
 	return tok, nil
 }
 
-// IssueEnrollmentToken mints a LEGACY, UNBOUND one-time enrollment token (account-scoped, short-lived,
-// single-use). It carries no key fingerprint, so any well-formed CSR can redeem it — a token an attacker
-// observes can be redeemed with the attacker's own key. Retained for backward compatibility; production
-// callers SHOULD use IssueBoundEnrollmentToken so the redeeming key is pinned at issuance.
-func (s *Service) IssueEnrollmentToken(accountID string) (string, error) {
-	tok, err := randToken()
-	if err != nil {
-		return "", err
-	}
-	s.mu.Lock()
-	s.tokens[tok] = enrollToken{accountID: accountID, class: pki.ClassSelfHosted, exp: s.now().Add(s.enrollTTL)}
-	s.mu.Unlock()
-	return tok, nil
-}
-
 // Enroll redeems a one-time enrollment token with a node CSR and returns the issued leaf + chain (PEM).
 // The account AND class are taken from the TOKEN (never the request); the node supplies only nodeID + its
 // CSR. For a fingerprint-bound token (IssueBoundEnrollmentToken) the AS additionally verifies the CSR's
@@ -88,23 +73,25 @@ func (s *Service) Enroll(token string, csrDER []byte, nodeID string) (certPEM, c
 		s.mu.Unlock()
 		return nil, nil, ErrBadEnrollToken
 	}
-	if et.fingerprint != "" {
-		if fpErr != nil {
-			s.mu.Unlock()
-			return nil, nil, fmt.Errorf("%w: %v", ErrTokenFingerprintMismatch, fpErr)
-		}
-		// Constant-time-ish equality is unnecessary (hex of a public value), plain compare is fine.
-		if csrFP != et.fingerprint {
-			s.mu.Unlock() // do NOT consume — leave the token usable for the legitimate node.
-			return nil, nil, ErrTokenFingerprintMismatch
-		}
+	if et.fingerprint == "" {
+		s.mu.Unlock()
+		return nil, nil, ErrBadEnrollToken
+	}
+	if fpErr != nil {
+		s.mu.Unlock()
+		return nil, nil, fmt.Errorf("%w: %v", ErrTokenFingerprintMismatch, fpErr)
+	}
+	// The fingerprint is public, so an ordinary equality check is appropriate.
+	if csrFP != et.fingerprint {
+		s.mu.Unlock() // do NOT consume — leave the token usable for the legitimate node.
+		return nil, nil, ErrTokenFingerprintMismatch
 	}
 	et.used = true
 	s.tokens[token] = et
 	accountID, class := et.accountID, et.class
 	s.mu.Unlock()
 
-	cert, chain, err := s.intermediate.SignCSR(csrDER, nodeID, accountID, class, s.now().Add(nodeCertTTL))
+	cert, chain, err := s.intermediate.SignNodeCSR(csrDER, nodeID, accountID, class, s.trustDomain, s.now().Add(nodeCertTTL))
 	if err != nil {
 		return nil, nil, err
 	}

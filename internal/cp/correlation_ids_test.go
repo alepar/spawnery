@@ -16,9 +16,11 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"google.golang.org/protobuf/proto"
 
 	"connectrpc.com/connect"
 
+	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
 	"spawnery/internal/cp/auth"
 )
@@ -113,11 +115,17 @@ func TestHandleWS_SessionIDInLog(t *testing.T) {
 	// bound to any router route (no live node in this hermetic test), so AttachClient will fail
 	// and emit an error log via slogctx.FromContext(sessCtx). After the ws.go fix, sessCtx
 	// carries both spawn_id and session_id, so both must appear in the log output.
+	signedIntent, err := proto.Marshal(&authv1.SignedIntent{Domain: "opaque", Body: []byte("opaque")})
+	if err != nil {
+		t.Fatal(err)
+	}
 	bind := map[string]any{
-		"spawnId":  spawnID,
-		"token":    tokenWire,
-		"clientId": "c-corrlog",
-		"sessionId": "sess-corrlog-42",
+		"spawnId":         spawnID,
+		"token":           tokenWire,
+		"nodeAccessToken": "as-issued-node-token",
+		"signedIntent":    signedIntent,
+		"clientId":        "c-corrlog",
+		"sessionId":       "sess-corrlog-42",
 	}
 	if err := wsjson.Write(ctx, conn, bind); err != nil {
 		t.Fatalf("send bind: %v", err)

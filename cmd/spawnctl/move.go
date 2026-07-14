@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v3"
-	"google.golang.org/protobuf/proto"
-
-	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/client"
+	"spawnery/internal/pki"
 )
+
+const cloudSystemAccountID = "spawnery-system"
 
 // `spawnctl move <spawn-id> <target>` drives the data-only local<->cloud migration (sp-u53.5.3). It
 // orchestrates the owner-side leg of the journal-key travel that the CP cannot do (the CP holds no
@@ -39,7 +39,11 @@ func moveCmd() *cli.Command {
 			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
 			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token"},
 			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
+			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain for production node verification"},
 			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
+			&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint (required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable; required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM to apply before verification (repeatable)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 2 {
@@ -50,11 +54,26 @@ func moveCmd() *cli.Command {
 			if target == "" {
 				return cli.Exit("a target node id (or \"cloud\") is required", 2)
 			}
+			rootCAPath := strings.TrimSpace(c.String("root-ca"))
+			trustDomain := strings.TrimSpace(c.String("trust-domain"))
+			crlStatePath := strings.TrimSpace(c.String("crl-state"))
+			issuerPaths := c.StringSlice("crl-issuer")
+			crlPaths := c.StringSlice("crl")
+			if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
+				return cli.Exit(err.Error(), 2)
+			}
 			dir, err := resolveDir(c)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
-			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("as")), strings.TrimSpace(c.String("root-ca")))
+			opts, err := loadMoveOptions(dir, c.String("token"), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer func() { _ = opts.CloseCertificateRevocations() }()
+			}
+			trust, err := targetTrustFromMoveOptions(opts)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
@@ -63,7 +82,7 @@ func moveCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			src := buildTokenSource(dir, c.String("token"), connectClient())
-			sdk := client.New(c.String("cp"), src, nil, client.WithWarnHandler(func(err error) {
+			sdk := client.New(c.String("cp"), src, nil, client.WithNodeAuthorization(src, trust), client.WithWarnHandler(func(err error) {
 				log.Printf("%v", err)
 			}))
 			fmt.Fprintf(c.Writer, "move %s -> %s\n", spawnID, target)
@@ -76,9 +95,27 @@ func moveCmd() *cli.Command {
 	}
 }
 
-func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath string) (client.MoveOptions, error) {
+func targetTrustFromMoveOptions(opts client.MoveOptions) (client.TargetTrust, error) {
+	if len(opts.RootPEM) == 0 || opts.TrustDomain == "" || opts.AccountID == "" || opts.CertificateRevocations == nil {
+		return client.TargetTrust{}, errors.New("node authorization requires a pinned root, trust domain, current CRL state, and logged-in account")
+	}
+	return client.TargetTrust{
+		RootPEM: opts.RootPEM, TrustDomain: opts.TrustDomain, AccountID: opts.AccountID,
+		CloudAccountID: cloudSystemAccountID, CertificateRevocations: opts.CertificateRevocations, Now: time.Now,
+	}, nil
+}
+
+func loadMoveOptions(dir, tokenFlag, rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string, clock func() time.Time) (client.MoveOptions, error) {
+	if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
+		return client.MoveOptions{}, err
+	}
+	if clock == nil {
+		return client.MoveOptions{}, errors.New("move options require a clock")
+	}
+	now := clock()
 	opts := client.MoveOptions{
-		AccountID: resolveMoveAccountID(dir, tokenFlag),
+		AccountID:   resolveMoveAccountID(dir, tokenFlag),
+		TrustDomain: trustDomain,
 	}
 	if rootCAPath != "" {
 		rootPEM, err := os.ReadFile(rootCAPath)
@@ -86,18 +123,68 @@ func loadMoveOptions(dir, tokenFlag, asFlag, rootCAPath string) (client.MoveOpti
 			return client.MoveOptions{}, fmt.Errorf("read root CA PEM: %w", err)
 		}
 		opts.RootPEM = rootPEM
-	}
-	asURL := strings.TrimRight(asFlag, "/")
-	if asURL == "" {
-		state, err := loadState(dir)
-		if err == nil && state != nil {
-			asURL = strings.TrimRight(state.ASURL, "/")
+		root, err := pki.ParseCertPEM(rootPEM)
+		if err != nil {
+			return client.MoveOptions{}, fmt.Errorf("parse root CA PEM: %w", err)
 		}
-	}
-	if asURL != "" {
-		opts.RevocationURL = asURL + "/node-revocations"
+		roots := x509.NewCertPool()
+		roots.AddCert(root)
+		issuers := make([]*x509.Certificate, 0, len(issuerPaths))
+		for _, path := range issuerPaths {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return client.MoveOptions{}, fmt.Errorf("read CRL issuer PEM: %w", err)
+			}
+			issuer, err := pki.ParseCertPEM(raw)
+			if err != nil {
+				return client.MoveOptions{}, fmt.Errorf("parse CRL issuer PEM: %w", err)
+			}
+			if _, err := issuer.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+				return client.MoveOptions{}, fmt.Errorf("verify CRL issuer: %w", err)
+			}
+			issuers = append(issuers, issuer)
+		}
+		state, err := pki.OpenRevocationState(crlStatePath, issuers, clock)
+		if err != nil {
+			return client.MoveOptions{}, fmt.Errorf("open certificate revocation state: %w", err)
+		}
+		for _, path := range crlPaths {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				_ = state.Close()
+				return client.MoveOptions{}, fmt.Errorf("read CRL PEM: %w", err)
+			}
+			if err := state.ApplyPEM(raw); err != nil {
+				_ = state.Close()
+				return client.MoveOptions{}, fmt.Errorf("apply CRL PEM: %w", err)
+			}
+		}
+		for _, issuer := range issuers {
+			if _, ok := state.HighestNumber(issuer.SerialNumber); !ok {
+				_ = state.Close()
+				return client.MoveOptions{}, fmt.Errorf("certificate revocation state has no current CRL for issuer %s", issuer.SerialNumber.Text(16))
+			}
+		}
+		opts.CertificateRevocations = state.IsRevoked
+		opts.CloseCertificateRevocations = state.Close
 	}
 	return opts, nil
+}
+
+func validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath string, issuerPaths, crlPaths []string) error {
+	if (rootCAPath == "") != (trustDomain == "") {
+		return errors.New("--root-ca and --trust-domain must be provided together")
+	}
+	if rootCAPath == "" {
+		if crlStatePath != "" || len(issuerPaths) != 0 || len(crlPaths) != 0 {
+			return errors.New("certificate revocation flags require --root-ca and --trust-domain")
+		}
+		return nil
+	}
+	if crlStatePath == "" || len(issuerPaths) == 0 {
+		return errors.New("production node verification requires --crl-state and at least one --crl-issuer")
+	}
+	return nil
 }
 
 func resolveMoveAccountID(dir, tokenFlag string) string {
@@ -118,22 +205,14 @@ func resolveMoveAccountID(dir, tokenFlag string) string {
 	if state.AccountID != "" {
 		return state.AccountID
 	}
-	accountID, _ := accountIDFromAccessToken(state.AccessToken)
+	accountID, _ := accountIDFromAccessToken(state.CPAccessToken)
 	return accountID
 }
 
 func accountIDFromAccessToken(wire string) (string, error) {
-	bodyB64, _, ok := strings.Cut(wire, ".")
-	if !ok {
-		return "", errors.New("token is not in session-token wire format")
-	}
-	bodyBytes, err := base64.RawURLEncoding.DecodeString(bodyB64)
+	body, err := parseSessionTokenBody(wire)
 	if err != nil {
 		return "", err
 	}
-	var body authv1.SessionTokenBody
-	if err := proto.Unmarshal(bodyBytes, &body); err != nil {
-		return "", err
-	}
-	return body.AccountId, nil
+	return body.GetAccountId(), nil
 }

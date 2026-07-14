@@ -1,6 +1,6 @@
 // Command authsvc runs the Spawnery Auth Service: the identity root of trust, deployed in its own
 // container apart from the CP. It holds the Root CA cert, the self-hosted intermediate (cert + key),
-// and the AS session-signing key. It provides:
+// and a certified auth-artifact signing leaf. It provides:
 //   - Node enrollment (sp-0qc)
 //   - AS-signed session tokens (sp-3ca)
 //   - Identity: GitHub OAuth login, refresh families, device grant (sp-ussy.1)
@@ -28,10 +28,17 @@
 //	  AS_ROOT_CA_PEM                 Path to Root CA cert PEM (default: /etc/spawnery/as/root-ca.pem)
 //	  AS_INTERMEDIATE_CERT_PEM       Path to self-hosted intermediate cert PEM
 //	  AS_INTERMEDIATE_KEY_PEM        Path to self-hosted intermediate key PEM
+//	  AS_SELF_HOSTED_REVOCATION_CRL  Atomic publication path for the self-hosted issuer CRL
+//	  AS_NODE_CRL_RENEW_INTERVAL     Renewal check interval (default: 1h)
+//	  AS_NODE_CRL_RENEW_BEFORE       Renew this far before expiry (default: 6h)
 //
-//	Session signing keys (Ed25519, PKCS#8 PEM):
-//	  AS_SESSION_KEY_PEM             Path to current session signing key (default: generated in AS_DEV)
-//	  AS_SESSION_KEY_NEXT_PEM        Path to next session signing key (published for rotation; optional)
+//	Certified auth-artifact signing credentials:
+//	  AS_AUTH_SIGNING_ENVIRONMENT        Environment trust-domain label (for example, prod)
+//	  AS_AUTH_SIGNING_ROOT_PEM           Path to the environment Spawnery root certificate
+//	  AS_AUTH_SIGNING_CURRENT_KEY_PEM    Path to the current Ed25519 PKCS#8 leaf key
+//	  AS_AUTH_SIGNING_CURRENT_CHAIN_PEM  Path to its leaf-first certificate chain, root omitted
+//	  AS_AUTH_SIGNING_NEXT_KEY_PEM       Optional next leaf key; requires NEXT_CHAIN_PEM
+//	  AS_AUTH_SIGNING_NEXT_CHAIN_PEM     Optional next leaf-first chain; requires NEXT_KEY_PEM
 //
 //	Database (sqlite tier-0; see deploy/authsvc/README.md for litestream replication):
 //	  AS_DB_DSN                      SQLite DSN (default: file:/var/lib/authsvc/identity.db;
@@ -61,48 +68,28 @@
 //	Access controls:
 //	  REGISTRATION_ENABLED           "true"/"1" = allow new user registration (default: true)
 //	  AS_MAX_FAMILIES                Concurrent refresh-family cap per account (default: 20)
-//	  AS_CP_SECRET                   Shared bearer secret for GET /revocations (server-to-server; the CP
-//	                                 must supply "Authorization: Bearer <secret>"). Required in production;
-//	                                 leave unset only in AS_DEV. Without it the revocation feed (account
-//	                                 UUIDs + session-revocation timing) is served unauthenticated.
-//	  AS_CP_URL                      CP base URL for GitHub mint authorization/fanout.
-//	  AS_CP_RPC_SECRET               Scoped AS->CP secret for GitHub coordination RPCs; must match
-//	                                 CP_AS_RPC_SECRET on the CP.
-//	  AS_DEV_RELAX_NODE_AUTH         "1" = DEV-ONLY (D3): trust the X-Spawnery-Dev-Node-Id header as the
-//	                                 node identity for GitHub mint, bypassing node mTLS. NEVER set in prod.
-//
-//	Node-mTLS listener (optional; makes nodeIdentityMiddleware reachable):
-//	  AS_TLS_CERT                    Server cert PEM path. AS_TLS_CERT and AS_TLS_KEY must both be
-//	                                 set or both be empty — setting exactly one is a fatal startup
-//	                                 error, never a silent downgrade to plaintext.
-//	  AS_TLS_KEY                     Server key PEM path.
-//	  AS_CLIENT_CA                   CA pool node client certs are verified against at the TLS
-//	                                 HANDSHAKE layer (tls.Config.ClientCAs, mode
-//	                                 VerifyClientCertIfGiven: a client cert is optional, but if
-//	                                 presented it must verify or the handshake fails). Distinct from
-//	                                 AS_ROOT_CA_PEM, which feeds nodeIdentityMiddleware's CHAIN
-//	                                 verification one layer up — usually the same file, different
-//	                                 layers. Unset with TLS on: no client cert can ever verify
-//	                                 (warns loudly; does not fail — TLS-without-node-clients is a
-//	                                 legitimate deployment). Both AS_TLS_CERT/AS_TLS_KEY unset
-//	                                 (the default): plain ListenAndServe, byte-for-byte unchanged.
+//	  AS_CP_URL                      CP internal URL for GitHub mint authorization/fanout.
+//	  AS_CP_SERVER_NAME              Expected CP internal TLS DNS name.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
@@ -113,6 +100,7 @@ import (
 	"spawnery/internal/authsvc/store"
 	"spawnery/internal/authsvc/token"
 	"spawnery/internal/config"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 	"spawnery/internal/weborigin"
 
@@ -146,10 +134,64 @@ func main() {
 	if err != nil {
 		log.Fatalf("authsvc: config: %v", err)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	svc, err := buildService(cfg)
+	certificateRevocations := pki.CertificateRevocationChecker(failClosedCertificateRevocations)
+	var (
+		certificateState     *pki.RevocationState
+		internalTLS          *tls.Config
+		internalVerifier     *mtls.PeerVerifier
+		cpHTTPClient         *http.Client
+		connections          *mtls.ConnectionRegistry
+		unsubscribe          func()
+		certificateRefresher *mtls.CRLRefresher
+	)
+	if cfg.Internal.Listen != "" {
+		if err := prepareSelfHostedCRL(ctx, cfg, time.Now); err != nil {
+			log.Fatalf("authsvc: self-hosted CRL startup preflight: %v", err)
+		}
+		certificateState, certificateRefresher, err = loadCertificateRevocations(cfg.Internal, time.Now)
+		if err != nil {
+			log.Fatalf("authsvc: %v", err)
+		}
+		defer func() { _ = certificateState.Close() }()
+		certificateRevocations = certificateState.IsRevoked
+		connections = mtls.NewConnectionRegistry()
+		unsubscribe = mtls.SubscribeConnectionRegistry(certificateState, connections)
+		defer unsubscribe()
+		var root *x509.Certificate
+		var identity tls.Certificate
+		internalTLS, internalVerifier, root, identity, err = loadInternalTLSConfig(cfg.Internal, certificateState)
+		if err != nil {
+			log.Fatalf("authsvc: %v", err)
+		}
+		if !cfg.Dev {
+			caRootPEM, readErr := os.ReadFile(cfg.CA.RootPEM)
+			if readErr != nil {
+				log.Fatalf("authsvc: read CA root for internal identity comparison: %v", readErr)
+			}
+			caRoot, parseErr := pki.ParseCertPEM(caRootPEM)
+			if parseErr != nil || !bytes.Equal(caRoot.Raw, root.Raw) {
+				log.Fatalf("authsvc: internal.root_ca must match ca.root_pem")
+			}
+		}
+		if cfg.CP.URL != "" {
+			cpHTTPClient, err = newInternalClient(root, identity, cfg.Internal.TrustDomain, cfg.CP.ServerName, pki.RoleCP, certificateState, connections)
+			if err != nil {
+				log.Fatalf("authsvc: CP mTLS client: %v", err)
+			}
+		}
+	}
+
+	svc, err := buildService(cfg, certificateRevocations, cpHTTPClient)
 	if err != nil {
 		log.Fatalf("authsvc: %v", err)
+	}
+	if certificateRefresher != nil {
+		if err := certificateRefresher.Refresh(context.Background()); err != nil {
+			log.Fatalf("authsvc: refresh certificate revocations after CRL publication recovery: %v", err)
+		}
 	}
 
 	// Browser-origin allowlist, same mechanism as the CP's ([WL6]): every device-set RPC is a
@@ -175,109 +217,155 @@ func main() {
 		}
 		outerCORS.ServeHTTP(w, r)
 	})
-	// Serve h2c (HTTP/2 cleartext) in addition to HTTP/1.1: the node->AS gRPC mint client dials
-	// HTTP/2, and the dev-relaxed lane (NODE_GITHUB_MINT_DEV_NODE_ID) uses plain HTTP with no TLS
-	// ALPN to negotiate it. h2c.NewHandler still serves HTTP/1.1 requests (browser OAuth) unchanged.
-	// The enforced/prod lane negotiates HTTP/2 over mTLS ALPN and does not rely on this.
-	srv := &http.Server{
+	// The public compatibility listener retains h2c for local tooling; internal traffic uses the
+	// separate direct TLS listener below.
+	publicServer := &http.Server{
 		Addr:    addr,
 		Handler: h2c.NewHandler(routed, &http2.Server{}),
 	}
-
-	// Optional TLS listener (sp-hsqs): makes the existing node-mTLS identity path
-	// (nodeIdentityMiddleware, unmodified) reachable. AS_TLS_CERT/AS_TLS_KEY both unset (the
-	// default) leaves srv.TLSConfig nil and behaviour below is plain ListenAndServe, byte-for-byte
-	// what shipped before. config.Validate already rejects exactly-one-of-cert/key set as a fatal
-	// config error, so by the time we get here it's "both set" or "both empty".
-	tlsConfig, err := buildTLSConfig(cfg)
-	if err != nil {
-		log.Fatalf("authsvc: tls: %v", err)
+	var internalServer *http.Server
+	if cfg.Internal.Listen != "" {
+		internalHandler := mtls.PrincipalMiddleware(internalVerifier, mtls.ConnectionRegistryMiddleware(connections, svc.InternalHandler(authsvc.DefaultInternalPolicy())))
+		internalServer, err = newInternalHTTPServer(cfg.Internal.Listen, internalHandler, internalTLS)
+		if err != nil {
+			log.Fatalf("authsvc: %v", err)
+		}
 	}
-	srv.TLSConfig = tlsConfig
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		sd, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(sd)
+		_ = publicServer.Shutdown(sd)
+		if internalServer != nil {
+			_ = internalServer.Shutdown(sd)
+		}
 	}()
 
-	log.Printf("authsvc listening on %s", addr)
-	if tlsConfig != nil {
-		err = srv.ListenAndServeTLS("", "")
-	} else {
-		err = srv.ListenAndServe()
+	if certificateRefresher != nil {
+		go certificateRefresher.Run(ctx)
 	}
-	if err != nil && err != http.ErrServerClosed {
-		log.Fatalf("authsvc: %v", err)
+	var nodeCRLRenewalDone chan struct{}
+	if cfg.Internal.Listen != "" {
+		renewInterval, renewBefore := cfg.nodeCRLRenewalSettings()
+		nodeCRLRenewalDone = make(chan struct{})
+		go func() {
+			defer close(nodeCRLRenewalDone)
+			svc.RunNodeCRLRenewal(ctx, renewInterval, renewBefore, func(err error) {
+				log.Printf("authsvc: self-hosted CRL renewal: %v", err)
+			})
+		}()
+	}
+	errors := make(chan error, 2)
+	go func() { errors <- publicServer.ListenAndServe() }()
+	if internalServer != nil {
+		go func() { errors <- internalServer.ListenAndServeTLS("", "") }()
+		log.Printf("authsvc internal mTLS listening on %s", cfg.Internal.Listen)
+	}
+	log.Printf("authsvc public listening on %s", addr)
+	if serveErr := <-errors; serveErr != nil && serveErr != http.ErrServerClosed {
+		log.Fatalf("authsvc: %v", serveErr)
+	}
+	stop()
+	if nodeCRLRenewalDone != nil {
+		<-nodeCRLRenewalDone
 	}
 }
 
-// buildTLSConfig returns nil (plain HTTP; today's behaviour, unchanged) when tls.cert and tls.key
-// are both unset. When set, it returns a server TLS config with ClientAuth:
-// VerifyClientCertIfGiven — a client certificate is OPTIONAL (browsers/CLIs on the OAuth and
-// device-flow routes present none and are unaffected), but if one IS presented it must chain to
-// tls.client_ca or the handshake fails outright. This is what makes
-// nodeIdentityMiddleware's r.TLS.PeerCertificates read reachable at all; the middleware itself is
-// untouched.
-//
-// It re-checks the exactly-one-of-cert/key invariant defensively (AS.Validate already enforces it
-// on the config-load path) so this function is also correct when called directly, e.g. from tests.
-func buildTLSConfig(cfg *AS) (*tls.Config, error) {
-	if cfg.TLS.Cert == "" && cfg.TLS.Key == "" {
-		return nil, nil
+// prepareSelfHostedCRL creates or renews the AS-owned self-hosted CRL before the internal
+// revocation state opens. Other issuer/source pairs remain untouched.
+func prepareSelfHostedCRL(ctx context.Context, cfg *AS, now func() time.Time) error {
+	if cfg == nil {
+		return errors.New("authsvc: nil configuration")
 	}
-	if cfg.TLS.Cert == "" || cfg.TLS.Key == "" {
-		return nil, fmt.Errorf("tls.cert and tls.key must both be set or both be empty")
+	sinkPath := strings.TrimSpace(cfg.CA.RevocationCRL)
+	if sinkPath == "" {
+		return errors.New("authsvc: self-hosted node CRL sink ca.revocation_crl is required")
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+	if strings.TrimSpace(cfg.Internal.RevocationURLs) != "" {
+		return errors.New("authsvc: self-hosted CRL startup requires file-based internal.revocation_crls")
+	}
+	issuerPaths := splitCSV(cfg.Internal.RevocationIssuers)
+	crlPaths := splitCSV(cfg.Internal.RevocationCRLs)
+	if len(issuerPaths) == 0 || len(issuerPaths) != len(crlPaths) {
+		return errors.New("authsvc: internal revocation issuers and CRL files must be configured one-to-one")
+	}
+	ca, err := buildProductionCA(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("load tls.cert/tls.key: %w", err)
+		return err
 	}
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.VerifyClientCertIfGiven,
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"h2", "http/1.1"},
+	foundSelfHosted := false
+	for i, issuerPath := range issuerPaths {
+		raw, err := os.ReadFile(issuerPath)
+		if err != nil {
+			return fmt.Errorf("authsvc: read revocation issuer %s: %w", issuerPath, err)
+		}
+		issuer, err := pki.ParseCertPEM(raw)
+		if err != nil {
+			return fmt.Errorf("authsvc: parse revocation issuer %s: %w", issuerPath, err)
+		}
+		if bytes.Equal(issuer.Raw, ca.inter.Cert.Raw) {
+			foundSelfHosted = true
+			if filepath.Clean(crlPaths[i]) != filepath.Clean(sinkPath) {
+				return fmt.Errorf("authsvc: self-hosted revocation issuer source %s must match ca.revocation_crl %s", crlPaths[i], sinkPath)
+			}
+		}
 	}
-	if cfg.TLS.ClientCA == "" {
-		// TLS-without-node-clients is a legitimate deployment (browsers/CLIs only) — warn, don't fail.
-		log.Printf("authsvc: WARNING — tls enabled but tls.client_ca is unset: no presented client " +
-			"certificate can ever verify, so node identity can never be established (browser/CLI " +
-			"traffic is unaffected)")
-		return tlsConfig, nil
+	if !foundSelfHosted {
+		return errors.New("authsvc: internal.revocation_issuers is missing the self-hosted revocation issuer")
 	}
-	pemBytes, err := os.ReadFile(cfg.TLS.ClientCA)
+	tokenCipher, err := loadGitHubTokenCipher(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read tls.client_ca: %w", err)
+		return err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pemBytes) {
-		return nil, fmt.Errorf("tls.client_ca %s: no certificates found", cfg.TLS.ClientCA)
+	st, err := store.Open(ctx, store.Config{Driver: cfg.DB.Driver, DSN: cfg.DB.DSN, TokenCipher: tokenCipher})
+	if err != nil {
+		return fmt.Errorf("authsvc: open identity store for self-hosted CRL preflight: %w", err)
 	}
-	tlsConfig.ClientCAs = pool
-	log.Printf("authsvc: TLS listener enabled on %s (client cert optional; presented certs verified against tls.client_ca)", cfg.Listen)
-	return tlsConfig, nil
+	defer st.Close()
+	svc := authsvc.New(ca.root.Cert, ca.inter,
+		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
+		authsvc.WithClock(now),
+		authsvc.WithCertificateRevocations(failClosedCertificateRevocations),
+		authsvc.WithNodeRevocationStore(st, nodeCRLFileSink(sinkPath)),
+	)
+	legacyCertificates, err := loadLegacyRevocationCertificates(cfg.CA.LegacyRevocationCertificates)
+	if err != nil {
+		return err
+	}
+	legacy, err := st.NodeRevocations().ListLegacy(ctx)
+	if err != nil {
+		return err
+	}
+	if len(legacy) != 0 || len(legacyCertificates) != 0 {
+		if err := svc.ReconcileLegacyNodeRevocations(ctx, legacyCertificates); err != nil {
+			return fmt.Errorf("authsvc: reconcile legacy node revocations: %w", err)
+		}
+	}
+	_, renewBefore := cfg.nodeCRLRenewalSettings()
+	if err := svc.EnsureCurrentNodeCRL(ctx, renewBefore); err != nil {
+		return fmt.Errorf("authsvc: ensure current self-hosted CRL: %w", err)
+	}
+	return nil
 }
 
 // buildService loads the AS's material and returns a fully-wired Service.
 // AS_DEV=1 (cfg.Dev=true) bootstraps an ephemeral in-memory CA + fake GitHub (for `just dev`; NOT production).
-func buildService(cfg *AS) (*authsvc.Service, error) {
+func buildService(cfg *AS, certificateRevocations pki.CertificateRevocationChecker, cpHTTPClient *http.Client) (*authsvc.Service, error) {
 	var (
 		root  *pki.CA
 		inter *pki.CA
 		err   error
 	)
 
-	if cfg.Dev {
+	devProvisionedCA := cfg.Dev && cfg.CA.RootPEM != "" && cfg.CA.IntermediateCert != "" && cfg.CA.IntermediateKey != ""
+	if cfg.Dev && !devProvisionedCA {
 		log.Printf("authsvc: DEV MODE — ephemeral in-memory CA (do NOT use in production)")
 		root, err = pki.NewRootCA("Spawnery Dev Root")
 		if err != nil {
 			return nil, err
 		}
-		inter, err = root.NewIntermediate(pki.ClassSelfHosted)
+		inter, err = root.NewIntermediate(pki.ClassSelfHosted, cfg.CA.TrustDomain)
 		if err != nil {
 			return nil, err
 		}
@@ -287,16 +375,36 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 			return nil, ie
 		}
 		root, inter = rc.root, rc.inter
+		if devProvisionedCA {
+			log.Printf("authsvc: DEV MODE — using explicitly provisioned development CA")
+		}
 	}
 
-	// Session signing key.
-	sigKey, err := loadOrGenerateSigningKey(cfg)
-	if err != nil {
-		return nil, err
+	var credentials *signingCredentials
+	if cfg.Dev && cfg.Signing.CurrentKeyPEM == "" && cfg.Signing.CurrentChainPEM == "" && cfg.Signing.RootPEM == "" {
+		environment := cfg.Signing.Environment
+		if environment == "" {
+			environment = "dev"
+		}
+		signer, err := authsvc.NewDevelopmentSigningCredential(root, environment, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: development signing bootstrap: %w", err)
+		}
+		credentials = &signingCredentials{Root: root.Cert, Current: signer}
+		cfg.Signing.Environment = environment
+		log.Printf("authsvc: DEV — generated ephemeral certified auth-artifact signer")
+	} else {
+		credentials, err = loadSigningCredentials(cfg.Signing, time.Now())
+		if err != nil {
+			return nil, err
+		}
 	}
-	nextPubs, err := loadNextPubs(cfg.Session.KeyNextPEM)
+	if credentials.Root != nil && !bytes.Equal(credentials.Root.Raw, root.Cert.Raw) {
+		return nil, fmt.Errorf("authsvc: signing.root_pem does not match ca.root_pem")
+	}
+	artifactVerifier, err := token.NewVerifier(root.Cert, cfg.Signing.Environment, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("authsvc: artifact verifier: %w", err)
 	}
 
 	// Identity store. Dev mode defaults to an ephemeral in-memory DB, matching the dev CA and
@@ -367,54 +475,40 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               idStore,
 		GitHub:              ghProvider,
-		SigningKey:          sigKey,
-		NextPubKeys:         nextPubs,
+		Signer:              credentials.Current,
+		NextSigner:          credentials.Next,
 		GitHubRedirectURI:   cfg.GitHub.RedirectURI,
 		SPAOrigin:           spaOrigin,
 		RedirectURIs:        redirectURIs,
 		VerificationURI:     cfg.VerificationURI,
 		RegistrationEnabled: regEnabled,
 		MaxFamilies:         maxFamilies,
-		CPSecret:            string(cfg.CP.Secret),
+		RateLimits: authsvc.RateLimitConfig{
+			DevicePerMin: cfg.RateLimits.DevicePerMin,
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	opts := []authsvc.Option{
-		authsvc.WithSessionKey(sigKey),
+		authsvc.WithTrustDomain(cfg.CA.TrustDomain),
+		authsvc.WithCertificateRevocations(certificateRevocations),
 		authsvc.WithIdP(idp),
-		authsvc.WithNodeRevocations(idStore.NodeRevocations()),
+		authsvc.WithEnrollmentTokenIssuance(authsvc.EnrollmentSessionAccount(artifactVerifier, time.Now)),
+		authsvc.WithNodeRevocationStore(idStore, nodeCRLFileSink(cfg.CA.RevocationCRL)),
 		authsvc.WithGitHubMinting(idStore, ghProvider),
 	}
 	if cpURL := strings.TrimSpace(cfg.CP.URL); cpURL != "" {
-		// Not internal/client (sp-lan2.5): the Go SDK forces gRPC + Bearer-token auth, but this
-		// server-to-server client speaks Connect protocol with a static X-Spawnery-AS-Secret
-		// header for RPCs (AuthorizeGitHubMint, SignalGitHubTokenRotated) off the SDK's curated
-		// surface. See docs/superpowers/specs/2026-07-06-client-sdk-signing-design.md follow-ups.
-		cpClient := cpv1connect.NewSpawnServiceClient(http.DefaultClient, cpURL,
-			connect.WithInterceptors(staticHeaderInterceptor{
-				name:  "X-Spawnery-AS-Secret",
-				value: string(cfg.CP.RPCSecret),
-			}),
-		)
+		if cpHTTPClient == nil {
+			return nil, errors.New("authsvc: CP URL requires internal mTLS client")
+		}
+		cpClient := cpv1connect.NewSpawnServiceClient(cpHTTPClient, cpURL)
 		opts = append(opts,
 			authsvc.WithGitHubMintAuthorizer(authsvc.NewCPGitHubMintAuthorizer(cpClient)),
 			authsvc.WithGitHubTokenRotatedNotifier(authsvc.NewCPGitHubTokenRotatedNotifier(cpClient)),
 		)
 		log.Printf("authsvc: GitHub mint authorization/fanout wired to CP %s", cpURL)
-	}
-
-	// CP→AS link-status endpoint: enabled when cp.rpc_secret is set. The CP sends this secret
-	// in the X-Spawnery-AS-Secret header to authenticate link-status queries.
-	if secret := strings.TrimSpace(string(cfg.CP.RPCSecret)); secret != "" {
-		opts = append(opts, authsvc.WithCPRPCSecret(secret))
-		log.Printf("authsvc: CP→AS link-status endpoint enabled (POST /internal/github/link-status)")
-	}
-
-	if cfg.DevRelaxNodeAuth {
-		log.Printf("authsvc: WARNING — AS_DEV_RELAX_NODE_AUTH=1: trusting %q header as node identity (DEV-ONLY, NOT for production)", "X-Spawnery-Dev-Node-Id")
-		opts = append(opts, authsvc.WithDevNodeIdentityHeader("X-Spawnery-Dev-Node-Id"))
 	}
 
 	// GitHub link bootstrap flow. Active only when github.link_redirect_uri is set — a distinct
@@ -432,46 +526,260 @@ func buildService(cfg *AS) (*authsvc.Service, error) {
 			RedirectURI:        linkRedirect,
 			PostRedeemRedirect: cfg.GitHub.PostRedeemRedirect,
 			DefaultHost:        cfg.GitHub.DefaultHost,
-			AccountFromReq:     authsvc.SessionBearerAccount(idp.KeySet(), time.Now),
+			AccountFromReq:     authsvc.SessionBearerAccount(artifactVerifier, time.Now),
 			SPAOrigin:          spaOrigin,
 		}))
 		log.Printf("authsvc: GitHub link bootstrap flow ACTIVE (callback %s)", linkRedirect)
 	}
 
-	return authsvc.New(root.Cert, inter, opts...), nil
-}
-
-type staticHeaderInterceptor struct {
-	name  string
-	value string
-}
-
-func (i staticHeaderInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		if i.name != "" && i.value != "" {
-			req.Header().Set(i.name, i.value)
-		}
-		return next(ctx, req)
+	service := authsvc.New(root.Cert, inter, opts...)
+	if err := service.Validate(); err != nil {
+		return nil, err
 	}
-}
-
-func (i staticHeaderInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
-		conn := next(ctx, spec)
-		if i.name != "" && i.value != "" {
-			conn.RequestHeader().Set(i.name, i.value)
-		}
-		return conn
+	legacyCertificates, err := loadLegacyRevocationCertificates(cfg.CA.LegacyRevocationCertificates)
+	if err != nil {
+		return nil, err
 	}
+	if err := service.ReconcileLegacyNodeRevocations(context.Background(), legacyCertificates); err != nil {
+		return nil, fmt.Errorf("authsvc: reconcile legacy node revocations: %w", err)
+	}
+	return service, nil
 }
 
-func (i staticHeaderInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next
+func loadLegacyRevocationCertificates(value string) (map[string]*x509.Certificate, error) {
+	result := make(map[string]*x509.Certificate)
+	for _, entry := range splitCSV(value) {
+		nodeID, path, ok := strings.Cut(entry, "=")
+		nodeID, path = strings.TrimSpace(nodeID), strings.TrimSpace(path)
+		if !ok || nodeID == "" || path == "" {
+			return nil, fmt.Errorf("authsvc: invalid legacy node revocation certificate mapping %q", entry)
+		}
+		if _, duplicate := result[nodeID]; duplicate {
+			return nil, fmt.Errorf("authsvc: duplicate legacy node revocation certificate mapping for %s", nodeID)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: read legacy node revocation certificate %s: %w", path, err)
+		}
+		certificate, err := pki.ParseCertPEM(raw)
+		if err != nil {
+			return nil, fmt.Errorf("authsvc: parse legacy node revocation certificate %s: %w", path, err)
+		}
+		result[nodeID] = certificate
+	}
+	return result, nil
+}
+
+func nodeCRLFileSink(path string) func([]byte) error {
+	return func(data []byte) error {
+		if path == "" || len(data) == 0 {
+			return errors.New("authsvc: node CRL sink is not configured")
+		}
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		temporary, err := os.CreateTemp(dir, ".node-crl-*")
+		if err != nil {
+			return err
+		}
+		temporaryPath := temporary.Name()
+		remove := true
+		defer func() {
+			_ = temporary.Close()
+			if remove {
+				_ = os.Remove(temporaryPath)
+			}
+		}()
+		if err := temporary.Chmod(0o644); err != nil {
+			return err
+		}
+		if _, err := temporary.Write(data); err != nil {
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			return err
+		}
+		if err := temporary.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(temporaryPath, path); err != nil {
+			return err
+		}
+		remove = false
+		directory, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		defer directory.Close()
+		return directory.Sync()
+	}
 }
 
 type productionCA struct {
 	root  *pki.CA
 	inter *pki.CA
+}
+
+type signingCredentials struct {
+	Root    *x509.Certificate
+	Current *token.SigningCredential
+	Next    *token.SigningCredential
+}
+
+func loadSigningCredentials(cfg ASAuthSigning, now time.Time) (*signingCredentials, error) {
+	rootRaw, err := os.ReadFile(cfg.RootPEM)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read signing.root_pem (%s): %w", cfg.RootPEM, err)
+	}
+	root, err := parseCertificatePEM(rootRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse signing.root_pem (%s): %w", cfg.RootPEM, err)
+	}
+	current, err := loadSigningCredential("current", cfg.CurrentKeyPEM, cfg.CurrentChainPEM, root, cfg.Environment, now)
+	if err != nil {
+		return nil, err
+	}
+	credentials := &signingCredentials{Root: root, Current: current}
+	if cfg.NextKeyPEM != "" || cfg.NextChainPEM != "" {
+		if cfg.NextKeyPEM == "" || cfg.NextChainPEM == "" {
+			return nil, fmt.Errorf("authsvc: signing next key and chain must be configured together")
+		}
+		credentials.Next, err = loadSigningCredential("next", cfg.NextKeyPEM, cfg.NextChainPEM, root, cfg.Environment, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return credentials, nil
+}
+
+func loadSigningCredential(label, keyPath, chainPath string, root *x509.Certificate, environment string, now time.Time) (*token.SigningCredential, error) {
+	keyRaw, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read %s signing key (%s): %w", label, keyPath, err)
+	}
+	defer clear(keyRaw)
+	privateKey, err := parseSigningPrivateKeyPEM(keyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse %s signing key (%s): %w", label, keyPath, err)
+	}
+	defer clear(privateKey)
+	chainRaw, err := os.ReadFile(chainPath)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: read %s signing chain (%s): %w", label, chainPath, err)
+	}
+	chain, err := parseCertificateChainPEM(chainRaw)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: parse %s signing chain (%s): %w", label, chainPath, err)
+	}
+	credential, err := token.NewSigningCredential(privateKey, chain, root, environment, now)
+	if err != nil {
+		return nil, fmt.Errorf("authsvc: validate %s signing credential (key %s, chain %s): %w", label, keyPath, chainPath, err)
+	}
+	return credential, nil
+}
+
+func parseCertificatePEM(raw []byte) (*x509.Certificate, error) {
+	certificates, err := parseCertificateChainPEM(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(certificates) != 1 {
+		return nil, fmt.Errorf("expected exactly one certificate, got %d", len(certificates))
+	}
+	return certificates[0], nil
+}
+
+func parseCertificateChainPEM(raw []byte) ([]*x509.Certificate, error) {
+	var certificates []*x509.Certificate
+	for len(raw) > 0 {
+		block, rest, err := consumeCanonicalPEMBlock(raw, "CERTIFICATE")
+		if err != nil {
+			if len(certificates) > 0 {
+				return nil, fmt.Errorf("invalid trailing PEM data: %w", err)
+			}
+			return nil, err
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse certificate: %w", err)
+		}
+		certificates = append(certificates, cert)
+		raw = rest
+	}
+	if len(certificates) == 0 {
+		return nil, fmt.Errorf("no certificates")
+	}
+	return certificates, nil
+}
+
+func parseSigningPrivateKeyPEM(raw []byte) (ed25519.PrivateKey, error) {
+	block, rest, err := consumeCanonicalPEMBlock(raw, "PRIVATE KEY")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(block.Bytes)
+	if block.Type != "PRIVATE KEY" || len(block.Headers) != 0 || len(rest) != 0 {
+		return nil, fmt.Errorf("expected exactly one headerless PRIVATE KEY block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKCS#8 private key: %w", err)
+	}
+	privateKey, ok := parsed.(ed25519.PrivateKey)
+	if !ok || len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("private key is not Ed25519")
+	}
+	canonical := ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])
+	clear(privateKey)
+	return canonical, nil
+}
+
+// consumeCanonicalPEMBlock decodes exactly one zero-offset PEM block. Both LF and CRLF are
+// canonical inputs; mixed endings, prefixes, skipped malformed blocks, and trailing bytes within
+// the framed block are rejected by byte-for-byte canonical re-encoding.
+func consumeCanonicalPEMBlock(raw []byte, blockType string) (*pem.Block, []byte, error) {
+	headerBase := "-----BEGIN " + blockType + "-----"
+	newline := ""
+	switch {
+	case bytes.HasPrefix(raw, []byte(headerBase+"\n")):
+		newline = "\n"
+	case bytes.HasPrefix(raw, []byte(headerBase+"\r\n")):
+		newline = "\r\n"
+	default:
+		return nil, nil, fmt.Errorf("PEM block does not start with %s", headerBase)
+	}
+	header := headerBase + newline
+	footer := "-----END " + blockType + "-----" + newline
+	body := raw[len(header):]
+	footerOffset := bytes.Index(body, []byte(footer))
+	if footerOffset < 0 || !hasPEMLineBoundary(body, footerOffset, newline) {
+		return nil, nil, fmt.Errorf("invalid %s PEM block", blockType)
+	}
+	blockEnd := len(header) + footerOffset + len(footer)
+	blockRaw := raw[:blockEnd]
+	block, undecoded := pem.Decode(blockRaw)
+	if block == nil || len(undecoded) != 0 {
+		return nil, nil, fmt.Errorf("invalid %s PEM block", blockType)
+	}
+	canonical := pem.EncodeToMemory(block)
+	if newline == "\r\n" {
+		canonical = bytes.ReplaceAll(canonical, []byte("\n"), []byte("\r\n"))
+	}
+	if !bytes.Equal(blockRaw, canonical) {
+		return nil, nil, fmt.Errorf("non-canonical %s PEM block", blockType)
+	}
+	return block, raw[blockEnd:], nil
+}
+
+func hasPEMLineBoundary(body []byte, footerOffset int, newline string) bool {
+	if footerOffset == 0 {
+		return true
+	}
+	return footerOffset >= len(newline) && bytes.Equal(body[footerOffset-len(newline):footerOffset], []byte(newline))
 }
 
 func buildProductionCA(cfg *AS) (*productionCA, error) {
@@ -503,43 +811,6 @@ func buildProductionCA(cfg *AS) (*productionCA, error) {
 		root:  &pki.CA{Cert: rootCert},
 		inter: &pki.CA{Cert: interCert, Key: interKey},
 	}, nil
-}
-
-func loadOrGenerateSigningKey(cfg *AS) (ed25519.PrivateKey, error) {
-	path := cfg.Session.KeyPEM
-	if path == "" {
-		if cfg.Dev {
-			_, k, err := ed25519.GenerateKey(nil)
-			if err != nil {
-				return nil, err
-			}
-			log.Printf("authsvc: DEV — generated ephemeral session signing key")
-			return k, nil
-		}
-		// Validate() ensures this cannot happen in production.
-		return nil, fmt.Errorf("session.key_pem is required in production (set dev=true for development)")
-	}
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	k, _, err := token.LoadSigningKey(pemBytes)
-	return k, err
-}
-
-func loadNextPubs(path string) ([]ed25519.PublicKey, error) {
-	if path == "" {
-		return nil, nil
-	}
-	pemBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	pub, err := token.ParsePublicKeyPEM(pemBytes)
-	if err != nil {
-		return nil, err
-	}
-	return []ed25519.PublicKey{pub}, nil
 }
 
 // loadGitHubTokenCipher builds the at-rest cipher for AS-custodial github tokens

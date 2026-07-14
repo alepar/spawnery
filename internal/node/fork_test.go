@@ -35,7 +35,7 @@ func issueNodeTransferFixture(t *testing.T, nodeID, account, class string) nodeT
 	if err != nil {
 		t.Fatalf("NewRootCA: %v", err)
 	}
-	inter, err := r.NewIntermediate(class)
+	inter, err := r.NewIntermediate(pki.IssuerRole(class))
 	if err != nil {
 		t.Fatalf("NewIntermediate: %v", err)
 	}
@@ -121,7 +121,7 @@ func newForkNodeManager(t *testing.T, be runtime.PodBackend) *spawnlet.Manager {
 	t.Helper()
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-		DeltaCapture: true,
+		DeltaCapture: true, CertificateRevocations: allowNoCertificateRevocations,
 	})
 	mgr.SetJournal(&fakeNodeJournal{finalID: "manifest-abc"}, t.TempDir())
 	return mgr
@@ -253,6 +253,7 @@ func TestForkTransferExportEmitsSourceRestoredSealedKeyAndPayload(t *testing.T) 
 		t.Fatal(err)
 	}
 	a.cfg.NodeRootPEM = targetFx.root
+	a.cfg.NodeTrustDomain = pki.DefaultTrustDomain
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_ForkTransferExport{ForkTransferExport: &nodev1.ForkTransferExport{
 		SourceSpawnId:       "sp-source",
@@ -345,7 +346,7 @@ func TestForkTransferImportOpensSealedKeyAndEmitsForkOwnedPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealForkTransferPayload: %v", err)
 	}
-	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, subkey.AllowAll{}, seal.InFlightAAD{
+	sealedKey, _, err := subkey.SealTransferKeyForNode(key, targetFx.leaf, targetFx.chain, targetFx.root, published, subkey.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, allowNoCertificateRevocations, seal.InFlightAAD{
 		SpawnID:    "sp-fork",
 		Generation: 1,
 		DeliveryID: "ts-1",
@@ -491,7 +492,7 @@ func TestCancelForkSameNodeCancelsRunningFork(t *testing.T) {
 	finalBlock := make(chan struct{})
 	mgr := spawnlet.NewManagerWithBackend(be, noopApplier{}, spawnlet.ManagerConfig{
 		NodeID: "node-test", AgentImage: "a", SidecarImage: "s", DataRoot: t.TempDir(),
-		DeltaCapture: true,
+		DeltaCapture: true, CertificateRevocations: allowNoCertificateRevocations,
 	})
 	mgr.SetJournal(&fakeNodeJournal{
 		finalID:      "manifest-abc",

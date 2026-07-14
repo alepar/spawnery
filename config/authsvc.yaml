@@ -7,14 +7,37 @@ fake_github: false  # true = in-process fake GitHub provider (dev/CI; implies no
 listen: "127.0.0.1:8090"
 allowed_origins: ""  # browser-origin allowlist for CORS; empty = dev (loopback + private-network only)
 
+internal:
+  listen: ""
+  trust_domain: ""
+  root_ca: ""
+  cert: ""
+  chain: ""
+  key: ""
+  server_name: ""
+  revocation_state: ""
+  revocation_issuers: ""
+  revocation_crls: ""
+  revocation_urls: ""
+  revocation_refresh_interval: 5s
+
 ca:
+  trust_domain: "prod.spawnery.internal"
   root_pem: "/etc/spawnery/as/root-ca.pem"
   intermediate_cert: "/etc/spawnery/as/self-hosted-intermediate.pem"
   intermediate_key: "/etc/spawnery/as/self-hosted-intermediate-key.pem"
+  revocation_crl: "/var/lib/authsvc/self-hosted.crl"
+  revocation_renew_interval: 1h
+  revocation_renew_before: 6h
+  legacy_revocation_certificates: "" # one-time node-id=/path/to/leaf.pem mappings for pre-CRL rows
 
-session:
-  key_pem: ""       # required in production; generated ephemerally when dev=true
-  key_next_pem: ""  # next-rotation public key path (optional)
+signing:
+  environment: ""         # required in production, e.g. prod
+  root_pem: ""            # environment Spawnery root certificate
+  current_key_pem: ""     # Ed25519 PKCS#8 leaf key; required in production
+  current_chain_pem: ""   # leaf-first certificate chain, root omitted; required in production
+  next_key_pem: ""        # optional rotation credential; key and chain must appear together
+  next_chain_pem: ""
 
 db:
   driver: sqlite
@@ -38,15 +61,9 @@ verification_uri: ""  # device-grant user confirmation URL (SPA's /device/verify
 
 registration_enabled: true  # allow new user registration
 max_families: 20            # concurrent refresh-family cap per account
+rate_limits:
+  device_per_min: 10        # device-grant creation and confirmation attempts per IP per minute
 
 cp:
-  url: ""          # CP base URL for GitHub mint authorization/fanout (empty disables)
-  rpc_secret: ""   # AS->CP scoped bearer secret for GitHub coordination RPCs (Secret)
-  secret: ""       # shared bearer secret for GET /revocations (server-to-server; Secret)
-
-dev_relax_node_auth: false  # DEV-ONLY (D3): trust X-Spawnery-Dev-Node-Id header as node identity
-
-tls:
-  cert: ""       # server cert PEM path; both cert+key empty = plain HTTP (today's behavior, byte-for-byte)
-  key: ""        # server key PEM path; setting exactly one of cert/key is a fatal startup error
-  client_ca: ""  # CA pool node client certs are verified against at the HANDSHAKE layer (usually == ca.root_pem, but a distinct layer); unset + TLS on = TLS-without-node-clients (warns, does not fail)
+  url: ""          # CP internal URL for GitHub mint authorization/fanout
+  server_name: ""  # expected CP internal TLS DNS name

@@ -4,11 +4,15 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc"
@@ -29,7 +33,7 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 	otherInter, _ := otherRoot.NewIntermediate(pki.ClassSelfHosted)
 
 	var mu sync.Mutex
-	var lastID pki.Identity
+	var lastID pki.Principal
 	var reached bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -38,7 +42,7 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
-	ts := httptest.NewUnstartedServer(nodeauth.Middleware(nodeauth.ModeEnforced, root.Cert, next))
+	ts := httptest.NewUnstartedServer(mustMiddleware(t, nodeauth.ModeEnforced, root.Cert, next))
 	ts.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert} // present required; middleware verifies
 	ts.StartTLS()
 	defer ts.Close()
@@ -73,15 +77,15 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 
 	// 1) valid self-hosted -> accepted, identity derived from the cert.
 	good, _ := selfHosted.IssueNode("n1", "alice", pki.ClassSelfHosted, hour)
-	if code := do(good); code != http.StatusOK || !reached || lastID.AccountID != "alice" || lastID.Class != pki.ClassSelfHosted {
+	if code := do(good); code != http.StatusOK || !reached || lastID.AccountID != "alice" || lastID.Role != pki.ClassSelfHosted {
 		t.Fatalf("valid self-hosted: code=%d reached=%v id=%+v", code, reached, lastID)
 	}
 	// 2) valid cloud -> accepted.
 	cnode, _ := cloud.IssueNode("c1", "spawnery-system", pki.ClassCloud, hour)
-	if code := do(cnode); code != http.StatusOK || lastID.Class != pki.ClassCloud {
+	if code := do(cnode); code != http.StatusOK || lastID.Role != pki.ClassCloud {
 		t.Fatalf("valid cloud: code=%d id=%+v", code, lastID)
 	}
-	// 3) forged cloud (self-hosted intermediate, cloud SAN) -> rejected by name constraints.
+	// 3) forged cloud path from a self-hosted intermediate -> rejected by issuer policy.
 	forged, _ := selfHosted.IssueNode("evil", "victim", pki.ClassCloud, hour)
 	if code := do(forged); code != http.StatusUnauthorized || reached {
 		t.Fatalf("forged cloud must be 401 and not reach handler: code=%d reached=%v", code, reached)
@@ -115,41 +119,43 @@ func TestEnforcedMTLSEndToEnd(t *testing.T) {
 func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
-	as := authsvc.New(root.Cert, inter)
-
-	asPub := as.SessionPubKey()
-	ks, err := token.NewKeySet(asPub)
-	if err != nil {
-		t.Fatalf("NewKeySet: %v", err)
-	}
-	keyID, _ := token.KeyID(asPub)
-
-	// Mint a genuine token using the AS's session key.
 	now := time.Now()
-	asPriv := as.SessionPrivKey()
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := token.NewVerifier(root.Cert, "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mint a genuine token using the AS's certified signer.
 	body := &authv1.SessionTokenBody{
 		AccountId: "alice", TokenId: "t1", Audience: "cp",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-		KeyId: keyID,
+		KeyId: hex.EncodeToString(signer.KeyID[:]),
 	}
-	genuineTok, err := token.Mint(body, asPriv)
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genuineTok, err := signer.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatalf("Mint genuine token: %v", err)
 	}
-	if _, err := token.Verify(genuineTok, ks, now); err != nil {
+	if _, err := verifier.Verify(genuineTok, token.ArtifactTypeSession, now); err != nil {
 		t.Fatalf("genuine AS token must verify: %v", err)
 	}
 
 	// A "compromised CP" tries to mint a token with its own (non-AS) key.
 	_, cpKey, _ := ed25519.GenerateKey(rand.Reader)
-	cpKeyID, _ := token.KeyID(cpKey.Public().(ed25519.PublicKey))
 	forgedBody := &authv1.SessionTokenBody{
 		AccountId: "attacker", TokenId: "t2", Audience: "cp",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-		KeyId: cpKeyID, // unknown key_id
+		KeyId: "untrusted",
 	}
-	forgedTok, _ := token.Mint(forgedBody, cpKey)
-	if _, err := token.Verify(forgedTok, ks, now); err == nil {
+	forgedTok := legacySessionWire(t, forgedBody, cpKey)
+	if _, err := verifier.Verify(forgedTok, token.ArtifactTypeSession, now); err == nil {
 		t.Fatal("a token not signed by the AS key must be rejected (unknown key_id)")
 	}
 
@@ -157,20 +163,30 @@ func TestForgedSessionTokenRejectedE2E(t *testing.T) {
 	spoofedBody := &authv1.SessionTokenBody{
 		AccountId: "attacker", TokenId: "t3", Audience: "cp",
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-		KeyId: keyID, // AS key_id but signed with cpKey
+		KeyId: hex.EncodeToString(signer.KeyID[:]), // AS key_id but signed with cpKey
 	}
-	spoofedTok, _ := token.Mint(spoofedBody, cpKey)
-	if _, err := token.Verify(spoofedTok, ks, now); err == nil {
+	spoofedTok := legacySessionWire(t, spoofedBody, cpKey)
+	if _, err := verifier.Verify(spoofedTok, token.ArtifactTypeSession, now); err == nil {
 		t.Fatal("a token with spoofed key_id (but wrong sig) must be rejected")
 	}
 
 	// Bonus: clientverify accepts the AS-enrolled host node but rejects a foreign-account one.
 	host, _ := inter.IssueNode("n", "alice", pki.ClassSelfHosted, time.Now().Add(time.Hour))
 	leaf, chain, rootPEM := pki.MarshalCertPEM(host.Cert), pki.MarshalCertPEM(inter.Cert), pki.MarshalCertPEM(root.Cert)
-	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, time.Now()); err != nil {
+	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "alice"}, allowNoCertificateRevocations, time.Now()); err != nil {
 		t.Fatalf("alice's own host must verify: %v", err)
 	}
-	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, time.Now()); err == nil {
+	if _, err := clientverify.VerifyHost(leaf, chain, rootPEM, clientverify.Expectation{TrustDomain: pki.DefaultTrustDomain, Tenancy: pki.ClassSelfHosted, AccountID: "bob"}, allowNoCertificateRevocations, time.Now()); err == nil {
 		t.Fatal("a host bound to alice must not satisfy bob")
 	}
+}
+
+func legacySessionWire(t *testing.T, body *authv1.SessionTokenBody, key ed25519.PrivateKey) string {
+	t.Helper()
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := append([]byte(token.DomainPrefix), payload...)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, message))
 }

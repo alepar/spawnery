@@ -16,11 +16,25 @@ func MarshalCertPEM(cert *x509.Certificate) []byte {
 
 // MarshalKeyPEM encodes an EC private key as PKCS#8 PEM.
 func MarshalKeyPEM(key *ecdsa.PrivateKey) ([]byte, error) {
+	return MarshalPKCS8KeyPEM(key)
+}
+
+// MarshalPKCS8KeyPEM encodes a private key as PKCS#8 PEM.
+func MarshalPKCS8KeyPEM(key any) ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, err
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}
+
+// MarshalCertChainPEM encodes certificates in the provided order.
+func MarshalCertChainPEM(chain []*x509.Certificate) []byte {
+	var result []byte
+	for _, cert := range chain {
+		result = append(result, MarshalCertPEM(cert)...)
+	}
+	return result
 }
 
 // ParseCertPEM decodes a single PEM-encoded certificate.
@@ -50,7 +64,7 @@ func ParseKeyPEM(b []byte) (*ecdsa.PrivateKey, error) {
 }
 
 // TLSCertificate builds an mTLS identity (leaf + intermediate chain + private key) for dial/serve.
-func (n *Node) TLSCertificate() (tls.Certificate, error) {
+func (n *Leaf) TLSCertificate() (tls.Certificate, error) {
 	if n.Key == nil {
 		return tls.Certificate{}, errors.New("pki: node has no private key")
 	}

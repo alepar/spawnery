@@ -1,35 +1,28 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 
-	"spawnery/internal/execstream"
+	clientpkg "spawnery/internal/client"
 )
 
-// runExec runs cmd non-interactively in spawn's agent container via the node's streaming /exec
-// endpoint, copying stdout/stderr to the given writers as they arrive and returning the inner
-// command's exit code. err is non-nil only for a transport/node failure (unreachable node, non-200
-// before streaming, a node error frame, or a truncated stream) — a non-zero command exit is reported
-// via the returned code, not as an error.
-func runExec(addr, spawn string, cmd []string, stdout, stderr io.Writer) (int, error) {
-	body, err := json.Marshal(map[string]any{"cmd": cmd})
-	if err != nil {
-		return 1, err
+type authenticatedExecClient interface {
+	Exec(context.Context, string, []string, io.Writer, io.Writer) (int, error)
+}
+
+func buildAuthenticatedExecClient(cpAddr string, source *cpTokenSource, trust clientpkg.TargetTrust) (authenticatedExecClient, error) {
+	sdk := clientpkg.New(cpAddr, source, nil, clientpkg.WithNodeAuthorization(source, trust))
+	if err := sdk.PreflightNodeAuthorization(context.Background()); err != nil {
+		return nil, fmt.Errorf("node authorization: %w", err)
 	}
-	endpoint := addr + "/exec?spawn=" + url.QueryEscape(spawn)
-	resp, err := http.Post(endpoint, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return 1, fmt.Errorf("contacting node: %w", err)
+	return sdk, nil
+}
+
+func runExec(ctx context.Context, client authenticatedExecClient, spawn string, argv []string, stdout, stderr io.Writer) (int, error) {
+	if client == nil {
+		return 1, fmt.Errorf("authenticated exec client is required")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return 1, fmt.Errorf("node returned %s: %s", resp.Status, bytes.TrimSpace(b))
-	}
-	return execstream.Demux(resp.Body, stdout, stderr)
+	return client.Exec(ctx, spawn, argv, stdout, stderr)
 }

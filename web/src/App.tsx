@@ -4,6 +4,7 @@ import { useLocation } from "wouter";
 import { toast } from "sonner";
 import {
   createSpawn, listSpawns, renameSpawn, suspendSpawn, resumeSpawn, recreateSpawn, deleteSpawn,
+  SpawnAuthorizationError,
   type SpawnView,
   type CreateMountBinding,
 } from "./api/spawnlet";
@@ -76,6 +77,10 @@ function AppMain() {
   const forkSpawnPhaseRef = useRef(forkSpawn.state.phase);
   const lastAutoOpenedForkRef = useRef<string | null>(null);
   const forkAutoNavigatePathRef = useRef<string | null>(null);
+  const authorizationFailuresRef = useRef(new Map<string, {
+    errorDetail: string;
+    seenByServer: boolean;
+  }>());
 
   useEffect(() => { setTheme(initialTheme()); }, []);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -100,6 +105,27 @@ function AppMain() {
     let list: SpawnView[];
     try { list = await listSpawns(); }
     catch { return spawnsRef.current; }
+    const reportedIds = new Set(list.map((spawn) => spawn.spawnId));
+    list = list.map((spawn) => {
+      const failure = authorizationFailuresRef.current.get(spawn.spawnId);
+      if (!failure) return spawn;
+      failure.seenByServer = true;
+      if (spawn.status === "starting" || spawn.status === "unknown") {
+        return {
+          ...spawn,
+          status: "error",
+          errorStep: "Target authorization",
+          errorDetail: failure.errorDetail,
+        };
+      }
+      authorizationFailuresRef.current.delete(spawn.spawnId);
+      return spawn;
+    });
+    for (const [spawnId, failure] of authorizationFailuresRef.current) {
+      if (failure.seenByServer && !reportedIds.has(spawnId)) {
+        authorizationFailuresRef.current.delete(spawnId);
+      }
+    }
     setSpawns(list);
     const aid = activeIdRef.current;
     if (aid) {
@@ -156,6 +182,29 @@ function AppMain() {
       await refreshSpawns(); // sidebar shows the new spawn yellow immediately
     } catch (e: any) {
       errored();
+      if (e instanceof SpawnAuthorizationError) {
+        authorizationFailuresRef.current.set(e.spawnId, {
+          errorDetail: e.message,
+          seenByServer: false,
+        });
+        const failed: SpawnView = {
+          spawnId: e.spawnId,
+          name: "",
+          appId,
+          status: "error",
+          mode: "",
+          model: MODEL,
+          modelApplied: true,
+          journalKeyDeliveryPending: false,
+          transitionPhase: "",
+          errorStep: "Target authorization",
+          errorDetail: e.message,
+        };
+        setSpawns((current) => [failed, ...current.filter((spawn) => spawn.spawnId !== e.spawnId)]);
+        setActiveId(e.spawnId);
+        activeIdRef.current = e.spawnId;
+        navigate({ section: "spawn", spawnId: e.spawnId });
+      }
       toast.error("Spawn failed: " + e.message);
     }
   };

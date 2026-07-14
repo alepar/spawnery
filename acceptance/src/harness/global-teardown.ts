@@ -22,8 +22,7 @@ export default async function globalTeardown(): Promise<void> {
   const systemIdentity = cfg.identityPool[0];
   const api = new AcceptanceClient({
     baseUrl: cfg.cpEndpoint,
-    bearer: await auth.oracleToken(systemIdentity),
-    keyStore: await auth.sessionKeyStore(systemIdentity),
+    bearer: await auth.cpAccessToken(systemIdentity),
   });
   try {
     await teardownSweep(api, cfg.runId);

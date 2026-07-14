@@ -6,6 +6,7 @@
  */
 
 import { execOrThrow, type ExecConfig } from "./exec";
+import type { Identity } from "../fixtures/identity-pool";
 
 /** newMarker: a value unique to this (runId, spawnId, call) — collisions would mask a real bug. */
 export function newMarker(runId: string, spawnId: string): string {
@@ -20,14 +21,14 @@ export function markerPath(runId: string): string {
 }
 
 /** writeMarker: writes `marker` to markerPath(runId) inside the spawn's agent container. */
-export async function writeMarker(cfg: ExecConfig, spawnId: string, runId: string, marker: string): Promise<void> {
+export async function writeMarker(cfg: ExecConfig, identity: Identity, spawnId: string, runId: string, marker: string): Promise<void> {
   const path = markerPath(runId);
-  await execOrThrow(cfg, spawnId, ["sh", "-c", `printf %s '${marker}' > '${path}'`]);
+  await execOrThrow(cfg, identity, spawnId, ["sh", "-c", `printf %s '${marker}' > '${path}'`]);
 }
 
 /** readMarker: reads markerPath(runId) back from the spawn's agent container (untrimmed stdout). */
-export async function readMarker(cfg: ExecConfig, spawnId: string, runId: string): Promise<string> {
-  const { stdout } = await execOrThrow(cfg, spawnId, ["cat", markerPath(runId)]);
+export async function readMarker(cfg: ExecConfig, identity: Identity, spawnId: string, runId: string): Promise<string> {
+  const { stdout } = await execOrThrow(cfg, identity, spawnId, ["cat", markerPath(runId)]);
   return stdout;
 }
 

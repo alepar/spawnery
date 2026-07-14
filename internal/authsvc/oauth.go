@@ -91,9 +91,10 @@ func (i *IdP) resolveOrRegister(ctx context.Context, sub int64, login string, re
 //  5. Redirects to GitHub.
 //
 // Query parameters from the SPA:
-//   redirect_uri     — where AS redirects the browser BACK after GitHub (registered SPA route)
-//   state            — SPA-generated opaque string (returned on callback for fixation check)
-//   session_pubkey   — base64(DER SPKI) of the SPA's P-256 session key [R2/AM5]
+//
+//	redirect_uri     — where AS redirects the browser BACK after GitHub (registered SPA route)
+//	state            — SPA-generated opaque string (returned on callback for fixation check)
+//	session_pubkey   — base64(DER SPKI) of the SPA's P-256 session key [R2/AM5]
 func (i *IdP) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	if !i.limits.authorize.Allow(clientIP(r)) {
 		tooMany(w)
@@ -231,15 +232,14 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mint access token + create refresh family.
-	accessWire, _, err := i.mintAccess(u, spkiDER, now)
+	// Mint the paired access credentials and create their refresh family before exposing either.
+	famID := uuid.NewString()
+	pair, err := i.mintAccessPair(u, famID, spkiDER, now)
 	if err != nil {
 		redirectError(w, r, row.ClientRedirectURI, "server_error", "token mint failed")
 		return
 	}
 	rawRefresh := randOpaque()
-	tokenID := uuid.NewString()
-	famID := uuid.NewString()
 	// RFC 8252 native-app seam [A3]: loopback redirect_uri → CLI client kind so the refresh
 	// family carries the right ClientKind for audit. The token is also delivered in the query
 	// (see below) since the loopback listener cannot receive Set-Cookie from the AS domain.
@@ -253,7 +253,9 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 		FamilyID:          famID,
 		ClientKind:        clientKind,
 		SessionPubkeySPKI: spkiDER,
-		AccessTokenID:     tokenID,
+		CPAccessTokenID:   pair.CPTokenID,
+		NodeAccessTokenID: pair.NodeTokenID,
+		AccessExpiresAt:   pair.ExpiresAt,
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(refreshSliding).Unix(),
@@ -290,10 +292,11 @@ func (i *IdP) serveCallback(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	// Redirect back to SPA carrying access token + original state [AM8].
+	// Redirect back to the client carrying the explicitly named pair + original state [AM8].
 	dest, _ := url.Parse(row.ClientRedirectURI)
 	out := dest.Query()
-	out.Set("access_token", accessWire)
+	out.Set("cp_access_token", pair.CPWire)
+	out.Set("node_access_token", pair.NodeWire)
 	if row.ClientState != "" {
 		out.Set("state", row.ClientState)
 	}
@@ -350,7 +353,7 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 
 	now := i.now()
 	rawToken := cookie.Value
-	accessWire, newRaw, err := i.handleRefresh(r.Context(), rawToken, pop, now)
+	cpAccessWire, nodeAccessWire, newRaw, err := i.handleRefresh(r.Context(), rawToken, pop, now)
 	if errors.Is(err, ErrFamilyRevoked) {
 		// Expire all three path-scoped cookies.
 		http.SetCookie(w, &http.Cookie{Name: "refresh_token", Value: "", Path: "/refresh", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
@@ -383,7 +386,7 @@ func (i *IdP) serveRefresh(w http.ResponseWriter, r *http.Request) {
 	newHash := base64.RawURLEncoding.EncodeToString(sha256sum([]byte(newRaw)))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"access_token":%q,"refresh_token_hash":%q}`, accessWire, newHash)
+	fmt.Fprintf(w, `{"cp_access_token":%q,"node_access_token":%q,"refresh_token_hash":%q}`, cpAccessWire, nodeAccessWire, newHash)
 }
 
 // --- helpers ---
@@ -522,10 +525,10 @@ func (i *IdP) enforceCapOrEvict(ctx context.Context, accountID string, now time.
 		return err
 	}
 	return i.store.WithTx(ctx, func(tx store.Store) error {
-		liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest)
+		liveIDs, err := tx.RefreshSessions().RevokeFamily(ctx, oldest, now.Unix())
 		if err != nil {
 			return err
 		}
-		return appendRevocation(ctx, tx, accountID, oldest, liveIDs, now)
+		return appendFamilyRevocation(ctx, tx, accountID, oldest, liveIDs, now)
 	})
 }

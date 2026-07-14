@@ -3,7 +3,6 @@ package authsvc
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,9 +16,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/store"
@@ -28,15 +29,15 @@ import (
 
 // Identity-core named constants (auth-identity design §2/§3).
 const (
-	accessTokenTTL     = 15 * time.Minute     // §3 access token TTL
-	refreshSliding     = 30 * 24 * time.Hour  // §3 sliding refresh window
-	familyMaxAge       = 90 * 24 * time.Hour  // [AM6] absolute family max age
-	replayGrace        = 45 * time.Second     // [AM3] idempotent-replay grace window
-	popSkew            = 90 * time.Second     // [AM5] PoP timestamp tolerance
-	oauthStateTTL      = 10 * time.Minute     // [AM8] authorize->callback state lifetime
-	userCodeTTL        = 15 * time.Minute     // [AM7] device-grant user_code lifetime
-	devicePollInterval = 5 * time.Second      // RFC 8628 minimum poll interval
-	defaultMaxFamilies = 20 // §3 concurrent-family cap per account
+	accessTokenTTL     = 15 * time.Minute    // §3 access token TTL
+	refreshSliding     = 30 * 24 * time.Hour // §3 sliding refresh window
+	familyMaxAge       = 90 * 24 * time.Hour // [AM6] absolute family max age
+	replayGrace        = 45 * time.Second    // [AM3] idempotent-replay grace window
+	popSkew            = 90 * time.Second    // [AM5] PoP timestamp tolerance
+	oauthStateTTL      = 10 * time.Minute    // [AM8] authorize->callback state lifetime
+	userCodeTTL        = 15 * time.Minute    // [AM7] device-grant user_code lifetime
+	devicePollInterval = 5 * time.Second     // RFC 8628 minimum poll interval
+	defaultMaxFamilies = 20                  // §3 concurrent-family cap per account
 )
 
 // refreshPoPDomain prefixes the bytes a client session key signs to authorize a /refresh
@@ -64,18 +65,11 @@ type IdPConfig struct {
 	// VerificationURI is what the device grant tells the user to open (the SPA's confirm page).
 	VerificationURI string
 
-	SigningKey ed25519.PrivateKey // session-token + revocation-feed signing key
-	KeyID      string             // derived via token.KeyID
-	// NextPubKeys are pre-published rotation keys, exposed on /session/pubkey [AM4].
-	NextPubKeys []ed25519.PublicKey
+	Signer     *token.SigningCredential // current certified session-token + revocation-feed signer
+	NextSigner *token.SigningCredential // optional validated one-shot rotation target
 
 	RegistrationEnabled bool // §6 kill switch
 	MaxFamilies         int  // 0 => defaultMaxFamilies
-
-	// CPSecret, if non-empty, requires GET /revocations to carry "Authorization: Bearer <CPSecret>".
-	// Set to a shared secret known only to the CP. Leave empty only in dev/test; the endpoint
-	// leaks account UUIDs and session-revocation timing to any caller otherwise.
-	CPSecret string
 
 	RateLimits RateLimitConfig
 
@@ -85,26 +79,19 @@ type IdPConfig struct {
 // IdP implements the AS identity surface: OAuth code flow, token minting, refresh families,
 // device grants, and the revocation feed.
 type IdP struct {
-	cfg    IdPConfig
-	store  store.Store
-	github GitHubProvider
-	now    func() time.Time
-	keys   token.KeySet // own key first, then next keys
+	cfg     IdPConfig
+	store   store.Store
+	github  GitHubProvider
+	now     func() time.Time
+	signers signerManager
 
 	limits *rateLimiters
 }
 
 // NewIdP validates config and builds the identity core.
 func NewIdP(cfg IdPConfig) (*IdP, error) {
-	if cfg.Store == nil || cfg.GitHub == nil || cfg.SigningKey == nil {
-		return nil, errors.New("authsvc: IdPConfig requires Store, GitHub, SigningKey")
-	}
-	if cfg.KeyID == "" {
-		id, err := token.KeyID(cfg.SigningKey.Public().(ed25519.PublicKey))
-		if err != nil {
-			return nil, err
-		}
-		cfg.KeyID = id
+	if cfg.Store == nil || cfg.GitHub == nil || cfg.Signer == nil {
+		return nil, errors.New("authsvc: IdPConfig requires Store, GitHub, Signer")
 	}
 	if cfg.MaxFamilies <= 0 {
 		cfg.MaxFamilies = defaultMaxFamilies
@@ -112,23 +99,51 @@ func NewIdP(cfg IdPConfig) (*IdP, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	pubs := append([]ed25519.PublicKey{cfg.SigningKey.Public().(ed25519.PublicKey)}, cfg.NextPubKeys...)
-	ks, err := token.NewKeySet(pubs...)
-	if err != nil {
-		return nil, err
-	}
 	return &IdP{
-		cfg:    cfg,
-		store:  cfg.Store,
-		github: cfg.GitHub,
-		now:    cfg.Now,
-		keys:   ks,
-		limits: newRateLimiters(cfg.RateLimits),
+		cfg:     cfg,
+		store:   cfg.Store,
+		github:  cfg.GitHub,
+		now:     cfg.Now,
+		signers: signerManager{current: cfg.Signer, next: cfg.NextSigner},
+		limits:  newRateLimiters(cfg.RateLimits),
 	}, nil
 }
 
-// KeySet is the verification key set the AS currently publishes (own + next) [AM4].
-func (i *IdP) KeySet() token.KeySet { return i.keys }
+type signerManager struct {
+	mu        sync.RWMutex
+	current   *token.SigningCredential
+	next      *token.SigningCredential
+	activated bool
+}
+
+func (m *signerManager) withCurrent(sign func(*token.SigningCredential) (string, error)) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return sign(m.current)
+}
+
+func (m *signerManager) sign(artifactType string, payload []byte) (string, error) {
+	return m.withCurrent(func(signer *token.SigningCredential) (string, error) {
+		return signer.Sign(artifactType, payload)
+	})
+}
+
+// ActivateNextSigner atomically switches all session and revocation issuance to the configured
+// next credential. The transition is one-shot and intentionally has no HTTP exposure.
+func (i *IdP) ActivateNextSigner() error {
+	i.signers.mu.Lock()
+	defer i.signers.mu.Unlock()
+	if i.signers.activated {
+		return errors.New("authsvc: next signer already activated")
+	}
+	if i.signers.next == nil {
+		return errors.New("authsvc: no next signer configured")
+	}
+	i.signers.current = i.signers.next
+	i.signers.next = nil
+	i.signers.activated = true
+	return nil
+}
 
 // GitHubUser is what the provider's GET /user yields. Sub is the immutable numeric id — the
 // subject; Login is display-only [AM9].
@@ -157,9 +172,9 @@ type GitHubProvider interface {
 // githubClient is the real provider over GitHub's web + API base URLs (overridable so the fake
 // plugs in via config).
 type githubClient struct {
-	webURL, apiURL           string
-	clientID, clientSecret   string
-	httpClient               *http.Client
+	webURL, apiURL         string
+	clientID, clientSecret string
+	httpClient             *http.Client
 }
 
 // NewGitHubProvider returns the production GitHub client. webURL hosts /login/oauth/*, apiURL
@@ -296,36 +311,70 @@ func (g *githubClient) FetchUser(ctx context.Context, accessToken string) (GitHu
 
 // --- shared helpers ---
 
-// mintAccess mints a 15-minute aud="cp" access token bound to the session key [MC2]. A1 mints
-// "cp" only; "node"-audience minting is A4's flow.
-func (i *IdP) mintAccess(u store.User, spkiDER []byte, now time.Time) (wire, tokenID string, err error) {
-	tokenID = uuid.NewString()
-	body := &authv1.SessionTokenBody{
-		AccountId:      u.AccountID,
-		Handle:         u.Handle,
-		TokenId:        tokenID,
-		Audience:       "cp",
-		IssuedAt:       now.Unix(),
-		ExpiresAt:      now.Add(accessTokenTTL).Unix(),
-		SessionKeyHash: token.SessionKeyHash(spkiDER),
-		KeyId:          i.cfg.KeyID,
-	}
-	wire, err = token.Mint(body, i.cfg.SigningKey)
-	return wire, tokenID, err
+type accessPair struct {
+	CPWire, NodeWire       string
+	CPTokenID, NodeTokenID string
+	IssuedAt, ExpiresAt    int64
 }
 
-// appendRevocation records a family revocation on the signed feed (logout, theft detection,
-// cap eviction, account disable) [AM10]. Call inside the same tx as the revoke.
-func appendRevocation(ctx context.Context, tx store.Store, accountID, familyID string, tokenIDs []string, now time.Time) error {
-	ids, err := json.Marshal(tokenIDs)
-	if err != nil {
-		return err
+// mintAccessPair mints the inseparable CP/node access pair under one signer read lock.
+func (i *IdP) mintAccessPair(u store.User, familyID string, spkiDER []byte, now time.Time) (accessPair, error) {
+	pair := accessPair{
+		CPTokenID:   uuid.NewString(),
+		NodeTokenID: uuid.NewString(),
+		IssuedAt:    now.Unix(),
+		ExpiresAt:   now.Add(accessTokenTTL).Unix(),
 	}
-	_, err = tx.Revocations().Append(ctx, store.RevocationEvent{
-		AccountID: accountID,
-		FamilyID:  familyID,
-		TokenIDs:  string(ids),
-		RevokedAt: now.Unix(),
+	sessionKeyHash := token.SessionKeyHash(spkiDER)
+	i.signers.mu.RLock()
+	defer i.signers.mu.RUnlock()
+	signer := i.signers.current
+	sign := func(tokenID, audience string) (string, error) {
+		body := &authv1.SessionTokenBody{
+			AccountId:      u.AccountID,
+			Handle:         u.Handle,
+			TokenId:        tokenID,
+			Audience:       audience,
+			IssuedAt:       pair.IssuedAt,
+			ExpiresAt:      pair.ExpiresAt,
+			SessionKeyHash: sessionKeyHash,
+			KeyId:          hex.EncodeToString(signer.KeyID[:]),
+			FamilyId:       familyID,
+		}
+		payload, err := proto.Marshal(body)
+		if err != nil {
+			return "", err
+		}
+		return signer.Sign(token.ArtifactTypeSession, payload)
+	}
+	var err error
+	pair.CPWire, err = sign(pair.CPTokenID, token.AudienceCP)
+	if err != nil {
+		return accessPair{}, err
+	}
+	pair.NodeWire, err = sign(pair.NodeTokenID, token.AudienceNode)
+	if err != nil {
+		return accessPair{}, err
+	}
+	return pair, nil
+}
+
+// appendFamilyRevocation records a family revocation in the same transaction as the refresh
+// mutation. An already-expired family has no access credential left to deny and emits no event.
+func appendFamilyRevocation(ctx context.Context, tx store.Store, accountID, familyID string, tokens []store.RevokedToken, now time.Time) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+	_, err := tx.Revocations().Append(ctx, store.RevocationEvent{
+		AccountID: accountID, FamilyID: familyID, RevokedAt: now.Unix(), RevokedTokens: tokens,
+	})
+	return err
+}
+
+func appendAccountRevocation(ctx context.Context, tx store.Store, accountID string, tokens []store.RevokedToken, now time.Time) error {
+	_, err := tx.Revocations().Append(ctx, store.RevocationEvent{
+		AccountID: accountID, RevokedAt: now.Unix(), RevokedTokens: tokens,
+		RevokeTokensIssuedBefore: now.Unix(),
 	})
 	return err
 }

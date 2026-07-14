@@ -8,12 +8,35 @@ vi.mock("node:child_process", () => ({
 }));
 
 const identity: Identity = { token: "tok-123", owner: "acc-owner-1" };
-const cfg = { cpEndpoint: "https://cp.example", spawnctlBin: "spawnctl", nodeAddr: "http://node.example:9092" };
+const cfg = { cpEndpoint: "https://cp.example", spawnctlBin: "spawnctl" };
 
 describe("buildArgs", () => {
   it("puts -cp/-token as leading root flags for the no-subcommand create form", () => {
     const argv = buildArgs(cfg, identity, "", ["-app-id", "acc/app"]);
     expect(argv).toEqual(["-cp", "https://cp.example", "-token", "tok-123", "-app-id", "acc/app"]);
+  });
+
+  it("uses stored login state and full public trust flags without an explicit token", () => {
+    const oauthCfg = {
+      ...cfg,
+      authArgs: [],
+      configHome: "/run/cli-auth",
+      trust: {
+        rootCAPath: "/run/root.pem",
+        trustDomain: "prod.spawnery.internal",
+        crlStatePath: "/run/crl-state.json",
+        crlIssuerPaths: ["/run/cloud-intermediate.pem"],
+        crlPaths: ["/run/cloud.crl.pem"],
+      },
+    };
+    const argv = buildArgs(oauthCfg, identity, "resume", ["s1"]);
+    expect(argv).not.toContain("-token");
+    expect(argv).toEqual([
+      "resume", "s1", "-cp", "https://cp.example",
+      "--root-ca", "/run/root.pem", "--trust-domain", "prod.spawnery.internal",
+      "--crl-state", "/run/crl-state.json", "--crl-issuer", "/run/cloud-intermediate.pem",
+      "--crl", "/run/cloud.crl.pem",
+    ]);
   });
 
   it("puts -cp/-token AFTER the subcommand name for named subcommands", () => {
@@ -30,14 +53,12 @@ describe("buildArgs", () => {
 });
 
 describe("buildExecArgs", () => {
-  it("targets the node (-addr), not the CP, with -spawn and a -- terminator before the command", () => {
+  it("targets the CP relay with -spawn and a -- terminator before the command", () => {
     const argv = buildExecArgs(cfg, identity, "s1", ["cat", "/workspace/marker.txt"]);
     expect(argv).toEqual([
       "exec",
       "-spawn",
       "s1",
-      "-addr",
-      "http://node.example:9092",
       "-cp",
       "https://cp.example",
       "-token",
@@ -54,6 +75,16 @@ describe("buildExecArgs", () => {
     expect(dashDash).toBeGreaterThan(argv.indexOf("-spawn"));
     expect(dashDash).toBeGreaterThan(argv.indexOf("-token"));
     expect(argv.slice(dashDash + 1)).toEqual(["sh", "-c", "exit 3"]);
+  });
+
+  it("uses stored custody and public trust without a direct node address", () => {
+		const argv = buildExecArgs({ ...cfg, authArgs: [], configHome: "/run/cli-auth", trust: {
+			rootCAPath: "/run/root.pem", trustDomain: "prod.spawnery.internal", crlStatePath: "/run/crl.json",
+			crlIssuerPaths: ["/run/issuer.pem"], crlPaths: ["/run/current.crl"],
+		} }, identity, "s1", ["true"]);
+		expect(argv).not.toContain("-token");
+		expect(argv).not.toContain("-addr");
+		expect(argv).toContain("--root-ca");
   });
 });
 
@@ -77,9 +108,6 @@ describe("CliDriver — failing stubs (product parity gap, never skip)", () => {
 
   it("rename throws naming the parity gap", async () => {
     await expect(driver.rename(ctx, "s1", "new-name")).rejects.toThrow(/spawnctl has no rename/);
-  });
-  it("suspend throws naming the parity gap", async () => {
-    await expect(driver.suspend(ctx, "s1")).rejects.toThrow(/spawnctl has no suspend/);
   });
   it("stop throws naming the parity gap", async () => {
     await expect(driver.stop(ctx, "s1")).rejects.toThrow(/spawnctl has no stop/);
@@ -154,6 +182,30 @@ describe("CliDriver — subprocess-backed verbs (execFile mocked)", () => {
     const driver = new CliDriver(cfg);
     const id = await driver.fork(ctx, "s1", {});
     expect(id).toBe("acc-fork-1");
+  });
+
+  it("suspend invokes the implemented spawnctl subcommand", async () => {
+    const cp = await import("node:child_process");
+    let seenArgs: string[] = [];
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, args: string[], cb: (...a: unknown[]) => void) => {
+      seenArgs = args;
+      cb(null, "", "");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await driver.suspend(ctx, "s1");
+    expect(seenArgs).toEqual(["suspend", "s1", "-cp", cfg.cpEndpoint, "-token", identity.token]);
+  });
+
+  it("listOutput preserves the exact stdout and stderr for tenancy diagnostics", async () => {
+    const cp = await import("node:child_process");
+    const stdout = "SPAWN ID  STATUS  NAME  APP\ns1        ACTIVE  mine  acc/app\n";
+    vi.mocked(cp.execFile).mockImplementation(((_bin: string, _args: string[], cb: (...a: unknown[]) => void) => {
+      cb(null, stdout, "list warning\n");
+    }) as unknown as typeof cp.execFile);
+
+    const driver = new CliDriver(cfg);
+    await expect(driver.listOutput(ctx)).resolves.toEqual({ stdout, stderr: "list warning\n" });
   });
 
   it("waitActive returns once status polls ACTIVE", async () => {

@@ -46,9 +46,12 @@ type catalogCreateParams struct {
 
 // catalogUpdateParams holds the parsed flags for `catalog update`.
 type catalogUpdateParams struct {
-	Name        string
-	Description string
-	Content     []byte
+	Name           string
+	Description    string
+	Content        []byte
+	NameSet        bool
+	DescriptionSet bool
+	ContentSet     bool
 }
 
 // catalogIngestParams holds the parsed flags for `catalog ingest`.
@@ -149,11 +152,34 @@ func runCatalogShow(ctx context.Context, c catalogClient, out io.Writer, catalog
 }
 
 func runCatalogUpdate(ctx context.Context, c catalogClient, out io.Writer, catalogID string, p catalogUpdateParams) error {
+	if !p.NameSet && !p.DescriptionSet && !p.ContentSet {
+		return fmt.Errorf("at least one of --name, --description, or --content-file is required")
+	}
+	name, description, content := p.Name, p.Description, p.Content
+	if !p.NameSet || !p.DescriptionSet || !p.ContentSet {
+		resp, err := c.GetCatalogEntry(ctx, connect.NewRequest(&cpv1.GetCatalogEntryRequest{CatalogId: catalogID}))
+		if err != nil {
+			return fmt.Errorf("get catalog entry before update: %w", err)
+		}
+		entry := resp.Msg.GetEntry()
+		if entry == nil {
+			return fmt.Errorf("get catalog entry before update: empty response")
+		}
+		if !p.NameSet {
+			name = entry.GetName()
+		}
+		if !p.DescriptionSet {
+			description = entry.GetDescription()
+		}
+		if !p.ContentSet {
+			content = entry.GetContent()
+		}
+	}
 	_, err := c.UpdateCatalogEntry(ctx, connect.NewRequest(&cpv1.UpdateCatalogEntryRequest{
 		CatalogId:   catalogID,
-		Name:        p.Name,
-		Description: p.Description,
-		Content:     p.Content,
+		Name:        name,
+		Description: description,
+		Content:     content,
 	}))
 	if err != nil {
 		return fmt.Errorf("update catalog entry: %w", err)
@@ -385,9 +411,12 @@ func catalogUpdateCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			p := catalogUpdateParams{
-				Name:        c.String("name"),
-				Description: c.String("description"),
-				Content:     content,
+				Name:           c.String("name"),
+				Description:    c.String("description"),
+				Content:        content,
+				NameSet:        c.IsSet("name"),
+				DescriptionSet: c.IsSet("description"),
+				ContentSet:     c.IsSet("content-file"),
 			}
 			if err := runCatalogUpdate(ctx, client, c.Writer, c.Args().Get(0), p); err != nil {
 				return cli.Exit(err.Error(), 1)

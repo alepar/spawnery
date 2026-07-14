@@ -13,10 +13,8 @@ import (
 	"spawnery/internal/pki"
 )
 
-const testLinkStatusSecret = "test-cp-rpc-secret"
-
 // newLinkStatusService builds a minimal Service for /internal/github/link-status tests.
-// It wires a real store (NewTestStore) and the cpRPCSecret; no GitHub provider is needed
+// It wires a real store; no GitHub provider is needed
 // because the handler only reads link metadata, never touches token exchange.
 func newLinkStatusService(t *testing.T, st store.Store) *Service {
 	t.Helper()
@@ -30,7 +28,6 @@ func newLinkStatusService(t *testing.T, st store.Store) *Service {
 	}
 	return New(root.Cert, inter,
 		WithGitHubMinting(st, nil), // nil provider — handler reads only, never mints
-		WithCPRPCSecret(testLinkStatusSecret),
 	)
 }
 
@@ -57,13 +54,10 @@ func seedActiveLink(t *testing.T, st store.Store, accountID string) {
 	}
 }
 
-func postLinkStatus(s *Service, secret, accountID string) *httptest.ResponseRecorder {
+func postLinkStatus(s *Service, accountID string) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(linkStatusRequest{AccountID: accountID})
 	req := httptest.NewRequest(http.MethodPost, "/internal/github/link-status", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if secret != "" {
-		req.Header.Set("X-Spawnery-AS-Secret", secret)
-	}
 	rec := httptest.NewRecorder()
 	s.serveGitHubLinkStatus(rec, req)
 	return rec
@@ -84,7 +78,7 @@ func TestGitHubLinkStatusActive(t *testing.T) {
 	seedActiveLink(t, st, "alice")
 	s := newLinkStatusService(t, st)
 
-	rec := postLinkStatus(s, testLinkStatusSecret, "alice")
+	rec := postLinkStatus(s, "alice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -102,7 +96,7 @@ func TestGitHubLinkStatusRelinkRequired(t *testing.T) {
 	}
 	s := newLinkStatusService(t, st)
 
-	rec := postLinkStatus(s, testLinkStatusSecret, "bob")
+	rec := postLinkStatus(s, "bob")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -116,61 +110,11 @@ func TestGitHubLinkStatusNone(t *testing.T) {
 	st := store.NewTestStore(t)
 	s := newLinkStatusService(t, st)
 
-	rec := postLinkStatus(s, testLinkStatusSecret, "charlie")
+	rec := postLinkStatus(s, "charlie")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if got := decodeLinkStatusResp(t, rec); got != "none" {
 		t.Fatalf("want status=none, got %q", got)
-	}
-}
-
-// TestGitHubLinkStatusBadSecret: wrong secret → 401.
-func TestGitHubLinkStatusBadSecret(t *testing.T) {
-	st := store.NewTestStore(t)
-	s := newLinkStatusService(t, st)
-
-	rec := postLinkStatus(s, "wrong-secret", "alice")
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("want 401, got %d", rec.Code)
-	}
-}
-
-// TestGitHubLinkStatusMissingSecret: no secret header → 401.
-func TestGitHubLinkStatusMissingSecret(t *testing.T) {
-	st := store.NewTestStore(t)
-	s := newLinkStatusService(t, st)
-
-	rec := postLinkStatus(s, "", "alice")
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("want 401, got %d", rec.Code)
-	}
-}
-
-// TestGitHubLinkStatusRouteRegistered: the /internal/github/link-status route is registered
-// in the mux when cpRPCSecret is configured, and absent when it is not.
-func TestGitHubLinkStatusRouteRegistered(t *testing.T) {
-	st := store.NewTestStore(t)
-	seedActiveLink(t, st, "alice")
-
-	// With secret: route present.
-	sWith := newLinkStatusService(t, st)
-	body, _ := json.Marshal(linkStatusRequest{AccountID: "alice"})
-	req := httptest.NewRequest(http.MethodPost, "/internal/github/link-status", bytes.NewReader(body))
-	req.Header.Set("X-Spawnery-AS-Secret", testLinkStatusSecret)
-	rec := httptest.NewRecorder()
-	sWith.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("with secret: want 200, got %d", rec.Code)
-	}
-
-	// Without secret: route absent (404).
-	root, _ := pki.NewRootCA("R")
-	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
-	sWithout := New(root.Cert, inter, WithGitHubMinting(st, nil))
-	rec2 := httptest.NewRecorder()
-	sWithout.Handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/internal/github/link-status", bytes.NewReader(body)))
-	if rec2.Code != http.StatusNotFound {
-		t.Fatalf("without secret: want 404, got %d", rec2.Code)
 	}
 }

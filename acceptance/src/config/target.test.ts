@@ -64,8 +64,22 @@ describe("loadTargetConfig", () => {
   });
 
   it("accepts oauth-pop as a valid ACC_AUTH_MODE", () => {
-    const env = { ...baseEnv, ACC_AUTH_MODE: "oauth-pop" };
+    const env = {
+      ...baseEnv,
+      ACC_AUTH_MODE: "oauth-pop",
+      ACC_ROOT_CA_PEM: "/run/root.pem",
+      ACC_TRUST_DOMAIN: "prod.spawnery.internal",
+      ACC_CLOUD_ACCOUNT_ID: "spawnery-system",
+      ACC_CRL_STATE: "/run/crl-state.json",
+      ACC_CRL_ISSUERS: "/run/cloud-intermediate.pem",
+      ACC_CRLS: "/run/cloud.crl.pem",
+    };
     expect(loadTargetConfig(env as unknown as NodeJS.ProcessEnv).authMode).toBe("oauth-pop");
+  });
+
+  it("requires every public trust input in oauth-pop mode", () => {
+    const env = { ...baseEnv, ACC_AUTH_MODE: "oauth-pop" };
+    expect(() => loadTargetConfig(env as unknown as NodeJS.ProcessEnv)).toThrow(/ACC_ROOT_CA_PEM/);
   });
 
   it("defaults asOrigin to webOrigin (same-origin, mirrors the SPA's dev-proxy default)", () => {
@@ -77,17 +91,6 @@ describe("loadTargetConfig", () => {
     const env = { ...baseEnv, ACC_AS_ORIGIN: "https://as.blacky.dayton:8090" };
     const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
     expect(cfg.asOrigin).toBe("https://as.blacky.dayton:8090");
-  });
-
-  it("defaults nodeAddr to the co-located node terminal endpoint", () => {
-    const cfg = loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv);
-    expect(cfg.nodeAddr).toBe("http://127.0.0.1:9092");
-  });
-
-  it("overrides nodeAddr from ACC_NODE_ADDR", () => {
-    const env = { ...baseEnv, ACC_NODE_ADDR: "https://node.example:9092" };
-    const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
-    expect(cfg.nodeAddr).toBe("https://node.example:9092");
   });
 
   it("leaves seedSkillAppId undefined when ACC_SEED_SKILL_APP_ID is unset (no safe default)", () => {
@@ -112,5 +115,27 @@ describe("loadTargetConfig", () => {
     const cfg = loadTargetConfig(env as unknown as NodeJS.ProcessEnv);
     expect(cfg.agentModel).toBe("cheap/model");
     expect(cfg.agentAppId).toBe("acc/agent-app");
+  });
+
+  it("parses an explicit @agent inference capability", () => {
+    expect(loadTargetConfig({
+      ...baseEnv,
+      ACC_AGENT_INFERENCE_AVAILABLE: "1",
+    } as unknown as NodeJS.ProcessEnv).agentInferenceAvailable).toBe(true);
+    expect(loadTargetConfig({
+      ...baseEnv,
+      ACC_AGENT_INFERENCE_AVAILABLE: "0",
+    } as unknown as NodeJS.ProcessEnv).agentInferenceAvailable).toBe(false);
+  });
+
+  it("leaves @agent inference capability undefined when the target did not declare it", () => {
+    expect(loadTargetConfig(baseEnv as unknown as NodeJS.ProcessEnv).agentInferenceAvailable).toBeUndefined();
+  });
+
+  it("rejects an invalid @agent inference capability", () => {
+    expect(() => loadTargetConfig({
+      ...baseEnv,
+      ACC_AGENT_INFERENCE_AVAILABLE: "maybe",
+    } as unknown as NodeJS.ProcessEnv)).toThrow(/ACC_AGENT_INFERENCE_AVAILABLE/);
   });
 });

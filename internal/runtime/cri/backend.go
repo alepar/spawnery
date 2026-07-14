@@ -358,7 +358,9 @@ func (b *CRIPodBackend) StartAgent(ctx context.Context, h *runtime.PodHandle, sp
 	agentID, err := b.createAndStart(ctx, h.SandboxID, sandboxCfg, &runtimeapi.ContainerConfig{
 		Metadata: &runtimeapi.ContainerMetadata{Name: "agent"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.Image},
-		Command:  spec.Cmd,
+		// CRI Args maps to the image CMD while preserving its ENTRYPOINT. Command would replace the
+		// dispatcher entrypoint and attempt to execute the runnable ID as a binary.
+		Args: spec.Cmd,
 		Envs: toKeyValues(append([]string{
 			"ACP_ADAPTER=1",
 			fmt.Sprintf("ACP_LISTEN=tcp://0.0.0.0:%d", acpPort),

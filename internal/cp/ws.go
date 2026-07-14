@@ -47,13 +47,13 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			return
 		}
 		var bind struct {
-			SpawnID      string `json:"spawnId"`
-			Token        string `json:"token"`
-			ClientID     string `json:"clientId"`
-			SessionID    string `json:"sessionId"` // empty => session #0
-			Cursor       int64  `json:"cursor"`
-			// signedIntent (A4): raw proto.Marshal(SignedIntent) bytes, base64-encoded [AC1][AM12].
-			// If present the CP mints a dev aud=node token and threads the envelope into SessionOpen.
+			SpawnID         string `json:"spawnId"`
+			Token           string `json:"token"`
+			NodeAccessToken string `json:"nodeAccessToken"`
+			ClientID        string `json:"clientId"`
+			SessionID       string `json:"sessionId"` // empty => session #0
+			Cursor          int64  `json:"cursor"`
+			// signedIntent: raw proto.Marshal(SignedIntent) bytes, base64-encoded.
 			SignedIntent []byte `json:"signedIntent,omitempty"`
 		}
 		if err := json.Unmarshal(first, &bind); err != nil {
@@ -74,6 +74,12 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			conn.Close(websocket.StatusPolicyViolation, "unknown or foreign spawn")
 			return
 		}
+		container, live, err := s.st.Spawns().LiveContainer(ctx, bind.SpawnID)
+		if err != nil || !live {
+			conn.Close(websocket.StatusPolicyViolation, "spawn has no live episode")
+			return
+		}
+		generation := uint64(container.Generation)
 
 		if bind.ClientID == "" {
 			conn.Close(websocket.StatusUnsupportedData, "clientId required")
@@ -83,6 +89,20 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 		if sessionID == "" {
 			sessionID = "0" // default to session #0 (backward compat with single-session clients)
 		}
+		if bind.NodeAccessToken == "" {
+			conn.Close(websocket.StatusPolicyViolation, "nodeAccessToken required")
+			return
+		}
+		if len(bind.SignedIntent) == 0 {
+			conn.Close(websocket.StatusPolicyViolation, "signedIntent required")
+			return
+		}
+		var signedIntent authv1.SignedIntent
+		if err := proto.Unmarshal(bind.SignedIntent, &signedIntent); err != nil {
+			conn.Close(websocket.StatusUnsupportedData, "malformed signedIntent")
+			return
+		}
+		sessionEnv := &authv1.AuthEnvelope{AccessToken: bind.NodeAccessToken, Intent: &signedIntent}
 
 		// Per-session context for revocation cancellation; enriched with correlation IDs so all
 		// logging within the session includes spawn_id and session_id automatically.
@@ -107,18 +127,8 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 			}
 		}()
 
-		// A4: build session-open AuthEnvelope from the client-supplied SignedIntent bytes [AC1][AM12].
-		var sessionEnv *authv1.AuthEnvelope
-		if len(bind.SignedIntent) > 0 {
-			var si authv1.SignedIntent
-			if merr := proto.Unmarshal(bind.SignedIntent, &si); merr == nil {
-				sessionEnv = s.mintSessionEnv(owner, &authv1.AuthEnvelope{Intent: &si})
-			} else {
-				slogctx.FromContext(sessCtx).Warn("ws: bind frame signedIntent unmarshal failed", "err", merr)
-			}
-		}
 		cs := wsClient{conn: conn, ctx: sessCtx}
-		done, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor)
+		done, lease, err := s.rt.AttachClient(bind.SpawnID, sessionID, bind.ClientID, owner, sessionEnv, cs, bind.Cursor, generation)
 		if err != nil {
 			slogctx.FromContext(sessCtx).Error("ws: session attach failed", "err", err)
 			conn.Close(websocket.StatusInternalError, "attach failed")
@@ -126,7 +136,7 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 		}
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		defer func() {
-			s.rt.DetachClient(bind.SpawnID, sessionID, bind.ClientID)
+			s.rt.DetachClient(bind.SpawnID, sessionID, bind.ClientID, lease)
 			_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: owner, SpawnID: bind.SpawnID, Timestamp: time.Now().UTC()})
 		}()
 
@@ -158,12 +168,39 @@ func (s *Server) HandleWS(v *auth.Verifier, allow weborigin.Allowlist) http.Hand
 				// TEXT frames are control (reauth); BINARY frames are ACP data.
 				if msgType == websocket.MessageText {
 					var ctrl struct {
-						Type  string `json:"type"`
-						Token string `json:"token"`
+						Type            string `json:"type"`
+						Token           string `json:"token"`
+						NodeAccessToken string `json:"nodeAccessToken"`
+						SignedIntent    []byte `json:"signedIntent"`
 					}
-					if jErr := json.Unmarshal(b, &ctrl); jErr != nil || ctrl.Type != "reauth" {
-						// Unknown control — ignore.
+					if jErr := json.Unmarshal(b, &ctrl); jErr != nil {
+						conn.Close(websocket.StatusUnsupportedData, "malformed control")
+						recvErr <- struct{}{}
+						return
+					}
+					if ctrl.Type == "nodeReauth" {
+						var signed authv1.SignedIntent
+						if ctrl.NodeAccessToken == "" || len(ctrl.SignedIntent) == 0 || proto.Unmarshal(ctrl.SignedIntent, &signed) != nil {
+							conn.Close(websocket.StatusPolicyViolation, "malformed node reauth")
+							recvErr <- struct{}{}
+							return
+						}
+						if err := s.rt.ReauthenticateClient(bind.SpawnID, sessionID, bind.ClientID, lease, generation, owner, &authv1.AuthEnvelope{AccessToken: ctrl.NodeAccessToken, Intent: &signed}); err != nil {
+							conn.Close(websocket.StatusPolicyViolation, "node reauth failed")
+							recvErr <- struct{}{}
+							return
+						}
 						continue
+					}
+					if ctrl.Type != "reauth" {
+						conn.Close(websocket.StatusUnsupportedData, "unknown control")
+						recvErr <- struct{}{}
+						return
+					}
+					if ctrl.Token == "" {
+						conn.Close(websocket.StatusPolicyViolation, "reauth token required")
+						recvErr <- struct{}{}
+						return
 					}
 					if s.verify != nil {
 						newID, verr := s.verify(ctrl.Token)

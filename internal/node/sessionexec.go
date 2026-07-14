@@ -86,3 +86,7 @@ func (s *realSessionExec) ReapExtraSessions(ctx context.Context, spawnID string)
 	}
 	return firstErr
 }
+
+func (s *realSessionExec) ExecStream(ctx context.Context, spawnID string, argv []string, stdout, stderr io.Writer) (int, error) {
+	return s.mgr.ExecStream(ctx, spawnID, argv, stdout, stderr)
+}

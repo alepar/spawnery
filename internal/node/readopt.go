@@ -209,6 +209,7 @@ func (a *attacher) adoptPod(ctx context.Context, mp runtime.ManagedPod, ad *node
 	}
 	sp, err := a.mgr.Adopt(ctx, mp, spawnlet.AdoptSpec{
 		AppRef:                    st.GetAppRef(),
+		OwnerID:                   st.GetAssertedOwner(),
 		Model:                     st.GetModel(),
 		Name:                      st.GetName(),
 		AppID:                     st.GetAppId(),

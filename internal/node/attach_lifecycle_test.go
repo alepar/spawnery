@@ -154,7 +154,7 @@ func newAttacher(mgr *spawnlet.Manager, fs cpStream) *attacher {
 	return &attacher{
 		cfg: Config{MaxSpawns: 2}, mgr: mgr, stream: fs, ctrlHTTP: stubDoerOK(),
 		pumps: map[sessionKey]*Pump{}, tmuxRelays: map[sessionKey]*tmuxRelay{}, sessions: map[string]*sessionRegistry{},
-		secretReplay: newSecretDeliveryReplay(),
+		secretReplay: newSecretDeliveryReplay(), auths: newSessionAuthRegistry(),
 		// Default to "always alive": most tests don't exercise the agent-gone liveness probe and
 		// use fake pod backends with no real container behind them, so leaving this nil would fall
 		// back to mgr.AgentRunning's real docker/crictl exec — non-hermetic (the exec's outcome
@@ -241,6 +241,8 @@ func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
 	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ACTIVE {
 		t.Fatalf("final phase before death = %v, want ACTIVE", got)
 	}
+	authKey := sessionAuthKey{spawnID: "sp1", sessionID: "0", clientID: "client"}
+	a.auths.register(authKey, sessionAuthRecord{expiresAt: time.Now().Add(time.Hour)}, func(string) {})
 	// A prompt makes the scripted goose answer one turn then exit -> exitFn must ERROR + reclaim.
 	a.fromClient("sp1", SessionZeroID, "ghost", encodeFrame(Frame{Kind: "prompt", Text: "go"}))
 
@@ -254,6 +256,9 @@ func TestStartSpawnAgentDeathSelfCleans(t *testing.T) {
 	}
 	if be.LastStopHandle() == nil {
 		t.Fatal("exitFn must mgr.Stop the dead spawn to reclaim the container")
+	}
+	if a.auths.contains(authKey) {
+		t.Fatal("pump exit retained attachment authorization")
 	}
 }
 

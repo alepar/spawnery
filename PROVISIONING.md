@@ -229,12 +229,43 @@ with the auth service and stores its identity under `NODE_ID_DIR` (`/var/lib/spa
 
 | Side | Key env |
 |------|---------|
-| CP | `NODE_AUTH_MODE=enforced`, `CP_NODE_LISTEN`, `CP_NODE_ROOT_CA`, `CP_NODE_TLS_CERT`, `CP_NODE_TLS_KEY`, `CP_AS_SESSION_PUBKEYS`, `CP_AS_REVOCATION_URL` |
-| Node | `NODE_AUTH_MODE=enforced`, `CP_NODE_ADDR` (`https://…:8081`), `NODE_ID_DIR`, `NODE_ROOT_CA`, `NODE_AS_PUBKEYS`, `AS_URL` + `ENROLL_TOKEN` (first-enrollment) |
+| CP | `NODE_AUTH_MODE=enforced`, `CP_INTERNAL_LISTEN`, `CP_INTERNAL_ROOT_CA`, `CP_INTERNAL_TLS_CERT`, `CP_INTERNAL_TLS_CHAIN`, `CP_INTERNAL_TLS_KEY`, `CP_AUTH_ROOT_CA`, `CP_AUTH_SIGNER_REVOCATION_STATE`, `CP_AS_REVOCATION_URL` |
+| Node | `NODE_AUTH_MODE=enforced`, `CP_NODE_ADDR` (`https://…:8081`), `CP_SERVER_NAME`, `NODE_ID_DIR`, `NODE_ROOT_CA`, `NODE_AUTH_ENVIRONMENT`, `NODE_SIGNER_REVOCATION_STATE`, `AS_URL` + `ENROLL_TOKEN` (first enrollment) |
 
 Dev scaffolding: `just gen-dev-ca`, then `just cp-enforced` / `just authsvc-enforced` /
 `just node-enforced` (or `just dev-enforced` for the lot). See the Justfile recipes for the exact
 wiring. Auth design: [`docs/superpowers/specs/2026-06-11-auth-identity-design.md`](docs/superpowers/specs/2026-06-11-auth-identity-design.md).
+
+### Auth artifact signer rotation
+
+The environment root and auth-signing intermediate are offline issuers. They never belong in an AS,
+CP, or node runtime bundle. For a routine rotation:
+
+1. With the offline auth-signing intermediate, issue a distinct next signer key and purpose-constrained,
+   leaf-first chain. Validate the **private-key/leaf match** before transfer; the SPKI hashes must be
+   identical:
+   ```sh
+   openssl pkey -in auth-signer-next-key.pem -pubout -outform DER | sha256sum
+   openssl x509 -in auth-signer-next-chain.pem -pubkey -noout \
+     | openssl pkey -pubin -outform DER | sha256sum
+   ```
+2. Deploy it through the next-key and next-chain settings while current remains active. Maintain
+   overlap for the **maximum artifact lifetime plus the verifier's allowed clock skew**, measured
+   from the final issuance by current.
+3. Switch issuance by promoting next to current, restart authsvc, provision a distinct new next, and
+   confirm CP and node verifiers accept new artifacts while old artifacts drain.
+4. After verifying the switch, **delete the retired private key** and all ceremony working copies.
+   **Retain the retired public chain** in the audit/distribution archive until every old artifact has
+   expired plus allowed clock skew. Routine retirement does not publish a revocation statement.
+5. Record the new current/next credentials and public-chain retention deadline in the offline custody
+   inventory.
+
+For emergency compromise rotation, promote the pre-certified next signer, then use the offline issuer
+to publish a root-authorized **higher-generation revocation statement** for the compromised signer.
+Publish it atomically to all CP and node verifiers and require **generation convergence** at the new
+generation; lagging verifiers fail closed. Confirm old artifacts return `TOKEN_INVALID`, revoke all
+refresh families, issue a distinct replacement next with the offline auth-signing intermediate,
+delete every compromised private-key copy, and update the custody inventory and incident record.
 
 ---
 
@@ -279,7 +310,7 @@ regardless.
 | `JOURNAL_BACKEND` | _(off)_ | `s3` \| `filesystem`; see [journal](#storage-journal-transient-tier-optional). |
 | `JOURNAL_*` | — | S3 endpoint/bucket/keys/region/prefix/TLS + `JOURNAL_ROOT`/`JOURNAL_NODE_KEY`. |
 | `NODE_AUTH_MODE` | `insecure` | `enforced` enables node↔CP mTLS. |
-| `CP_NODE_ADDR` / `NODE_ID_DIR` / `NODE_ROOT_CA` / `NODE_AS_PUBKEYS` / `AS_URL` / `ENROLL_TOKEN` | — | Enforced-mode node identity. |
+| `CP_NODE_ADDR` / `CP_SERVER_NAME` / `NODE_ID_DIR` / `NODE_ROOT_CA` / `NODE_AUTH_ENVIRONMENT` / `NODE_SIGNER_REVOCATION_STATE` / `AS_URL` / `ENROLL_TOKEN` | — | Enforced-mode node identity and artifact trust. |
 
 ### Control plane (`spawnery_cp`)
 
@@ -291,8 +322,8 @@ regardless.
 | `CP_ALLOWED_ORIGINS` | — | CORS allowlist for the SPA. |
 | `CP_TELEMETRY` | `telemetry/events.jsonl` | Event log path. |
 | `NODE_AUTH_MODE` | `insecure` | `enforced` turns on the node mTLS listener. |
-| `CP_NODE_LISTEN` / `CP_NODE_ROOT_CA` / `CP_NODE_TLS_CERT` / `CP_NODE_TLS_KEY` | — | Node-facing TLS (enforced). |
-| `CP_AS_SESSION_PUBKEYS` / `CP_AS_REVOCATION_URL` / `CP_AS_CP_SECRET` | — | AS token verification + revocation feed. |
+| `CP_INTERNAL_LISTEN` / `CP_INTERNAL_ROOT_CA` / `CP_INTERNAL_TLS_CERT` / `CP_INTERNAL_TLS_CHAIN` / `CP_INTERNAL_TLS_KEY` | — | Internal service and node TLS (enforced). |
+| `CP_AUTH_ENVIRONMENT` / `CP_AUTH_ROOT_CA` / `CP_AUTH_SIGNER_REVOCATION_STATE` / `CP_AS_REVOCATION_URL` | — | Certified AS artifact verification + revocation feed. |
 
 > Store driver (sqlite/postgres) config is read via `storeConfigFromEnv` — see
 > [`docs/superpowers/specs/2026-06-01-cp-store-driver-sp-ylw.md`](docs/superpowers/specs/2026-06-01-cp-store-driver-sp-ylw.md).

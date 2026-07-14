@@ -21,8 +21,9 @@ import { ConnectError, Code } from "@spawnery/client";
 import { test, expect } from "../../src/harness/test";
 import { dummyAtRestEnvelope } from "../../src/drivers/customization";
 
-test("secrets: create -> list -> get -> delete (oracle-only)", { tag: "@mutating" }, async ({ identity, api, ns }) => {
+test("secrets: create -> list -> get -> delete (oracle-only)", { tag: "@mutating" }, async ({ identity, auth, api, ns }) => {
   const secretId = ns("sec-crud");
+  const accountId = await auth.accountId(identity);
   let created = false;
 
   try {
@@ -33,7 +34,7 @@ test("secrets: create -> list -> get -> delete (oracle-only)", { tag: "@mutating
       targetContainer: "ARTIFACT_TARGET_AGENT",
       envVarName: `ACC_SECRET_${secretId.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`,
       devicesetEpoch: 0,
-      envelope: dummyAtRestEnvelope(identity.owner, secretId),
+      envelope: dummyAtRestEnvelope(accountId, secretId),
     };
 
     const detail = await api.createSecret(write);

@@ -73,7 +73,9 @@ func TestDeviceGrantHappy(t *testing.T) {
 	pollResp, _ := client.Post(srv.URL+"/device/token",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
-	var pollOut struct{ Error string `json:"error"` }
+	var pollOut struct {
+		Error string `json:"error"`
+	}
 	body, _ = io.ReadAll(pollResp.Body)
 	_ = json.Unmarshal(body, &pollOut)
 	if pollOut.Error != "authorization_pending" {
@@ -91,7 +93,9 @@ func TestDeviceGrantHappy(t *testing.T) {
 		FamilyID:          "browser-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: browser_spki,
-		AccessTokenID:     "browser-tok",
+		CPAccessTokenID:   "browser-cp",
+		NodeAccessTokenID: "browser-node",
+		AccessExpiresAt:   now.Add(accessTokenTTL).Unix(),
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -122,15 +126,17 @@ func TestDeviceGrantHappy(t *testing.T) {
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
 	var tokenOut struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		Error        string `json:"error"`
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
+		AccessToken     string `json:"access_token"`
+		RefreshToken    string `json:"refresh_token"`
+		Error           string `json:"error"`
 	}
 	body, _ = io.ReadAll(pollResp2.Body)
 	if err := json.Unmarshal(body, &tokenOut); err != nil {
 		t.Fatalf("parse token response: %v: %s", err, body)
 	}
-	if tokenOut.AccessToken == "" || tokenOut.RefreshToken == "" {
+	if tokenOut.CPAccessToken == "" || tokenOut.NodeAccessToken == "" || tokenOut.RefreshToken == "" || tokenOut.AccessToken != "" {
 		t.Fatalf("missing tokens: %s", body)
 	}
 
@@ -146,6 +152,53 @@ func TestDeviceGrantHappy(t *testing.T) {
 	_ = idp
 }
 
+func TestDeviceTokenSessionInsertFailureRollsBackRedeem(t *testing.T) {
+	fake := githubfake.New()
+	defer fake.Close()
+	now := time.Unix(1770000000, 0)
+	faults := &storeFaults{failInsert: true}
+	srv, _, st := testAS(t, fake, now, func(cfg *IdPConfig) {
+		cfg.Store = &failingStore{Store: cfg.Store, faults: faults}
+	})
+	seedUser(t, st, "acct-device-atomic", 73001, now)
+	_, spkiDER := newTestP256(t)
+	rawCode := "atomic-device-code"
+	if err := st.DeviceGrants().Create(context.Background(), store.DeviceGrant{
+		DeviceCodeHash: sha256Hex(rawCode), UserCode: "ATOM-IC01", SessionPubkeySPKI: spkiDER,
+		ClientKind: store.ClientCLI, Status: store.GrantApproved, AccountID: "acct-device-atomic",
+		CreatedAt: now.Unix(), ExpiresAt: now.Add(userCodeTTL).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	poll := func() (*http.Response, []byte) {
+		resp, err := http.PostForm(srv.URL+"/device/token", url.Values{"device_code": {rawCode}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, body
+	}
+	resp, body := poll()
+	if resp.StatusCode != http.StatusInternalServerError || strings.Contains(string(body), "cp_access_token") || strings.Contains(string(body), "node_access_token") {
+		t.Fatalf("failed device redemption status/body = %d %s", resp.StatusCode, body)
+	}
+	grant, err := st.DeviceGrants().Get(context.Background(), sha256Hex(rawCode))
+	if err != nil || grant.Status != store.GrantApproved {
+		t.Fatalf("grant after failed insert = %+v, err=%v", grant, err)
+	}
+	if families, err := st.RefreshSessions().CountFamilies(context.Background(), grant.AccountID); err != nil || families != 0 {
+		t.Fatalf("families after failed device redemption = %d, err=%v", families, err)
+	}
+
+	faults.failInsert = false
+	resp, body = poll()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "cp_access_token") || !strings.Contains(string(body), "node_access_token") {
+		t.Fatalf("device retry status/body = %d %s", resp.StatusCode, body)
+	}
+}
+
 // TestDeviceGrantPollBeforeApproval: already tested in happy path; explicit version here.
 func TestDeviceGrantPollBeforeApproval(t *testing.T) {
 	fake := githubfake.New()
@@ -158,14 +211,18 @@ func TestDeviceGrantPollBeforeApproval(t *testing.T) {
 	authResp, _ := client.Post(srv.URL+"/device/authorize",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"session_pubkey": {spkiB64(spkiDER)}}.Encode()))
-	var authOut struct{ DeviceCode string `json:"device_code"` }
+	var authOut struct {
+		DeviceCode string `json:"device_code"`
+	}
 	body, _ := io.ReadAll(authResp.Body)
 	_ = json.Unmarshal(body, &authOut)
 
 	pollResp, _ := client.Post(srv.URL+"/device/token",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
-	var out struct{ Error string `json:"error"` }
+	var out struct {
+		Error string `json:"error"`
+	}
 	body, _ = io.ReadAll(pollResp.Body)
 	_ = json.Unmarshal(body, &out)
 	if out.Error != "authorization_pending" {
@@ -185,7 +242,9 @@ func TestDeviceGrantExpired(t *testing.T) {
 	authResp, _ := client.Post(srv.URL+"/device/authorize",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"session_pubkey": {spkiB64(spkiDER)}}.Encode()))
-	var authOut struct{ DeviceCode string `json:"device_code"` }
+	var authOut struct {
+		DeviceCode string `json:"device_code"`
+	}
 	body, _ := io.ReadAll(authResp.Body)
 	_ = json.Unmarshal(body, &authOut)
 
@@ -195,7 +254,9 @@ func TestDeviceGrantExpired(t *testing.T) {
 	pollResp, _ := client.Post(srv.URL+"/device/token",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(url.Values{"device_code": {authOut.DeviceCode}}.Encode()))
-	var out struct{ Error string `json:"error"` }
+	var out struct {
+		Error string `json:"error"`
+	}
 	body, _ = io.ReadAll(pollResp.Body)
 	_ = json.Unmarshal(body, &out)
 	if out.Error != "expired_token" {
@@ -239,7 +300,9 @@ func TestDeviceGrantPerCodeLockout(t *testing.T) {
 		FamilyID:          "lockout-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: browser_spki,
-		AccessTokenID:     "lockout-tok",
+		CPAccessTokenID:   "lockout-cp",
+		NodeAccessTokenID: "lockout-node",
+		AccessExpiresAt:   now.Add(accessTokenTTL).Unix(),
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),
@@ -264,7 +327,9 @@ func TestDeviceGrantPerCodeLockout(t *testing.T) {
 	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, _ := verifyClient.Do(verifyReq)
 	body, _ = io.ReadAll(resp.Body)
-	var out struct{ Error string `json:"error"` }
+	var out struct {
+		Error string `json:"error"`
+	}
 	_ = json.Unmarshal(body, &out)
 	if out.Error != "access_denied" {
 		t.Fatalf("per-code lockout: want access_denied after %d attempts, got %q (body: %s)",
@@ -291,7 +356,9 @@ func TestDeviceGrantUserCodeRateLimit(t *testing.T) {
 		FamilyID:          "rl-fam",
 		ClientKind:        store.ClientWeb,
 		SessionPubkeySPKI: browser_spki,
-		AccessTokenID:     "rl-tok",
+		CPAccessTokenID:   "rl-cp",
+		NodeAccessTokenID: "rl-node",
+		AccessExpiresAt:   now.Add(accessTokenTTL).Unix(),
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),

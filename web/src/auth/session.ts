@@ -14,7 +14,7 @@ import { AS_ORIGIN, asHttpUrl } from "@/config/endpoints";
 import { parseCallback, browserHistory, sessionStateStorage } from "./oauth";
 import { loadSessionKey, exportSpkiDer, sessionKeyHash, clearSessionKey } from "./keypair";
 import { refreshAccessToken, computeRefreshDelay } from "./refresh";
-import { parseAccessToken } from "./token";
+import { validateAccessTokenPair, type AccessTokenPair } from "./token";
 import { IDBKeyStore, type KeyStore } from "./keystore";
 import { mapAsError, type AsErrorCode } from "./errors";
 import { getFlowMarker } from "@/github/flow";
@@ -51,6 +51,7 @@ function _clearRth(): void {
 
 export type AuthStatus =
   | "loading"
+  | "tearing-down"
   | "login-required"
   | "authed"
   | "cnf-mismatch"
@@ -62,8 +63,10 @@ export interface AccountInfo {
 }
 
 export interface SessionState {
+  authEpoch: number;
   status: AuthStatus;
-  accessToken: string;
+  cpAccessToken: string;
+  nodeAccessToken: string;
   refreshTokenHash: string; // SHA-256 of current refresh token (from AS, for PoP)
   account: AccountInfo | null;
   keyStore: KeyStore;
@@ -71,9 +74,11 @@ export interface SessionState {
   callbackErrorCode: AsErrorCode | null;
 
   // Actions
-  setToken(token: string, refreshTokenHash: string): void;
+  setTokens(pair: AccessTokenPair, refreshTokenHash: string): void;
   setStatus(status: AuthStatus): void;
   getAccessToken(): string;
+  getNodeAccessToken(): string;
+  recoverKeyLoss(): Promise<void>;
   bootstrap(overrideKeyStore?: KeyStore): Promise<void>;
   logout(): Promise<void>;
 }
@@ -94,6 +99,28 @@ export function authEnabled(): boolean {
 // alive past the 15 min TTL without waiting for a reactive RPC 401.
 
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let _teardownPromise: Promise<void> | null = null;
+
+function _teardownSession(store: KeyStore): Promise<void> {
+  if (_teardownPromise) return _teardownPromise;
+  const work = (async () => {
+    await clearSessionKey(store);
+    try {
+      await fetch(asHttpUrl("/logout"), {
+        method: "POST",
+        credentials: "include",
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      // Best-effort family revocation; local custody was already cleared.
+    }
+  })();
+  const shared = work.finally(() => {
+    if (_teardownPromise === shared) _teardownPromise = null;
+  });
+  _teardownPromise = shared;
+  return shared;
+}
 
 function _clearRefreshTimer(): void {
   if (_refreshTimer !== null) {
@@ -112,16 +139,22 @@ function _scheduleProactiveRefresh(expiresAt: bigint): void {
   }, delay);
 }
 
-async function _doProactiveRefresh(): Promise<void> {
+export async function _doProactiveRefresh(): Promise<void> {
   if (!authEnabled()) return;
   const session = useSessionStore.getState();
   if (session.status !== "authed") return;
+  const epoch = session.authEpoch;
+  const store = session.keyStore;
+  const current = () => {
+    const state = useSessionStore.getState();
+    return state.authEpoch === epoch && state.status === "authed" && state.keyStore === store;
+  };
 
   try {
-    const store = session.keyStore;
     const kp = await loadSessionKey(store);
+    if (!current()) return;
     if (!kp) {
-      useSessionStore.getState().setStatus("key-lost");
+      await useSessionStore.getState().recoverKeyLoss();
       return;
     }
     const spki = await exportSpkiDer(kp.publicKey);
@@ -137,14 +170,17 @@ async function _doProactiveRefresh(): Promise<void> {
       localSpkiHash: spkiHash,
       refreshTokenHash: rth,
     });
+    if (!current()) return;
 
     if (result.kind === "ok") {
-      // setToken reschedules the next proactive timer via _scheduleProactiveRefresh.
-      useSessionStore.getState().setToken(result.accessToken, result.refreshTokenHash);
+      useSessionStore.getState().setTokens({
+        cpAccessToken: result.cpAccessToken,
+        nodeAccessToken: result.nodeAccessToken,
+      }, result.refreshTokenHash);
     } else if (result.kind === "cnf-mismatch") {
       useSessionStore.getState().setStatus("cnf-mismatch");
     } else if (result.kind === "revoked" || result.kind === "key-missing") {
-      useSessionStore.getState().setStatus("key-lost");
+      await useSessionStore.getState().recoverKeyLoss();
     }
     // Other errors (network, parse): silently ignore; next RPC 401 triggers reactive refresh.
   } catch {
@@ -153,44 +189,47 @@ async function _doProactiveRefresh(): Promise<void> {
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
+  authEpoch: 0,
   status: "loading",
-  accessToken: "",
+  cpAccessToken: "",
+  nodeAccessToken: "",
   refreshTokenHash: "",
   account: null,
   keyStore: new IDBKeyStore(),
   callbackErrorCode: null,
 
-  setToken(token: string, rth: string) {
+  setTokens(pair: AccessTokenPair, rth: string) {
+    if (get().status === "tearing-down") throw new Error("session teardown is still in progress");
+    const validated = validateAccessTokenPair(pair);
     // Persist the hash before updating zustand so cold-reload bootstrap() can read it [AM2].
     _saveRth(rth);
-    let account: AccountInfo | null = null;
-    let expiresAt: bigint | null = null;
-    try {
-      const decoded = parseAccessToken(token);
-      account = { accountId: decoded.accountId, handle: decoded.handle };
-      expiresAt = decoded.expiresAt;
-    } catch {
-      // Ignore parse errors; account remains null, no proactive timer scheduled.
-    }
-    set({ accessToken: token, refreshTokenHash: rth, account, status: "authed", callbackErrorCode: null });
+    const account = { accountId: validated.cp.accountId, handle: validated.cp.handle };
+    set((state) => ({ ...pair, refreshTokenHash: rth, account, status: "authed", callbackErrorCode: null,
+      authEpoch: state.authEpoch + 1 }));
     // Schedule next proactive refresh so long-lived WS sessions never hit the 15 min expiry.
-    if (expiresAt !== null) _scheduleProactiveRefresh(expiresAt);
+    _scheduleProactiveRefresh(validated.expiresAt);
   },
 
   setStatus(status: AuthStatus) {
-    set({ status });
+    set((state) => ({ status, authEpoch: state.status === status ? state.authEpoch : state.authEpoch + 1 }));
   },
 
   getAccessToken() {
     const s = get();
     if (!authEnabled()) return _loadDevTokenOverride() || DEV_TOKEN;
-    return s.accessToken;
+    return s.cpAccessToken;
+  },
+
+  getNodeAccessToken() {
+    const s = get();
+    if (!authEnabled()) return _loadDevTokenOverride() || DEV_TOKEN;
+    return s.nodeAccessToken;
   },
 
   async bootstrap(overrideKeyStore?: KeyStore) {
     if (!authEnabled()) {
       // Dev mode: bypass auth entirely.
-      set({ status: "authed", accessToken: DEV_TOKEN, refreshTokenHash: "", account: null });
+      set({ status: "authed", cpAccessToken: DEV_TOKEN, nodeAccessToken: DEV_TOKEN, refreshTokenHash: "", account: null });
       return;
     }
 
@@ -203,13 +242,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // wall. A login callback always carries access_token (success) or a login ?error= with no flow
     // marker. When we detect a GitHub return, skip parseCallback and fall through to silent-refresh
     // to restore the Bearer the top-level OAuth navigation wiped.
-    const hasAccessToken = new URLSearchParams(browserHistory.locationSearch()).has("access_token");
+    const hasAccessToken = new URLSearchParams(browserHistory.locationSearch()).has("cp_access_token");
     const githubReturn = getFlowMarker() !== null && !hasAccessToken;
     if (!githubReturn) {
       const cb = parseCallback(sessionStateStorage, browserHistory);
       if (cb.kind === "ok") {
-        // Persist the new token and restore the original pre-login route.
-        get().setToken(cb.accessToken, cb.refreshTokenHash);
+        const kp = await loadSessionKey(store);
+        if (!kp) {
+          await get().recoverKeyLoss();
+          return;
+        }
+        const spkiHash = await sessionKeyHash(await exportSpkiDer(kp.publicKey));
+        const pair = { cpAccessToken: cb.cpAccessToken, nodeAccessToken: cb.nodeAccessToken };
+        try {
+          validateAccessTokenPair(pair, spkiHash);
+          get().setTokens(pair, cb.refreshTokenHash);
+        } catch {
+          await get().recoverKeyLoss();
+          return;
+        }
         if (cb.route) browserHistory.replaceState(cb.route);
         return;
       }
@@ -249,7 +300,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
 
       if (result.kind === "ok") {
-        get().setToken(result.accessToken, result.refreshTokenHash);
+        get().setTokens({
+          cpAccessToken: result.cpAccessToken,
+          nodeAccessToken: result.nodeAccessToken,
+        }, result.refreshTokenHash);
         return;
       }
       if (result.kind === "cnf-mismatch") {
@@ -258,8 +312,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       if (result.kind === "revoked" || result.kind === "key-missing") {
         // Clear the key and force fresh login.
-        await clearSessionKey(store);
-        set({ status: "key-lost" });
+        await get().recoverKeyLoss();
         return;
       }
     } catch {
@@ -272,24 +325,36 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async logout() {
     _clearRefreshTimer();
     const store = get().keyStore;
+    const epoch = get().authEpoch + 1;
+    set({ authEpoch: epoch, status: "tearing-down", cpAccessToken: "", nodeAccessToken: "",
+      refreshTokenHash: "", account: null });
     _clearRth();
-    // Best-effort: revoke the server-side family.
-    try {
-      await fetch(asHttpUrl("/logout"), {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch {
-      // Ignore.
-    }
-    await clearSessionKey(store);
-    set({ status: "login-required", accessToken: "", refreshTokenHash: "", account: null });
+    await _teardownSession(store);
+    if (get().authEpoch !== epoch) return;
+    set({ status: "login-required" });
+  },
+
+  async recoverKeyLoss() {
+    _clearRefreshTimer();
+    const store = get().keyStore;
+    const epoch = get().authEpoch + 1;
+    set({ authEpoch: epoch, status: "tearing-down", cpAccessToken: "", nodeAccessToken: "",
+      refreshTokenHash: "", account: null });
+    _clearRth();
+    await _teardownSession(store);
+    if (get().authEpoch !== epoch) return;
+    set({ status: "key-lost" });
   },
 }));
 
 /** getAccessToken is the accessor for transport layers (connect.ts, WS bind frames). */
 export function getAccessToken(): string {
   return useSessionStore.getState().getAccessToken();
+}
+
+/** Explicit accessor for node authorization envelopes; never use for CP transports. */
+export function getNodeAccessToken(): string {
+  return useSessionStore.getState().getNodeAccessToken();
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -5,7 +5,6 @@ package authsvc_test
 
 import (
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -24,6 +23,7 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -45,12 +45,15 @@ func TestHandlerFullVertical(t *testing.T) {
 	defer fake.Close()
 	fake.SetUser(88001, "e2euser")
 
-	now := time.Unix(1770000000, 0)
+	now := time.Now().UTC()
 	st := store.NewTestStore(t)
-	_, sigKey, _ := ed25519.GenerateKey(rand.Reader)
 	sessKey, spkiDER := genP256key(t)
 
 	root, err := pki.NewRootCA("Test Root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +71,7 @@ func TestHandlerFullVertical(t *testing.T) {
 	cfg := authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:           sigKey,
+		Signer:              signer,
 		GitHubRedirectURI:   callbackURI,
 		SPAOrigin:           "http://localhost:3000",
 		RedirectURIs:        []string{"http://localhost:3000/callback"},
@@ -80,7 +83,15 @@ func TestHandlerFullVertical(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := authsvc.New(root.Cert, inter, authsvc.WithIdP(idp))
-	lazy.real = svc.Handler()
+	public := svc.PublicHandler()
+	internal := svc.InternalHandler(mtls.Policy{"anonymous": {"authsvc.revocations": {}}})
+	lazy.real = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/revocations" {
+			internal.ServeHTTP(w, r)
+			return
+		}
+		public.ServeHTTP(w, r)
+	})
 
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -131,9 +142,8 @@ func TestHandlerFullVertical(t *testing.T) {
 		t.Fatalf("callback: want 302, got %d: %s", cbResp.StatusCode, body)
 	}
 	location := cbResp.Header.Get("Location")
-	accessToken := urlQP(location, "access_token")
-	if accessToken == "" {
-		t.Fatalf("no access_token in callback redirect: %q", location)
+	if urlQP(location, "cp_access_token") == "" || urlQP(location, "node_access_token") == "" || urlQP(location, "access_token") != "" {
+		t.Fatalf("paired credentials missing or legacy field present in callback redirect: %q", location)
 	}
 	refreshCookieVal := ""
 	for _, c := range cbResp.Cookies() {
@@ -161,11 +171,15 @@ func TestHandlerFullVertical(t *testing.T) {
 		body, _ := io.ReadAll(refreshResp.Body)
 		t.Fatalf("refresh: want 200, got %d: %s", refreshResp.StatusCode, body)
 	}
-	var refreshOut struct{ AccessToken string `json:"access_token"` }
+	var refreshOut struct {
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
+		AccessToken     string `json:"access_token"`
+	}
 	body2, _ := io.ReadAll(refreshResp.Body)
 	_ = json.Unmarshal(body2, &refreshOut)
-	if refreshOut.AccessToken == "" {
-		t.Fatalf("refresh: no access_token in response: %s", body2)
+	if refreshOut.CPAccessToken == "" || refreshOut.NodeAccessToken == "" || refreshOut.AccessToken != "" {
+		t.Fatalf("refresh: paired credentials missing or legacy field present: %s", body2)
 	}
 	newRefreshVal := ""
 	for _, c := range refreshResp.Cookies() {
@@ -193,9 +207,9 @@ func TestHandlerFullVertical(t *testing.T) {
 	// 6. /revocations should contain the logout event.
 	revResp, _ := client.Get(srv.URL + "/revocations?since=0")
 	revBody, _ := io.ReadAll(revResp.Body)
-	var entries []authsvc.SignedRevocationEntry
-	_ = json.Unmarshal(revBody, &entries)
-	if len(entries) == 0 {
+	var page authsvc.RevocationPage
+	_ = json.Unmarshal(revBody, &page)
+	if len(page.Entries) == 0 {
 		t.Fatal("no revocation events after logout")
 	}
 }

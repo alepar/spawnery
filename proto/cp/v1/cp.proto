@@ -357,11 +357,19 @@ message DeleteSpawnResponse   {}
 
 // reauth_token: a TEXT control message carrying a new AS-signed token for in-band re-presentation
 // (~15 min, aligned with access-token TTL). Non-empty reauth_token is consumed by the recv loop
-// and NEVER forwarded to FromClient. Client sides land in A3/A5; CP is tolerant in dev mode.
+// and NEVER forwarded to FromClient.
 // session_auth (field 4): A4 session-open AuthEnvelope, carried only on the first (bind) frame
-// [AC1]. The CP mints the aud=node token from the intent's SPKI DER in dev mode when
-// access_token is empty [AM12]. Subsequent data frames must not set this field.
-message Frame { string spawn_id = 1; bytes data = 2; string reauth_token = 3; auth.v1.AuthEnvelope session_auth = 4; }
+// [AC1]. It must contain the AS-issued aud=node token and signed intent. Subsequent data frames
+// must not set this field.
+message Frame {
+  string spawn_id = 1;
+  bytes data = 2;
+  string reauth_token = 3;
+  auth.v1.AuthEnvelope session_auth = 4;
+  auth.v1.AuthEnvelope session_reauth = 5;
+  string session_id = 6; // bind frame only: explicit session selector; empty means ordinary default session
+  auth.v1.ExecRequest exec_request = 7; // bind frame only: exact exec-open request
+}
 
 // Client-facing transport (mirrors node.v1.SessionTransport ordinals).
 enum SessionTransport {
@@ -545,7 +553,14 @@ message SealedSecret {
 // any other episode. node_cert_chain is the node's leaf+chain PEM (captured from the node's mTLS to the
 // CP; empty in insecure/dev mode, where verification is relaxed). signed_subkey is the JSON SignedSubKey.
 message GetSpawnNodeKeyRequest  { string spawn_id = 1; }
-message GetSpawnNodeKeyResponse { bytes node_cert_chain = 1; bytes signed_subkey = 2; uint64 generation = 3; }
+message GetSpawnNodeKeyResponse {
+  bytes  node_cert_chain       = 1;
+  bytes  signed_subkey         = 2;
+  uint64 generation            = 3;
+  string target_node_id        = 4;
+  string target_node_class     = 5;
+  string target_node_account_id = 6;
+}
 
 // DeliverSecrets hands the CP owner-sealed ciphertext to relay to the spawn's live node (ciphertext-only;
 // the CP stores nothing in plaintext and never unseals). The CP stamps the live generation and forwards
@@ -635,6 +650,9 @@ message GetPendingIntentResponse {
   bytes node_cert_chain = 3;
   bytes signed_subkey = 4;
   uint64 generation = 5;
+  string target_node_id = 6;
+  string target_node_class = 7;
+  string target_node_account_id = 8;
 }
 
 // SubmitIntent delivers the client's signed intent to unblock the pending provision.

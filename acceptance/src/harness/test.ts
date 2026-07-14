@@ -6,13 +6,18 @@
  */
 
 import { test as base, expect as baseExpect } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadTargetConfig, type TargetConfig } from "../config/target";
 import { identityForWorker, type Identity } from "../fixtures/identity-pool";
 import { nsName } from "../fixtures/namespace";
 import { teardownSweep } from "../fixtures/sweep";
 import { CostLedger } from "../fixtures/budget";
 import { guardMutation } from "./guardrail";
-import { AcceptanceClient, type SpawnSummary } from "../drivers/oracle";
+import { cleanupNewSpawns } from "./spawn-registry";
+import { AcceptanceClient, createKnownVMTargetVerifier, type SpawnSummary } from "../drivers/oracle";
 import { WebDriver } from "../drivers/web";
 import { CliDriver } from "../drivers/cli";
 import { DevTokenAuth } from "../auth/devtoken";
@@ -27,9 +32,9 @@ interface WorkerFixtures {
   auth: AuthStrategy;
   api: AcceptanceClient;
   web: WebDriver;
-  cli: CliDriver;
   /** ledger: per-worker CostLedger for @agent scenarios to feed usage into + check() against. */
   ledger: CostLedger;
+  cliConfigHome: string;
   /** teardownSweeper is an auto, worker-scoped fixture: no test consumes it directly. */
   teardownSweeper: void;
 }
@@ -37,13 +42,23 @@ interface WorkerFixtures {
 interface TestFixtures {
   ns: (base: string) => string;
   ctx: DriverCtx;
+  cli: CliDriver;
   /** guardrail is an auto, test-scoped fixture: no test consumes it directly. */
   guardrail: void;
+  /** postTestSpawnCleanup removes only owner-visible spawns created by this test. */
+  postTestSpawnCleanup: void;
 }
 
 function selectAuth(target: TargetConfig): AuthStrategy {
   if (target.authMode === "dev-token") return new DevTokenAuth();
-  return new OAuthPoPAuth({ asOrigin: target.asOrigin, webOrigin: target.webOrigin });
+  const verifyTarget = createKnownVMTargetVerifier({
+    rootCAPEM: readFileSync(target.rootCAPath!, "utf8"),
+    trustDomain: target.trustDomain!,
+    expectedNodeId: "node-1",
+    expectedNodeClass: "cloud",
+    expectedNodeAccountId: target.cloudAccountId!,
+  });
+  return new OAuthPoPAuth({ asOrigin: target.asOrigin, webOrigin: target.webOrigin, verifyTarget });
 }
 
 export const test = base.extend<TestFixtures, WorkerFixtures>({
@@ -88,7 +103,13 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     // key (fresh for dev-token; the cnf-bound session key for OAuth-PoP — see auth/types.ts).
     async ({ target, auth, identity }, use) => {
       const keyStore = await auth.sessionKeyStore(identity);
-      await use(new AcceptanceClient({ baseUrl: target.cpEndpoint, bearer: () => auth.oracleToken(identity), keyStore }));
+      await use(new AcceptanceClient({
+        baseUrl: target.cpEndpoint,
+        bearer: () => auth.cpAccessToken(identity),
+        keyStore,
+        getNodeAccessToken: () => auth.nodeAccessToken(identity),
+        verifyTarget: auth.targetVerifier(identity),
+      }));
     },
     { scope: "worker" },
   ],
@@ -101,12 +122,34 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     { scope: "worker" },
   ],
 
-  cli: [
-    async ({ target }, use) => {
-      await use(new CliDriver({ cpEndpoint: target.cpEndpoint, spawnctlBin: target.spawnctlBin, nodeAddr: target.nodeAddr }));
+  cliConfigHome: [
+    async ({ runId }, use, workerInfo) => {
+      const dir = await mkdtemp(join(tmpdir(), `spawnery-acc-${runId}-${workerInfo.parallelIndex}-`));
+      try { await use(dir); } finally { await rm(dir, { recursive: true, force: true }); }
     },
     { scope: "worker" },
   ],
+
+  cli: async ({ target, auth, identity, page, cliConfigHome }, use) => {
+    const prepared = await auth.prepareCli(page, identity, {
+      spawnctlBin: target.spawnctlBin,
+      asOrigin: target.asOrigin,
+      configHome: cliConfigHome,
+    });
+    await use(new CliDriver({
+      cpEndpoint: target.cpEndpoint,
+      spawnctlBin: target.spawnctlBin,
+      authArgs: prepared.authArgs,
+      configHome: prepared.configHome,
+      trust: target.rootCAPath ? {
+        rootCAPath: target.rootCAPath,
+        trustDomain: target.trustDomain!,
+        crlStatePath: target.crlStatePath!,
+        crlIssuerPaths: target.crlIssuerPaths ?? [],
+        crlPaths: target.crlPaths ?? [],
+      } : undefined,
+    }));
+  },
 
   ledger: [
     async ({ target }, use) => {
@@ -150,6 +193,25 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     async ({ target }, use, testInfo) => {
       guardMutation(testInfo.tags, target.targetHost, target.nonprodHosts);
       await use();
+    },
+    { auto: true },
+  ],
+
+  // Snapshot by opaque id, not by name: web/CLI-created spawns use product-default names, and a
+  // failed CLI create can leave an ERROR row without returning its id. The baseline prevents this
+  // cleanup from touching any owner resource that existed before the test.
+  postTestSpawnCleanup: [
+    async ({ api }, use) => {
+      const baseline = new Set((await api.listSpawns()).map((spawn) => spawn.spawnId));
+      try {
+        await use();
+      } finally {
+        try {
+          await cleanupNewSpawns(api, baseline);
+        } catch (e) {
+          console.warn(`postTestSpawnCleanup: failed to list owner spawns: ${(e as Error).message}`);
+        }
+      }
     },
     { auto: true },
   ],

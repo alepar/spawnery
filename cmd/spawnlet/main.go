@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -89,18 +90,19 @@ func main() {
 	if cfg.CP.Addr != "" {
 		// CP-attached mode: dial the CP, no inbound listener.
 		nodeCfg := node.Config{
-			NodeID:        cfg.Node.ID,
-			CPURL:         cfg.CP.Addr,
-			MaxSpawns:     4,
-			AgentImage:    cfg.AgentImage,
-			AgentBinaries: cfg.AgentBinaries,
-			NodeClass:     cfg.Node.Class,
-			NodeOwner:     cfg.Node.Owner,
+			NodeID:          cfg.Node.ID,
+			CPURL:           cfg.CP.Addr,
+			MaxSpawns:       4,
+			AgentImage:      cfg.AgentImage,
+			AgentBinaries:   cfg.AgentBinaries,
+			NodeClass:       cfg.Node.Class,
+			NodeOwner:       cfg.Node.Owner,
+			NodeTrustDomain: cfg.Node.TrustDomain,
 		}
 		// Terminal control plane (around CP for now): a small inbound listener so `spawnctl tmux`
 		// can ask this node to start a mosh-backed terminal session for a spawn. The mosh UDP data
 		// plane goes straight to this node. (CP-routed terminal control is sp-wsu.2.)
-		if taddr := cfg.Node.TerminalAddr; taddr != "" {
+		if taddr := cfg.Node.TerminalAddr; taddr != "" && directTerminalAllowed(*cfg) {
 			// Bind synchronously and FAIL FAST: a port-in-use here almost always means another
 			// spawnlet is already running. Two nodes with the same NODE_ID corrupt the CP's routing
 			// (it keys nodes by id) and flip spawns to UNREACHABLE — so refuse to start a duplicate.
@@ -124,20 +126,76 @@ func main() {
 		}
 		// Node-auth mode (sp-ova). insecure: h2c to CP_ADDR. enforced: mTLS to the CP node listener
 		// presenting the enrolled cert (loaded from disk, or enrolled on first boot via the AS).
-		httpc, dialURL, err := nodeCPClient(cfg, cfg.CP.Addr, cfg.Node.ID)
+		certificateRevocations, err := loadNodeCertificateRevocations(cfg, time.Now)
+		if err != nil {
+			log.Fatalf("node: certificate revocation setup: %v", err)
+		}
+		if certificateRevocations != nil {
+			go certificateRevocations.watch(ctx, cfg.Node.CertificateRevocationRefresh)
+			defer func() {
+				certificateRevocations.unsubscribe()
+				if err := certificateRevocations.state.Close(); err != nil {
+					log.Printf("node: certificate revocation close: %v", err)
+				}
+			}()
+		}
+		httpc, dialURL, err := nodeCPClient(cfg, cfg.CP.Addr, cfg.Node.ID, certificateRevocations)
 		if err != nil {
 			log.Fatalf("node: identity/transport setup: %v", err)
 		}
 		nodeCfg.CPURL = dialURL
 		nodeCfg.NodeRootPEM = nodeRootPEM(cfg)
+		artifactTrust, err := loadArtifactVerifier(cfg, time.Now())
+		if err != nil {
+			log.Fatalf("node: artifact trust setup: %v", err)
+		}
+		if artifactTrust != nil {
+			reloadCtx, cancelReload := context.WithCancel(ctx)
+			reloadDone := artifactTrust.watch(reloadCtx, time.Second, time.Now, func(err error) {
+				log.Printf("node: signer-revocation reload failed: %v", err)
+			})
+			defer func() {
+				cancelReload()
+				<-reloadDone
+				closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelClose()
+				if err := artifactTrust.CloseContext(closeCtx); err != nil {
+					log.Printf("node: artifact trust close: %v", err)
+				}
+			}()
+		}
 		// Owner-sealed secrets (sp-2ckv.4): in enforced mode build the HPKE sub-key holder signed by the
 		// node's cert key, so the node can publish a sub-key and unseal delivered secrets. Best-effort:
 		// insecure mode (no cert) and a key-parse failure both leave SubKeys nil (no sub-key published).
 		if sk := nodeSubKeys(cfg, cfg.Node.ID); sk != nil {
 			nodeCfg.SubKeys = sk
 		}
-		nodeCfg.Verifier = buildIntentVerifier(cfg, cfg.Node.ID, cfg.Node.Owner)
-		nodeCfg.GitHubMint = nodeGitHubMint(cfg)
+		if cfg.Node.AuthMode == "enforced" {
+			userRevocations, openErr := nodeUserRevocationStore(cfg)
+			if openErr != nil {
+				log.Fatalf("node: user revocation state: %v", openErr)
+			}
+			defer func() {
+				if closeErr := userRevocations.Close(); closeErr != nil {
+					log.Printf("node: user revocation close: %v", closeErr)
+				}
+			}()
+			asClient, clientErr := nodeASClient(cfg, certificateRevocations)
+			if clientErr != nil {
+				log.Fatalf("node: AS client setup: %v", clientErr)
+			}
+			consumer, consumerErr := nodeUserRevocationConsumer(cfg, asClient, artifactTrust.verifier, userRevocations)
+			if consumerErr != nil {
+				log.Fatalf("node: user revocation consumer setup: %v", consumerErr)
+			}
+			nodeCfg.UserRevocations = userRevocations
+			nodeCfg.RevocationConsumer = consumer
+		}
+		nodeCfg.Verifier, err = buildIntentVerifier(cfg, artifactTrust, cfg.Node.ID, cfg.Node.Owner, nodeCfg.UserRevocations)
+		if err != nil {
+			log.Fatalf("node: intent verifier setup: %v", err)
+		}
+		nodeCfg.GitHubMint = nodeGitHubMint(cfg, certificateRevocations)
 		nodeCfg.SpawnCARoot = filepath.Join(cfg.DataRoot, "spawn-ca")
 		log.Printf("spawnlet attaching to CP at %s as %s", nodeCfg.CPURL, cfg.Node.ID)
 		err = node.Run(ctx, mgr, httpc, nodeCfg) // returns when ctx is cancelled (signal) or on fatal error
@@ -175,6 +233,10 @@ func gracefulDetachAll(mgr *spawnlet.Manager) {
 	if n := mgr.DetachAll(); n > 0 {
 		log.Printf("graceful shutdown: detached from %d running spawn(s) — pods left running for re-adoption", n)
 	}
+}
+
+func directTerminalAllowed(cfg Spawnlet) bool {
+	return cfg.CP.Addr == "" || cfg.Node.AuthMode == "insecure"
 }
 
 // buildManager selects the pod backend + egress floor by ContainerRuntime: "runsc" -> a containerd
@@ -446,9 +508,12 @@ func writeGitHubStaticCredentialHelper(dataRoot, token string) (string, error) {
 // to the account owner, who mints a token bound to it (IssueBoundEnrollmentToken) over the pinned AS
 // connection and hands it back as ENROLL_TOKEN. The node redeems with the SAME key, so a token a
 // compromised CP observed cannot be redeemed with a substituted key.
-func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, string, error) {
+func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string, revocations *nodeCertificateRevocations) (*http.Client, string, error) {
 	if cfg.Node.AuthMode != "enforced" {
 		return h2cClient(), insecureURL, nil
+	}
+	if revocations == nil || revocations.state == nil {
+		return nil, "", errors.New("enforced mode: certificate revocation state is required")
 	}
 	dir := cfg.Node.IDDir
 	id, err := nodeid.Load(dir)
@@ -476,7 +541,13 @@ func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, stri
 		if rerr != nil {
 			return nil, "", fmt.Errorf("enforced mode: pinned NODE_ROOT_CA required for enrollment: %w", rerr)
 		}
-		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, enrollToken, nodeID, key)
+		root, rerr := pki.ParseCertPEM(rootPEM)
+		if rerr != nil {
+			return nil, "", fmt.Errorf("enforced mode: parse pinned root for enrollment: %w", rerr)
+		}
+		res, eerr := authsvc.RunEnrollWithKey(context.Background(), asURL, enrollToken, nodeID, key, authsvc.EnrollTransport{
+			Root: root, TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.ASServerName, IsRevoked: revocations.state.IsRevoked,
+		})
 		if eerr != nil {
 			return nil, "", fmt.Errorf("enroll: %w", eerr)
 		}
@@ -486,7 +557,11 @@ func nodeCPClient(cfg *Spawnlet, insecureURL, nodeID string) (*http.Client, stri
 		}
 		log.Printf("spawnlet enrolled with AS %s (fingerprint %s); identity stored in %s", asURL, fp, dir)
 	}
-	client, err := id.MTLSClient()
+	client, err := id.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.CP.ServerName,
+		ExpectedServiceRole: pki.RoleCP, IsRevoked: revocations.state.IsRevoked,
+		ConnectionRegistry: revocations.connections,
+	})
 	if err != nil {
 		return nil, "", err
 	}
@@ -537,121 +612,223 @@ func nodeRootPEM(cfg *Spawnlet) []byte {
 // (design §16.4). Returns nil when mint is disabled — proactive refresh is then off (spawns run
 // on their delivered token until it lapses).
 //
-// Two paths:
-//  1. D3 dev-github lane: NODE_GITHUB_MINT_DEV_NODE_ID set → plain HTTP h2c client with the
-//     dev header identity. Works in any NODE_AUTH_MODE (no mTLS required). DEV-ONLY.
-//  2. Enforced/prod lane: NODE_AUTH_MODE=enforced + AS_URL + loaded mTLS identity → mTLS client.
+// Enforced mode requires AS_URL plus the enrolled node identity and live certificate revocations.
 //
 // nodeGitHubMint is driven by the typed cfg.Node config (populated by the node.* YAML, the
 // NODE_*/AS_URL env aliases, and --set alike), not by reading the environment directly.
-func nodeGitHubMint(cfg *Spawnlet) node.GitHubMintClient {
+func nodeGitHubMint(cfg *Spawnlet, revocations *nodeCertificateRevocations) node.GitHubMintClient {
 	asURL := cfg.ASURL
-	// D3 dev-github lane: relaxed node->AS over plain HTTP with a header identity (NOT mTLS). The
-	// secure mTLS leg is proven by TestGitHubE2E_* and is the enforced/prod path below.
-	if devNodeID := strings.TrimSpace(cfg.Node.GitHubMintDevID); devNodeID != "" {
-		if asURL == "" {
-			log.Printf("github mint: NODE_GITHUB_MINT_DEV_NODE_ID set but AS_URL empty — relaxed mint disabled")
-			return nil
-		}
-		log.Printf("github mint: DEV RELAXED node->AS (plain HTTP, header identity %q) — NOT for production", devNodeID)
-		return authv1connect.NewAuthServiceClient(h2cClient(), asURL,
-			connect.WithInterceptors(devNodeIDInterceptor{nodeID: devNodeID}))
-	}
 	if cfg.Node.AuthMode != "enforced" {
 		return nil
 	}
 	if asURL == "" {
 		return nil
 	}
-	dir := cfg.Node.IDDir
-	id, err := nodeid.Load(dir)
+	client, err := nodeASClient(cfg, revocations)
 	if err != nil {
-		log.Printf("github refresh disabled: no identity in %s: %v", dir, err)
-		return nil
-	}
-	client, err := id.MTLSClient()
-	if err != nil {
-		log.Printf("github refresh disabled: mTLS client: %v", err)
+		log.Printf("github refresh disabled: AS client: %v", err)
 		return nil
 	}
 	return authv1connect.NewAuthServiceClient(client, asURL)
 }
 
-// devNodeIDInterceptor injects the D3 dev relaxed node-identity header on every call to the AS.
-// DEV-ONLY — used solely by the dev-github lane (NODE_GITHUB_MINT_DEV_NODE_ID); NOT for production.
-type devNodeIDInterceptor struct{ nodeID string }
-
-func (i devNodeIDInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		req.Header().Set("X-Spawnery-Dev-Node-Id", i.nodeID)
-		return next(ctx, req)
+func nodeASClient(cfg *Spawnlet, revocations *nodeCertificateRevocations) (*http.Client, error) {
+	if cfg == nil || cfg.Node.AuthMode != "enforced" || cfg.ASURL == "" || cfg.ASServerName == "" {
+		return nil, errors.New("enforced AS client configuration is required")
 	}
-}
-func (i devNodeIDInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
-		conn := next(ctx, spec)
-		conn.RequestHeader().Set("X-Spawnery-Dev-Node-Id", i.nodeID)
-		return conn
+	if revocations == nil || revocations.state == nil || revocations.connections == nil {
+		return nil, errors.New("certificate revocation state is required")
 	}
-}
-func (i devNodeIDInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return next
-}
-
-// buildIntentVerifier builds the A4 IntentVerifier from the config [AC1][AM12].
-//
-// cfg.Node.AuthMode=insecure (default): AuthModeVerifyLog — the full verification chain runs but
-// failures are logged rather than enforced. This satisfies AM12 (dev/prod parity via verify-and-log).
-// cfg.Node.AuthMode=enforced: AuthModeEnforced — failures block execution and return NACK codes.
-//
-// cfg.Node.ASPubkeys (comma-separated PEM file paths): the AS session signing public keys the node
-// uses to verify the aud=node access token. In insecure mode an empty key set is valid (the token
-// step fails with ErrUnknownKey which is logged but not enforced). In enforced mode, the AS public
-// keys must be configured here.
-//
-// nodeOwner: if non-empty AND cfg.Node.AuthMode=enforced, enables the self-hosted owner check
-// (the token's account_id must equal nodeOwner).
-func buildIntentVerifier(cfg *Spawnlet, nodeID, nodeOwner string) *node.IntentVerifier {
-	enforced := cfg.Node.AuthMode == "enforced"
-	authMode := node.AuthModeVerifyLog
-	if enforced {
-		authMode = node.AuthModeEnforced
-	}
-
-	ks, err := loadNodeKeySet(cfg.Node.ASPubkeys)
+	id, err := nodeid.Load(cfg.Node.IDDir)
 	if err != nil {
-		log.Printf("buildIntentVerifier: load AS pubkeys: %v (verification will log token failures)", err)
-	} else if len(ks) > 0 {
-		log.Printf("node: loaded %d AS pubkey(s) for intent verification", len(ks))
+		return nil, fmt.Errorf("load enrolled node identity: %w", err)
 	}
-
-	selfHosted := enforced && nodeOwner != ""
-	return node.NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, authMode, nil)
+	client, err := id.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: cfg.Node.TrustDomain, ServerName: cfg.ASServerName,
+		ExpectedServiceRole: pki.RoleAuthService, IsRevoked: revocations.state.IsRevoked,
+		ConnectionRegistry: revocations.connections,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build node AS mTLS client: %w", err)
+	}
+	return client, nil
 }
 
-// loadNodeKeySet parses comma-separated PEM file paths into a token.KeySet.
-// Empty s returns an empty KeySet (valid in insecure mode — token step logs ErrUnknownKey).
-func loadNodeKeySet(s string) (token.KeySet, error) {
-	if s == "" {
-		return token.KeySet{}, nil
+type nodeHTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func nodeUserRevocationStore(cfg *Spawnlet) (*node.UserRevocationStore, error) {
+	if cfg == nil || cfg.Node.UserRevocationState == "" {
+		return nil, errors.New("user revocation state configuration is required")
 	}
-	var pubs []ed25519.PublicKey
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		pemBytes, err := os.ReadFile(p)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", p, err)
-		}
-		pub, err := token.ParsePublicKeyPEM(pemBytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", p, err)
-		}
-		pubs = append(pubs, pub)
+	return node.OpenUserRevocationStore(cfg.Node.UserRevocationState)
+}
+
+func nodeUserRevocationConsumer(cfg *Spawnlet, client nodeHTTPDoer, artifacts *token.Verifier, store *node.UserRevocationStore) (*node.RevocationConsumer, error) {
+	if cfg == nil {
+		return nil, errors.New("user revocation consumer configuration is required")
 	}
-	return token.NewKeySet(pubs...)
+	return node.NewRevocationConsumer(
+		client, strings.TrimRight(cfg.ASURL, "/")+"/revocations", artifacts, store, cfg.Node.UserRevocationPollInterval,
+		node.WithRevocationRequestTimeout(cfg.Node.UserRevocationRequestTimeout),
+		node.WithRevocationMaxBackoff(cfg.Node.UserRevocationMaxBackoff),
+	)
+}
+
+// buildIntentVerifier builds the mandatory A4 IntentVerifier. AuthMode selects only the CP transport;
+// both h2c and service-mTLS modes use the same root-anchored, fail-closed authorization verifier.
+//
+// Artifact trust is rooted exclusively in cfg.Node.RootCA (or <id_dir>/root.pem) and the persisted
+// signer-revocation store.
+//
+// nodeOwner: if non-empty, enables the self-hosted owner check
+// (the token's account_id must equal nodeOwner).
+func buildIntentVerifier(cfg *Spawnlet, trust *artifactTrust, nodeID, nodeOwner string, revocations ...node.UserRevocationLookup) (*node.IntentVerifier, error) {
+	switch cfg.Node.AuthMode {
+	case "insecure":
+	case "enforced":
+	default:
+		return nil, fmt.Errorf("unknown node auth mode %q", cfg.Node.AuthMode)
+	}
+	if trust == nil || trust.verifier == nil {
+		return nil, fmt.Errorf("root-anchored artifact trust is required")
+	}
+	selfHosted := nodeOwner != ""
+	return node.NewIntentVerifier(trust.verifier, nodeOwner, nodeID, selfHosted, nil, revocations...), nil
+}
+
+type artifactTrust struct {
+	verifier       *token.Verifier
+	revocations    *token.SignerRevocationStore
+	statementPath  string
+	reload         func(context.Context, time.Time) error
+	closeStore     func() error
+	mu             sync.Mutex
+	reloadActive   bool
+	reloadFinished <-chan struct{}
+}
+
+func loadArtifactVerifier(cfg *Spawnlet, now time.Time) (*artifactTrust, error) {
+	rootPath := cfg.Node.RootCA
+	if rootPath == "" && cfg.Node.IDDir != "" {
+		rootPath = filepath.Join(cfg.Node.IDDir, "root.pem")
+	}
+	if rootPath == "" || cfg.Node.Environment == "" || cfg.Node.SignerRevocationState == "" {
+		return nil, errors.New("root, environment, and signer-revocation state are required")
+	}
+	rootPEM, err := os.ReadFile(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("read environment root: %w", err)
+	}
+	root, err := pki.ParseCertPEM(rootPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse environment root: %w", err)
+	}
+	store, err := token.OpenSignerRevocationStore(cfg.Node.SignerRevocationState, root, cfg.Node.Environment, now)
+	if err != nil {
+		return nil, fmt.Errorf("open signer-revocation state: %w", err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = store.Close()
+		}
+	}()
+	if cfg.Node.SignerRevocationStatement != "" {
+		if err := store.LoadAndApply(cfg.Node.SignerRevocationStatement, now); err != nil {
+			return nil, fmt.Errorf("apply signer-revocation statement: %w", err)
+		}
+	}
+	verifier, err := token.NewVerifier(root, cfg.Node.Environment, store)
+	if err != nil {
+		return nil, fmt.Errorf("create artifact verifier: %w", err)
+	}
+	closeOnError = false
+	trust := &artifactTrust{verifier: verifier, revocations: store, statementPath: cfg.Node.SignerRevocationStatement}
+	trust.closeStore = store.Close
+	trust.reload = func(ctx context.Context, at time.Time) error {
+		return store.LoadAndApplyContext(ctx, trust.statementPath, at)
+	}
+	return trust, nil
+}
+
+func (trust *artifactTrust) Close() error {
+	if trust == nil {
+		return nil
+	}
+	trust.mu.Lock()
+	defer trust.mu.Unlock()
+	if trust.reloadActive {
+		return errors.New("signer-revocation reload is still active")
+	}
+	return trust.closeStore()
+}
+
+func (trust *artifactTrust) CloseContext(ctx context.Context) error {
+	if trust == nil {
+		return nil
+	}
+	for {
+		trust.mu.Lock()
+		if !trust.reloadActive {
+			err := trust.closeStore()
+			trust.mu.Unlock()
+			return err
+		}
+		finished := trust.reloadFinished
+		trust.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for signer-revocation reload: %w", ctx.Err())
+		case <-finished:
+		}
+	}
+}
+
+func (trust *artifactTrust) watch(ctx context.Context, interval time.Duration, now func() time.Time, report func(error)) <-chan struct{} {
+	done := make(chan struct{})
+	if trust == nil || trust.statementPath == "" {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var reloadDone <-chan error
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err := <-reloadDone:
+				reloadDone = nil
+				if err != nil && !errors.Is(err, context.Canceled) && report != nil {
+					report(err)
+				}
+			case <-ticker.C:
+				if reloadDone != nil {
+					continue
+				}
+				result := make(chan error, 1)
+				finished := make(chan struct{})
+				trust.mu.Lock()
+				trust.reloadActive = true
+				trust.reloadFinished = finished
+				trust.mu.Unlock()
+				reloadDone = result
+				go func(at time.Time) {
+					err := trust.reload(ctx, at)
+					trust.mu.Lock()
+					trust.reloadActive = false
+					trust.mu.Unlock()
+					close(finished)
+					result <- err
+				}(now())
+			}
+		}
+	}()
+	return done
 }
 
 func h2cClient() *http.Client {

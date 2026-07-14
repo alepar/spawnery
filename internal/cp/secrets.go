@@ -27,22 +27,53 @@ type nodeKeyCache struct {
 }
 
 type nodeKeyEntry struct {
-	subkey    []byte // JSON subkey.SignedSubKey (opaque to the CP)
-	certChain []byte // node leaf+chain PEM (empty in insecure mode)
+	connectionToken uint64
+	nodeID          string
+	nodeClass       string
+	accountID       string
+	subkey          []byte // JSON subkey.SignedSubKey (opaque to the CP)
+	certChain       []byte // node leaf+chain PEM (empty in insecure mode)
+}
+
+func (e nodeKeyEntry) verifiable() bool {
+	return e.nodeID != "" && e.nodeClass != "" && e.accountID != "" && len(e.subkey) > 0 && len(e.certChain) > 0
 }
 
 func newNodeKeyCache() *nodeKeyCache { return &nodeKeyCache{m: map[string]nodeKeyEntry{}} }
 
-// put records nodeID's sub-key + cert chain. A delivery with no sub-key (an insecure/dev node that
-// publishes none) is ignored — it must not wipe a previously cached real sub-key.
-func (c *nodeKeyCache) put(nodeID string, subkey, certChain []byte) {
+// put replaces the complete registration snapshot, including an empty subkey. An accepted reconnect
+// must never inherit identity or key material from the connection it displaced.
+func (c *nodeKeyCache) put(nodeID string, connectionToken uint64, nodeClass, accountID string, subkey, certChain []byte) {
+	c.mu.Lock()
+	c.m[nodeID] = nodeKeyEntry{
+		connectionToken: connectionToken,
+		nodeID:          nodeID,
+		nodeClass:       nodeClass,
+		accountID:       accountID,
+		subkey:          append([]byte(nil), subkey...),
+		certChain:       append([]byte(nil), certChain...),
+	}
+	c.mu.Unlock()
+}
+
+// updateSubkey rotates only the opaque subkey bytes. Identity and certificate material remain the
+// effective values captured atomically when the authenticated node registered.
+func (c *nodeKeyCache) updateSubkey(nodeID string, connectionToken uint64, subkey []byte) {
 	if len(subkey) == 0 {
 		return
 	}
 	c.mu.Lock()
-	c.m[nodeID] = nodeKeyEntry{
-		subkey:    append([]byte(nil), subkey...),
-		certChain: append([]byte(nil), certChain...),
+	if e, ok := c.m[nodeID]; ok && e.connectionToken == connectionToken {
+		e.subkey = append([]byte(nil), subkey...)
+		c.m[nodeID] = e
+	}
+	c.mu.Unlock()
+}
+
+func (c *nodeKeyCache) removeIfCurrent(nodeID string, connectionToken uint64) {
+	c.mu.Lock()
+	if e, ok := c.m[nodeID]; ok && e.connectionToken == connectionToken {
+		delete(c.m, nodeID)
 	}
 	c.mu.Unlock()
 }
@@ -54,11 +85,24 @@ func (c *nodeKeyCache) get(nodeID string) (nodeKeyEntry, bool) {
 	return e, ok
 }
 
+func (s *Server) currentNodeKey(nodeID string) (nodeKeyEntry, bool) {
+	entry, ok := s.nodeKeys.get(nodeID)
+	if !ok || !entry.verifiable() {
+		return nodeKeyEntry{}, false
+	}
+	// Token zero is reserved for direct hermetic fixtures. Runtime registrations always carry the
+	// registry token, which closes the acceptance-to-cache-publication handoff fail closed.
+	if entry.connectionToken != 0 && !s.reg.IsCurrent(nodeID, entry.connectionToken) {
+		return nodeKeyEntry{}, false
+	}
+	return entry, true
+}
+
 func (s *Server) pendingIntentNodeKey(pi *cpv1.PendingIntent) (nodeKeyEntry, bool) {
 	if pi == nil || pi.GetTargetNodeId() == "" {
 		return nodeKeyEntry{}, false
 	}
-	return s.nodeKeys.get(pi.GetTargetNodeId())
+	return s.currentNodeKey(pi.GetTargetNodeId())
 }
 
 // liveNode resolves a spawn's live hosting node id + episode generation (the binding GetSpawnNodeKey and
@@ -138,12 +182,9 @@ type forkTargetKeyMaterial struct {
 }
 
 func (s *Server) forkTargetKeyMaterial(nodeID string) (forkTargetKeyMaterial, error) {
-	entry, ok := s.nodeKeys.get(nodeID)
-	if !ok || len(entry.subkey) == 0 {
+	entry, ok := s.currentNodeKey(nodeID)
+	if !ok {
 		return forkTargetKeyMaterial{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node %q has not published an HPKE sub-key", nodeID))
-	}
-	if len(entry.certChain) == 0 {
-		return forkTargetKeyMaterial{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node %q has not published a cert chain", nodeID))
 	}
 	return forkTargetKeyMaterial{
 		signedSubKey: append([]byte(nil), entry.subkey...),
@@ -183,14 +224,17 @@ func (s *Server) GetSpawnNodeKey(ctx context.Context, req *connect.Request[cpv1.
 	if err != nil {
 		return nil, err
 	}
-	entry, ok := s.nodeKeys.get(target.nodeID)
+	entry, ok := s.currentNodeKey(target.nodeID)
 	if !ok {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node has not published an HPKE sub-key"))
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("hosting node has not published verifiable identity and key material"))
 	}
 	return connect.NewResponse(&cpv1.GetSpawnNodeKeyResponse{
-		NodeCertChain: entry.certChain,
-		SignedSubkey:  entry.subkey,
-		Generation:    target.generation,
+		NodeCertChain:       append([]byte(nil), entry.certChain...),
+		SignedSubkey:        append([]byte(nil), entry.subkey...),
+		Generation:          target.generation,
+		TargetNodeId:        entry.nodeID,
+		TargetNodeClass:     entry.nodeClass,
+		TargetNodeAccountId: entry.accountID,
 	}), nil
 }
 

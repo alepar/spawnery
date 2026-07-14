@@ -1,11 +1,9 @@
 package authsvc_test
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"errors"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -48,7 +46,7 @@ func TestBoundTokenBindsFingerprint(t *testing.T) {
 	cert, _ := pki.ParseCertPEM(certPEM)
 	inter, _ := pki.ParseCertPEM(chainPEM)
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -135,38 +133,11 @@ func TestBoundTokenAccountScoping(t *testing.T) {
 	cert, _ := pki.ParseCertPEM(certPEM)
 	inter, _ := pki.ParseCertPEM(chainPEM)
 	root, _ := pki.ParseCertPEM(s.RootCAPEM())
-	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, time.Now())
+	id, err := pki.Verify(cert, []*x509.Certificate{inter}, root, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 	if id.AccountID != "acct-A" {
 		t.Fatalf("account = %q, want acct-A (from the token)", id.AccountID)
-	}
-}
-
-// HTTP bound round-trip: the node redeems a fingerprint-bound token with its pre-generated key via
-// RunEnrollWithKey, and a DIFFERENT key is rejected over the wire (401 -> error).
-func TestBoundEnrollHTTPRoundTrip(t *testing.T) {
-	s := newAS(t)
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	key, fp, _ := boundKey(t)
-	tok, _ := s.IssueBoundEnrollmentToken("acct-Z", pki.ClassSelfHosted, fp)
-
-	res, err := authsvc.RunEnrollWithKey(context.Background(), srv.URL, tok, "node-q", key)
-	if err != nil {
-		t.Fatalf("RunEnrollWithKey: %v", err)
-	}
-	cert, _ := pki.ParseCertPEM(res.CertPEM)
-	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(key.Public()) {
-		t.Fatal("issued cert not bound to the redeeming key")
-	}
-
-	// A token bound to fp(key) cannot be redeemed with a fresh, different key over HTTP.
-	other, _ := pki.NewNodeKey()
-	tok2, _ := s.IssueBoundEnrollmentToken("acct-Z", pki.ClassSelfHosted, fp)
-	if _, err := authsvc.RunEnrollWithKey(context.Background(), srv.URL, tok2, "node-q", other); err == nil {
-		t.Fatal("a bound token redeemed with a substituted key must fail over HTTP")
 	}
 }

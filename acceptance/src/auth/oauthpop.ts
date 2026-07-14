@@ -14,15 +14,19 @@
  *   (no storageState round-trip — a non-extractable session CryptoKey cannot be serialized into
  *   one; the key lives in the page's own IndexedDB for the test, Spike S1 approach (a)). The AS
  *   does not forward login_hint to the IdP (internal/authsvc/oauth.go's serveAuthorize), so the
- *   fake-IdP hop is rewritten in-flight via page.route(), mirroring oauth-session.ts's oracle-side
- *   rewrite (sp-tq0t.13 bead notes).
+ *   AS authorize response's Location is rewritten in-flight via page.route(), mirroring
+ *   oauth-session.ts's oracle-side rewrite (sp-tq0t.13 bead notes).
  */
 
-import type { KeyStore } from "@spawnery/client";
+import type { KeyStore, ResolvedTargetVerifier } from "@spawnery/client";
+import { authv1 } from "@spawnery/client";
+import { fromBinary } from "@bufbuild/protobuf";
+import { join } from "node:path";
 import type { Identity } from "../fixtures/identity-pool";
-import type { AuthStrategy } from "./types";
+import type { AuthStrategy, CliPreparation, CliPreparationOptions } from "./types";
 import { establishOAuthSession, refreshOAuthSession, type OAuthSessionState } from "./oauth-session";
 import { keyPairKeyStore } from "./keystore";
+import { initializeCliOwnerDevice, runCliDeviceLogin } from "./cli-device";
 
 // Proactive refresh margin: refresh once within this long of expiry rather than waiting for a 401.
 // Mirrors web/src/auth/refresh.ts's REFRESH_MARGIN_MS and cmd/spawnctl/authstate.go's refreshWindow.
@@ -37,7 +41,17 @@ function needsRefresh(state: OAuthSessionState, nowMs: number): boolean {
 // with plain mocks). A real Playwright Page/Route/Locator satisfies this shape unchanged.
 export interface RouteLike {
   request(): { url(): string };
-  continue(overrides?: { url?: string }): Promise<void>;
+  fetch(options?: { maxRedirects?: number }): Promise<ResponseLike>;
+  fulfill(options: {
+    response: ResponseLike;
+    status: number;
+    headers: Record<string, string>;
+  }): Promise<void>;
+}
+
+export interface ResponseLike {
+  status(): number;
+  headers(): Record<string, string>;
 }
 
 export interface LocatorLike {
@@ -45,10 +59,16 @@ export interface LocatorLike {
 }
 
 export interface PageLike {
-  route(url: string, handler: (route: RouteLike) => Promise<void> | void): Promise<void>;
+  route(url: string | RegExp, handler: (route: RouteLike) => Promise<void> | void): Promise<void>;
   goto(url: string): Promise<unknown>;
   getByTestId(testId: string): LocatorLike;
   waitForURL(matcher: (url: URL) => boolean, options?: { timeout?: number }): Promise<void>;
+}
+
+export function oauthAuthorizeRoute(asOrigin: string): RegExp {
+  const authorizeUrl = new URL("/oauth/authorize", `${asOrigin.replace(/\/$/, "")}/`).toString();
+  const escaped = authorizeUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}(?:\\?[^#]*)?$`);
 }
 
 export interface OAuthPoPConfig {
@@ -58,10 +78,12 @@ export interface OAuthPoPConfig {
    * `${webOrigin}/callback`, matching both the AS's default derivation (cmd/authsvc/config.go's
    * derive()) and the SPA's own default (web/src/views/LoginView.tsx's REDIRECT_URI). */
   webOrigin: string;
+  verifyTarget?: ResolvedTargetVerifier;
 }
 
 export class OAuthPoPAuth implements AuthStrategy {
   private readonly sessions = new Map<string, Promise<OAuthSessionState>>();
+  private readonly cliPreparations = new Map<string, Promise<CliPreparation>>();
 
   constructor(private readonly cfg: OAuthPoPConfig) {}
 
@@ -90,33 +112,95 @@ export class OAuthPoPAuth implements AuthStrategy {
 
   async seedWeb(page: unknown, identity: Identity): Promise<void> {
     const p = page as PageLike;
+    if (!identity.token) throw new Error("oauth web login requires a non-empty fake IdP login_hint");
 
-    await p.route("**/login/oauth/authorize*", async (route) => {
-      const url = new URL(route.request().url());
-      if (identity.token) url.searchParams.set("login_hint", identity.token);
-      await route.continue({ url: url.toString() });
+    // route.continue() owns the complete redirect chain, so a handler cannot rewrite the fake
+    // IdP request on the second hop. Stop at the AS response and give the browser a Location that
+    // already contains the fake's account selector.
+    await p.route(oauthAuthorizeRoute(this.cfg.asOrigin), async (route) => {
+      const response = await route.fetch({ maxRedirects: 0 });
+      if (response.status() !== 302) {
+        throw new Error(`oauth authorize redirect returned ${response.status()}, expected 302`);
+      }
+      const headers = response.headers();
+      const locationEntry = Object.entries(headers).find(([name]) => name.toLowerCase() === "location");
+      if (!locationEntry?.[1]) throw new Error("oauth authorize redirect omitted Location");
+
+      let idpUrl: URL;
+      try {
+        idpUrl = new URL(locationEntry[1]);
+      } catch {
+        throw new Error("oauth authorize redirect returned an invalid Location");
+      }
+      if (idpUrl.pathname !== "/login/oauth/authorize") {
+        throw new Error(`oauth authorize redirect returned unexpected Location path ${idpUrl.pathname}`);
+      }
+      idpUrl.searchParams.set("login_hint", identity.token);
+
+      const rewrittenHeaders = { ...headers };
+      delete rewrittenHeaders[locationEntry[0]];
+      rewrittenHeaders.location = idpUrl.toString();
+      await route.fulfill({
+        response,
+        status: response.status(),
+        headers: rewrittenHeaders,
+      });
     });
 
     await p.goto("/");
-    await p.getByTestId("sign-in-btn").click();
+    const reachedCallback = p.waitForURL((url) =>
+      url.pathname === "/callback" && url.searchParams.has("cp_access_token"), { timeout: 30_000 });
+    await Promise.all([reachedCallback, p.getByTestId("sign-in-btn").click()]);
 
-    // SOFT SPOT (not yet exercised against a live target — mirrors webDriver.ts's two flagged
-    // spots): App.tsx normalizes "/" -> "/templates" once authed (client-side, no reload), so the
-    // eventual URL is /templates; this only waits for the callback's transient query/path to
-    // clear, which is enough for the SPA to have consumed the token and settled into "authed".
-    await p.waitForURL((url) => !url.searchParams.has("access_token") && url.pathname !== "/callback", {
+    // Wait for the SPA to consume the callback credentials. This second phase cannot resolve on
+    // the pre-login "/" page, which was the race in the original single-predicate wait.
+    await p.waitForURL((url) => !url.searchParams.has("cp_access_token") && url.pathname !== "/callback", {
       timeout: 30_000,
     });
   }
 
-  async cliArgs(identity: Identity): Promise<string[]> {
-    const session = await this.sessionFor(identity);
-    return ["-token", session.accessToken];
-  }
-
-  async oracleToken(identity: Identity): Promise<string> {
+  async cpAccessToken(identity: Identity): Promise<string> {
     const session = await this.sessionFor(identity);
     return session.accessToken;
+  }
+
+  async nodeAccessToken(identity: Identity): Promise<string> {
+    const session = await this.sessionFor(identity);
+    return session.nodeAccessToken;
+  }
+
+  async accountId(identity: Identity): Promise<string> {
+    const wire = await this.cpAccessToken(identity);
+    const envelope = fromBinary(authv1.SignedAuthArtifactSchema, Buffer.from(wire, "base64url"));
+    return fromBinary(authv1.SessionTokenBodySchema, envelope.payload).accountId;
+  }
+
+  prepareCli(page: unknown, identity: Identity, options: CliPreparationOptions): Promise<CliPreparation> {
+    const key = `${identity.token}\0${options.configHome}`;
+    const existing = this.cliPreparations.get(key);
+    if (existing) return existing;
+    // Normal spawnctl commands use os.UserConfigDir()/spawnctl. Keep the explicit key/login
+    // commands in that same directory while exposing its parent as XDG_CONFIG_HOME to drivers.
+    const custodyDir = join(options.configHome, "spawnctl");
+    const preparation = initializeCliOwnerDevice({
+      spawnctlBin: options.spawnctlBin,
+      configHome: custodyDir,
+    }).then(() => runCliDeviceLogin({
+        spawnctlBin: options.spawnctlBin,
+        asOrigin: options.asOrigin,
+        configHome: custodyDir,
+        page: page as Parameters<typeof runCliDeviceLogin>[0]["page"],
+      }))
+      .then(() => ({ authArgs: [], configHome: options.configHome }));
+    this.cliPreparations.set(key, preparation);
+    return preparation;
+  }
+
+  targetVerifier(_identity: Identity): ResolvedTargetVerifier {
+    if (!this.cfg.verifyTarget) {
+      return async () => { throw new Error("oauth-pop target verifier is not configured"); };
+    }
+    return this.cfg.verifyTarget;
   }
 
   /** Returns the session's own cnf-bound key (the same keypair that signs PoP refreshes) — the

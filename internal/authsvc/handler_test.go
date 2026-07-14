@@ -1,8 +1,6 @@
 package authsvc_test
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,9 +11,58 @@ import (
 	"spawnery/internal/authsvc"
 	"spawnery/internal/authsvc/githubfake"
 	"spawnery/internal/authsvc/store"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 	"spawnery/internal/weborigin"
 )
+
+func TestPublicHandlerDoesNotExposeInternalRoutes(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	svc := authsvc.New(root.Cert, inter)
+
+	for _, path := range []string{"/enroll", "/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		svc.PublicHandler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s status = %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+func TestPublicHandlerDoesNotExposeNodeTokenExchange(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	rec := httptest.NewRecorder()
+	authsvc.New(root.Cert, inter).PublicHandler().ServeHTTP(rec,
+		httptest.NewRequest(http.MethodPost, "/node-token", strings.NewReader("{}")))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST /node-token status = %d, want 404", rec.Code)
+	}
+}
+
+func TestInternalHandlerAnonymousOnlyReachesEnroll(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	svc := authsvc.New(root.Cert, inter)
+	policy := mtls.Policy{"anonymous": {"authsvc.enroll": {}}}
+	handler := svc.InternalHandler(policy)
+
+	enroll := httptest.NewRecorder()
+	handler.ServeHTTP(enroll, httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader("{}")))
+	if enroll.Code == http.StatusForbidden || enroll.Code == http.StatusNotFound {
+		t.Fatalf("anonymous enrollment was rejected before handler: %d", enroll.Code)
+	}
+
+	for _, path := range []string{"/revocations", "/internal/github/link-status", "/auth.v1.AuthService/MintGitHubAccessToken", "/healthz"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("anonymous GET %s status = %d, want 403", path, rec.Code)
+		}
+	}
+}
 
 // TestHandlerOuterCORSPreservesCredentialedPreflight is a regression test for [WL6] AS CORS.
 //
@@ -34,18 +81,22 @@ func TestHandlerOuterCORSPreservesCredentialedPreflight(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	st := store.NewTestStore(t)
-	_, sigKey, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now().UTC()
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	spaOrigin := "https://app.example.com"
 	idp, err := authsvc.NewIdP(authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:           sigKey,
+		Signer:              signer,
 		GitHubRedirectURI:   "https://as.example.com/oauth/callback",
 		SPAOrigin:           spaOrigin,
 		RedirectURIs:        []string{"https://app.example.com/callback"},
 		RegistrationEnabled: true,
-		Now:                 func() time.Time { return time.Unix(1770000000, 0) },
+		Now:                 func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +160,16 @@ func TestHandlerServesHealthAndRootCA(t *testing.T) {
 	srv := httptest.NewServer(authsvc.New(root.Cert, inter).Handler())
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/healthz")
+	resp, err := http.Get(srv.URL + "/session/pubkey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /session/pubkey status = %d, want 404", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL + "/healthz")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("/healthz: %v status=%v", err, resp.StatusCode)
 	}

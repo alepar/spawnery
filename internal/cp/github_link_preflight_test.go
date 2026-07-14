@@ -13,6 +13,8 @@ package cp
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -21,6 +23,27 @@ import (
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/store"
 )
+
+func TestHTTPASLinkCheckerUsesInjectedClientWithoutServiceSecrets(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Spawnery-AS-" + "Secret"); got != "" {
+			t.Errorf("retired service header = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"active"}`))
+	}))
+	t.Cleanup(ts.Close)
+	checker := newHTTPASLinkChecker(ts.URL, ts.Client())
+	status, err := checker.CheckLinkStatus(t.Context(), "acct")
+	if err != nil || status != gitHubLinkStatusActive || !called {
+		t.Fatalf("status=%v called=%v err=%v", status, called, err)
+	}
+}
 
 // fakeASLinkChecker implements asLinkChecker for tests.
 type fakeASLinkChecker struct {

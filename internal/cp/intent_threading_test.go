@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	cpv1 "spawnery/gen/cp/v1"
@@ -49,6 +50,7 @@ func intentTestServer(t *testing.T) (*Server, *capSender, func()) {
 
 	sender := &capSender{}
 	s.reg.Add(&registry.Node{ID: "n-intent", Sender: sender, Max: 10, Free: 10})
+	s.nodeKeys.put("n-intent", 0, "cloud", "system", []byte("opaque-subkey"), []byte("leaf-first-pem"))
 
 	// Background ACK loop: for every StartSpawn the node receives, feed ACTIVE back to the scheduler.
 	stopACK := make(chan struct{})
@@ -342,6 +344,92 @@ func assertAuthThreaded(t *testing.T, sender *capSender, spawnID string) {
 		return
 	}
 	t.Fatalf("no StartSpawn for %q found", spawnID)
+}
+
+func TestSubmitIntentRequiresNodeAuthorization(t *testing.T) {
+	tests := []struct {
+		name   string
+		token  string
+		intent *authv1.SignedIntent
+	}{
+		{name: "missing node token", intent: &authv1.SignedIntent{Domain: "opaque"}},
+		{name: "missing signed intent", token: "as-issued-node-token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, _ := newTestServer(t)
+			spawnID := "submit-required-" + tt.name
+			seedStartingSpawn(t, s, spawnID, "alice")
+			s.pendingIntents.register(spawnID, "alice", testPI(spawnID))
+
+			_, err := s.SubmitIntent(auth.WithOwner(context.Background(), "alice"), connect.NewRequest(&cpv1.SubmitIntentRequest{
+				SpawnId: spawnID, NodeAccessToken: tt.token, Intent: tt.intent,
+			}))
+			if connect.CodeOf(err) != connect.CodeInvalidArgument {
+				t.Fatalf("SubmitIntent error = %v (code %v), want InvalidArgument", err, connect.CodeOf(err))
+			}
+		})
+	}
+}
+
+func TestSubmitIntentPreservesOpaqueAuthorizationThroughStartSpawn(t *testing.T) {
+	s, sender, stopACK := intentTestServer(t)
+	defer stopACK()
+
+	ctx := auth.WithOwner(context.Background(), "alice")
+	created, err := s.CreateSpawn(ctx, connect.NewRequest(&cpv1.CreateSpawnRequest{AppId: "secret-app", Model: "m"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnID := created.Msg.GetSpawnId()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pending, getErr := s.GetPendingIntent(ctx, connect.NewRequest(&cpv1.GetPendingIntentRequest{SpawnId: spawnID}))
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if pending.Msg.GetReady() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pending intent never became ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	si := &authv1.SignedIntent{Domain: "opaque-domain", Body: []byte("opaque-signed-body"), Sig: []byte("opaque-signature"), SpkiDer: []byte("opaque-spki")}
+	si.ProtoReflect().SetUnknown([]byte{0xa0, 0x06, 0x2a}) // field 100 = 42
+	wantIntent, err := proto.MarshalOptions{Deterministic: true}.Marshal(si)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantToken = "exact-as-issued-node-token"
+	if _, err := s.SubmitIntent(ctx, connect.NewRequest(&cpv1.SubmitIntentRequest{
+		SpawnId: spawnID, NodeAccessToken: wantToken, Intent: si,
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	for time.Now().Before(deadline) {
+		for _, start := range sender.starts() {
+			if start.GetSpawnId() != spawnID {
+				continue
+			}
+			if start.GetAuth().GetAccessToken() != wantToken {
+				t.Fatalf("StartSpawn token = %q, want exact AS token", start.GetAuth().GetAccessToken())
+			}
+			gotIntent, marshalErr := proto.MarshalOptions{Deterministic: true}.Marshal(start.GetAuth().GetIntent())
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if string(gotIntent) != string(wantIntent) {
+				t.Fatalf("StartSpawn intent bytes changed: got %x want %x", gotIntent, wantIntent)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("StartSpawn not emitted")
 }
 
 func assertSealedSecretsThreaded(t *testing.T, sender *capSender, spawnID string) {
@@ -862,6 +950,7 @@ func TestIntentThreadedMigrateSpawn(t *testing.T) {
 
 	// Add a second node as the migration target.
 	s.reg.Add(&registry.Node{ID: "n-intent2", Sender: sender, Max: 10, Free: 10})
+	s.nodeKeys.put("n-intent2", 0, "cloud", "system", []byte("opaque-subkey-2"), []byte("leaf-first-pem-2"))
 
 	seedSuspendedSpawn(t, s, "sp-migrate", "alice")
 

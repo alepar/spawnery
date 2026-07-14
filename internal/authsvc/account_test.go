@@ -1,12 +1,13 @@
 package authsvc
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
@@ -16,35 +17,32 @@ func TestSessionBearerAccount(t *testing.T) {
 	now := time.Unix(1770000000, 0)
 	fixedNow := func() time.Time { return now }
 
-	// Build a key set.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pki := newTestArtifactPKI(t, now, "prod")
+	signer := pki.signer(t, now, "account")
+	verifier, err := token.NewVerifier(pki.root, "prod", nil)
 	if err != nil {
-		t.Fatalf("keygen: %v", err)
-	}
-	kid, err := token.KeyID(pub)
-	if err != nil {
-		t.Fatalf("keyid: %v", err)
-	}
-	ks, err := token.NewKeySet(pub)
-	if err != nil {
-		t.Fatalf("keyset: %v", err)
+		t.Fatalf("verifier: %v", err)
 	}
 
 	mintToken := func(accountID string, issuedAt, expiresAt int64) string {
-		wire, e := token.Mint(&authv1.SessionTokenBody{
-			KeyId:     kid,
+		body, e := proto.Marshal(&authv1.SessionTokenBody{
+			KeyId:     hex.EncodeToString(signer.KeyID[:]),
 			AccountId: accountID,
 			Audience:  "cp",
 			IssuedAt:  issuedAt,
 			ExpiresAt: expiresAt,
-		}, priv)
+		})
+		if e != nil {
+			t.Fatalf("marshal: %v", e)
+		}
+		wire, e := signer.Sign(token.ArtifactTypeSession, body)
 		if e != nil {
 			t.Fatalf("mint: %v", e)
 		}
 		return wire
 	}
 
-	fn := SessionBearerAccount(ks, fixedNow)
+	fn := SessionBearerAccount(verifier, fixedNow)
 
 	newReq := func(authHeader string) *http.Request {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -71,15 +69,16 @@ func TestSessionBearerAccount(t *testing.T) {
 	})
 
 	t.Run("forged signature unknown key returns false", func(t *testing.T) {
-		_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
-		// Mint a token signed by the OTHER key; our ks only has pub (the first key).
-		wire, _ := token.Mint(&authv1.SessionTokenBody{
-			KeyId:     kid,
+		otherPKI := newTestArtifactPKI(t, now, "prod")
+		otherSigner := otherPKI.signer(t, now, "other")
+		payload, _ := proto.Marshal(&authv1.SessionTokenBody{
+			KeyId:     hex.EncodeToString(otherSigner.KeyID[:]),
 			AccountId: "acct-7",
 			Audience:  "cp",
 			IssuedAt:  now.Unix(),
 			ExpiresAt: now.Add(15 * time.Minute).Unix(),
-		}, otherPriv)
+		})
+		wire, _ := otherSigner.Sign(token.ArtifactTypeSession, payload)
 		id, ok := fn(newReq("Bearer " + wire))
 		if ok || id != "" {
 			t.Fatalf("got (%q, %v), want (\"\", false) for forged sig", id, ok)

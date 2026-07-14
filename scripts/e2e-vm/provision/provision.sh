@@ -349,14 +349,28 @@ sudo cp -rf "$PAYLOAD"/config/* /etc/spawnery/config/ 2>/dev/null || true
 [ -d "$PAYLOAD/examples" ] && sudo cp -rf "$PAYLOAD/examples" /opt/spawnery/
 [ -d "$PAYLOAD/web-dist" ] && sudo rsync -a "$PAYLOAD/web-dist/" /var/www/spawnery/
 
-# ---- PKI: throwaway CA + AS session key + node/CP mTLS + the *.e2e.test wildcard cert + the
-#      github.com/codeload.github.com cert (sp-wwtc.1) ----
+# ---- PKI: throwaway CA + certified auth signers + service/node mTLS + Caddy certs ----
 log "generating throwaway PKI + wildcard cert…"
 sudo mkdir -p /etc/spawnery/pki
-sudo bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"   # writes root.pem/ca.crt, session-key/pub, node/cp certs, wildcard.{crt,key}, github.{crt,key}
-sudo chmod 644 /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key   # caddy runs as user 'caddy'
-sudo chmod 644 /etc/spawnery/pki/github.crt /etc/spawnery/pki/github.key      # caddy runs as user 'caddy'
+sudo install -d -m0700 -o root -g root /var/lib/spawnery-offline
+sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline \
+  bash "$PAYLOAD/gen-pki.sh" /etc/spawnery/pki "$WILDCARD_DOMAIN"
 sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this out for host trust
+sudo install -d -m0700 /etc/spawnery/authsvc /etc/spawnery/cp \
+  /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations \
+  /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations
+sudo install -d -m0700 /etc/spawnery/node
+sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/
+sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/
+sudo cp -f /etc/spawnery/pki/node-cloud/{cert.pem,chain.pem,key.pem,root.pem} /etc/spawnery/node/
+sudo cp -f /etc/spawnery/pki/{service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem} /etc/spawnery/node/
+sudo chmod 0600 /etc/spawnery/authsvc/* /etc/spawnery/cp/* /etc/spawnery/node/*
+sudo install -d -m0750 -o root -g caddy /etc/spawnery/caddy
+sudo install -m0644 -o root -g caddy /etc/spawnery/pki/wildcard.crt /etc/spawnery/caddy/wildcard.crt
+sudo install -m0640 -o root -g caddy /etc/spawnery/pki/wildcard.key /etc/spawnery/caddy/wildcard.key
+sudo install -m0644 -o root -g caddy /etc/spawnery/pki/github.crt /etc/spawnery/caddy/github.crt
+sudo install -m0640 -o root -g caddy /etc/spawnery/pki/github.key /etc/spawnery/caddy/github.key
+sudo rm -rf /etc/spawnery/pki/*
 
 # ---- golden CA into the VM's OWN trust store (sp-wwtc.1) ----
 # The NODE is a plain host process on this VM (not in a pod), and with sp-wwtc it clones from
@@ -364,7 +378,7 @@ sudo cp /etc/spawnery/pki/ca.crt /home/build/ca.crt   # build-base.sh pulls this
 # clone-in fails TLS verification. This is SEPARATE from the sidecar's trust: the sidecar runs in a
 # CONTAINER with its own image trust store, which is why it still needs SIDECAR_CA_BUNDLE_FILE.
 log "installing the golden CA into the VM's system trust (the node clones from https://github.com)…"
-sudo cp -f /etc/spawnery/pki/ca.crt /etc/pki/ca-trust/source/anchors/spawnery-golden-ca.crt
+sudo cp -f /home/build/ca.crt /etc/pki/ca-trust/source/anchors/spawnery-golden-ca.crt
 sudo update-ca-trust extract
 
 # ---- sidecar upstream CA trust bundle (sp-wwtc.3): system roots + the golden CA, MERGED (SSL_CERT_FILE
@@ -391,7 +405,7 @@ if [ -z "$SYS_CA_BUNDLE" ]; then
   exit 1
 fi
 log "  system roots: $SYS_CA_BUNDLE"
-sudo bash -c "cat '$SYS_CA_BUNDLE' /etc/spawnery/pki/root.pem > /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt"
+sudo bash -c "cat '$SYS_CA_BUNDLE' /home/build/ca.crt > /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt"
 sudo chmod 644 /etc/spawnery/sidecar-ca-bundle/ca-bundle.crt
 
 # ---- cp.prod.yaml: patch the ${sops:} store DSN to the throwaway local Postgres (baseline; roll.sh
@@ -405,21 +419,28 @@ sudo sed -i 's#\${sops:store.dsn}#postgres://spawnery:spawnery@127.0.0.1:5432/sp
 #      loopback (127.0.0.1:3000) — this reverse_proxy is what terminates TLS for it. ----
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 :443 {
-  tls /etc/spawnery/pki/wildcard.crt /etc/spawnery/pki/wildcard.key
-  @cp   path /cp.v1.* /ws*
-  @as   path /oauth* /refresh* /logout* /github* /device* /ca/*
-  reverse_proxy @cp 127.0.0.1:8080
-  # AS now serves TLS (sp-wwtc mint wiring, AS_TLS_CERT/KEY — as-server.crt, root-signed). Caddy
-  # verifies it against the system trust store, which already has the golden root CA installed below
-  # ("golden CA into the VM's OWN trust") — no tls_trust_pool override needed. Browser/SPA traffic
-  # presents no client cert; AS's ClientAuth is VerifyClientCertIfGiven, so that's fine.
-  reverse_proxy @as https://127.0.0.1:8090
-  root * /var/www/spawnery
-  file_server
+  tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key
+  @cp   path /cp.v1.*
+  @ws   path /ws*
+  @as   path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens
+  handle @cp {
+    reverse_proxy h2c://127.0.0.1:8080
+  }
+  handle @ws {
+    reverse_proxy 127.0.0.1:8080
+  }
+  handle @as {
+    reverse_proxy 127.0.0.1:8090
+  }
+  handle {
+    root * /var/www/spawnery
+    try_files {path} /index.html
+    file_server
+  }
 }
 
 github.com, codeload.github.com {
-  tls /etc/spawnery/pki/github.crt /etc/spawnery/pki/github.key
+  tls /etc/spawnery/caddy/github.crt /etc/spawnery/caddy/github.key
   reverse_proxy 127.0.0.1:3000
 }
 EOF
@@ -516,6 +537,10 @@ EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/node /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/authsvc
+NoNewPrivileges=yes
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/authsvc
 Restart=on-failure
 [Install]
@@ -531,6 +556,10 @@ Requires=spawnery-render-env.service
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/node /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/cp
+NoNewPrivileges=yes
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/spawnery_cp
 Restart=on-failure
 [Install]
@@ -553,6 +582,10 @@ EnvironmentFile=-/etc/spawnery/env.d/journal.env
 EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 EnvironmentFile=-/etc/spawnery/env.d/podnet.env
 WorkingDirectory=/opt/spawnery
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki
+ReadOnlyPaths=/etc/spawnery/node
+NoNewPrivileges=yes
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/spawnlet
 Restart=on-failure
 [Install]

@@ -21,14 +21,15 @@ type fakeSessionExec struct {
 		name string
 		port int
 	}
-	killed        []string // tmux names killed
-	reaped        []string // spawn ids ReapExtraSessions was called for
-	reapErr       error
-	dials         int
-	acpClosed     int // count of AttachedStream.Close calls on acp dials (acp pump teardown / conn release)
-	launchMoshErr error
-	launchACPErr  error
-	dialErr       error
+	killed         []string // tmux names killed
+	reaped         []string // spawn ids ReapExtraSessions was called for
+	reapErr        error
+	dials          int
+	acpClosed      int // count of AttachedStream.Close calls on acp dials (acp pump teardown / conn release)
+	launchMoshErr  error
+	launchACPErr   error
+	dialErr        error
+	moshAttachArgv []string
 
 	// dialGate, when non-nil, parks the FIRST DialACP call (closing dialReached when it arrives) until
 	// dialGate is closed — a deterministic seam to interleave a CloseSession + a new CreateSession
@@ -67,6 +68,9 @@ func (f *fakeSessionExec) LaunchMosh(_ context.Context, _, _, tmuxName string) e
 	return f.launchMoshErr
 }
 func (f *fakeSessionExec) MoshAttachArgv(_, tmuxName string) ([]string, error) {
+	if f.moshAttachArgv != nil {
+		return f.moshAttachArgv, nil
+	}
 	return []string{"true"}, nil // a never-run argv: no client attaches in unit tests
 }
 func (f *fakeSessionExec) LaunchACP(_ context.Context, _, _, tmuxName string, port int) error {
@@ -138,6 +142,7 @@ func newSessionAttacher(spawnID string, sx sessionExec, fs cpStream) *attacher {
 		tmuxRelays: map[sessionKey]*tmuxRelay{},
 		sessions:   map[string]*sessionRegistry{spawnID: reg},
 		pending:    map[sessionKey][]pendingClient{},
+		auths:      newSessionAuthRegistry(),
 	}
 }
 
@@ -390,6 +395,8 @@ func TestCloseSessionACPFreesPort(t *testing.T) {
 		_, ok := a.pumps[sessionKey{"s1", "1"}]
 		return ok
 	})
+	authKey := sessionAuthKey{spawnID: "s1", sessionID: "1", clientID: "client"}
+	a.auths.register(authKey, sessionAuthRecord{expiresAt: time.Now().Add(time.Hour)}, func(string) {})
 
 	a.handle(context.Background(), &nodev1.CPMessage{Msg: &nodev1.CPMessage_CloseSession{CloseSession: &nodev1.CloseSession{
 		SpawnId: "s1", SessionId: "1",
@@ -400,6 +407,9 @@ func TestCloseSessionACPFreesPort(t *testing.T) {
 		_, ok := a.pumps[sessionKey{"s1", "1"}]
 		return !ok
 	})
+	if a.auths.contains(authKey) {
+		t.Fatal("CloseSession retained attachment authorization")
+	}
 	sx.mu.Lock()
 	if len(sx.killed) != 1 || sx.killed[0] != "acp-1" {
 		sx.mu.Unlock()

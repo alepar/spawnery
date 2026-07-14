@@ -4,18 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"io"
+	"math/big"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
 	cpv1 "spawnery/gen/cp/v1"
+	"spawnery/internal/intent"
 	"spawnery/internal/pki"
 	"spawnery/internal/secrets/journalkey"
 	"spawnery/internal/secrets/seal"
@@ -193,17 +196,21 @@ type prodNodeFix struct {
 }
 
 func issueProdNode(t *testing.T, nodeID, accountID string) prodNodeFix {
+	return issueProdNodeClass(t, nodeID, accountID, pki.ClassSelfHosted)
+}
+
+func issueProdNodeClass(t *testing.T, nodeID, accountID string, class pki.IssuerRole) prodNodeFix {
 	t.Helper()
 
 	root, err := pki.NewRootCA("test-root")
 	if err != nil {
 		t.Fatal(err)
 	}
-	inter, err := root.NewIntermediate(pki.ClassSelfHosted)
+	inter, err := root.NewIntermediate(class)
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := inter.IssueNode(nodeID, accountID, pki.ClassSelfHosted, time.Now().Add(365*24*time.Hour))
+	node, err := inter.IssueNode(nodeID, accountID, string(class), time.Now().Add(365*24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +222,7 @@ func issueProdNode(t *testing.T, nodeID, accountID string) prodNodeFix {
 	}
 }
 
-func TestMigrateRejectsRevokedNodeBeforeDelivery(t *testing.T) {
+func TestMigrateRejectsRevokedCertificateBeforeDelivery(t *testing.T) {
 	mn, _ := seal.NewMnemonic()
 	dev, _ := seal.DeviceFromMnemonic(mn, "")
 	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
@@ -245,19 +252,14 @@ func TestMigrateRejectsRevokedNodeBeforeDelivery(t *testing.T) {
 		notAfter:      sk.NotAfter,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{fx.nodeID}})
-	}))
-	defer srv.Close()
-
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
-		AccountID:        "alice",
-		RootPEM:          fx.rootPEM,
-		RevocationURL:    srv.URL + "/node-revocations",
-		RevocationClient: srv.Client(),
+		AccountID:              "alice",
+		RootPEM:                fx.rootPEM,
+		TrustDomain:            pki.DefaultTrustDomain,
+		CertificateRevocations: func(_, _ *big.Int) bool { return true },
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "node is revoked") {
+	if err == nil || !strings.Contains(err.Error(), "certificate is revoked") {
 		t.Fatalf("err = %v", err)
 	}
 	if client.gotDelivery != nil {
@@ -298,17 +300,12 @@ func TestMigrateRejectsMismatchedVerifiedNodeBeforeDelivery(t *testing.T) {
 		notAfter:       sk.NotAfter,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{}})
-	}))
-	defer srv.Close()
-
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", "node-b", &out, now, MoveOptions{
-		AccountID:        "alice",
-		RootPEM:          fx.rootPEM,
-		RevocationURL:    srv.URL + "/node-revocations",
-		RevocationClient: srv.Client(),
+		AccountID:              "alice",
+		RootPEM:                fx.rootPEM,
+		TrustDomain:            pki.DefaultTrustDomain,
+		CertificateRevocations: allowNoCertificateRevocations,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "verified node \"node-c\" does not match resolved node \"node-b\"") {
 		t.Fatalf("err = %v", err)
@@ -342,76 +339,13 @@ func TestMigrateRejectsMissingCertChainWhenRootConfigured(t *testing.T) {
 
 	var out bytes.Buffer
 	err = migrateSpawn(context.Background(), client, dev, "sp1", "node-b", &out, time.Now(), MoveOptions{
-		RootPEM: []byte("pinned-root-pem"),
+		RootPEM: []byte("pinned-root-pem"), TrustDomain: pki.DefaultTrustDomain,
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "node cert chain") {
 		t.Fatalf("err = %v", err)
 	}
 	if client.gotDelivery != nil {
 		t.Fatal("DeliverSecrets must not be called when a pinned root is configured but CP omits the node cert chain")
-	}
-}
-
-func TestMigrateRefetchesNodeRevocationsForEachProductionSeal(t *testing.T) {
-	mn, _ := seal.NewMnemonic()
-	dev, _ := seal.DeviceFromMnemonic(mn, "")
-	env, err := journalkey.SealToOwner("repo-pw-123", []seal.X25519PubKey{dev.X25519PubKey()},
-		seal.AtRestAAD{AccountID: "alice", SecretID: journalkey.SecretID("main"), Version: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ct, _ := json.Marshal(env)
-
-	fx := issueProdNode(t, "node-b", "alice")
-	nodePub, _, err := seal.NodeKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	sk, err := subkey.Sign(fx.key, fx.nodeID, nodePub, now, now.Add(subkey.DefaultValidity))
-	if err != nil {
-		t.Fatal(err)
-	}
-	skJSON, _ := json.Marshal(sk)
-
-	client := &fakeMoveClient{
-		entries: []*cpv1.JournalKeyCiphertext{
-			{Mount: "main", Ciphertext: ct},
-			{Mount: "aux", Ciphertext: ct},
-		},
-		nodeID:        fx.nodeID,
-		nodePub:       sk.HPKEPub,
-		nodeCertChain: fx.chainPEM,
-		signedSubkey:  skJSON,
-		gen:           7,
-		notAfter:      sk.NotAfter,
-	}
-
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			_ = json.NewEncoder(w).Encode(map[string]any{"revoked_node_ids": []string{}})
-			return
-		}
-		http.Error(w, "down", http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	var out bytes.Buffer
-	err = migrateSpawn(context.Background(), client, dev, "sp1", fx.nodeID, &out, now, MoveOptions{
-		AccountID:        "alice",
-		RootPEM:          fx.rootPEM,
-		RevocationURL:    srv.URL + "/node-revocations",
-		RevocationClient: srv.Client(),
-	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "503") {
-		t.Fatalf("err = %v", err)
-	}
-	if client.gotDelivery != nil {
-		t.Fatal("DeliverSecrets must not be called after revocation check becomes unavailable")
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("revocation calls = %d, want 2", got)
 	}
 }
 
@@ -426,17 +360,176 @@ type fakeForkClient struct {
 	forkID     string
 	transferID string
 	forkErr    error
+	forkDelay  time.Duration
 	deliverErr error
 
 	gotFork              *cpv1.ForkSpawnRequest
 	gotIntentPollSpawnID string
+	gotIntentSubmit      *cpv1.SubmitIntentRequest
 	gotJournalSpawnID    string
 	gotNodeKeySpawnID    string
 	gotDelivery          *cpv1.DeliverSecretsRequest
 }
 
+type readyForkClient struct {
+	*fakeForkClient
+	pending *cpv1.GetPendingIntentResponse
+}
+
+func (f *readyForkClient) GetPendingIntent(_ context.Context, req *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
+	f.gotIntentPollSpawnID = req.Msg.SpawnId
+	return connect.NewResponse(f.pending), nil
+}
+
+func TestForkWaitsForLateAuthorizationFailureAfterRPCSuccess(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	base := &fakeForkClient{forkID: "fork-1", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		time.Sleep(25 * time.Millisecond)
+		return NodeCredentials{}, errors.New("late fork authorization failure")
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	_, err := forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "late fork authorization failure") {
+		t.Fatalf("error = %v", err)
+	}
+	if base.gotJournalSpawnID != "" {
+		t.Fatal("fork continued to journal delivery before authorization completed")
+	}
+}
+
+func TestForkAuthorizationSignsReturnedChildAndSubmitsViaSource(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeForkClient{forkID: "fork-1", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+
+	result, err := forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err != nil {
+		t.Fatalf("forkSpawnAuthorized: %v", err)
+	}
+	if result.ForkSpawnID != "fork-1" {
+		t.Fatalf("fork id = %q, want fork-1", result.ForkSpawnID)
+	}
+	if base.gotIntentPollSpawnID != "source-1" {
+		t.Fatalf("GetPendingIntent spawn_id = %q, want source-1", base.gotIntentPollSpawnID)
+	}
+	if base.gotIntentSubmit == nil || base.gotIntentSubmit.GetSpawnId() != "source-1" {
+		t.Fatalf("SubmitIntent = %+v, want source-keyed submission", base.gotIntentSubmit)
+	}
+	body, err := intent.ParseBody(base.gotIntentSubmit.GetIntent().GetBody())
+	if err != nil {
+		t.Fatalf("parse submitted intent: %v", err)
+	}
+	if body.GetSpawnId() != "fork-1" || body.GetOp() != string(intent.OpForkSpawn) {
+		t.Fatalf("signed spawn/op = %q/%q, want fork-1/%s", body.GetSpawnId(), body.GetOp(), intent.OpForkSpawn)
+	}
+}
+
+func TestForkAuthorizationRejectsSourceAsPendingChild(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeForkClient{forkID: "source-1", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "source-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+
+	_, err = forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pending fork spawn_id must differ from source") {
+		t.Fatalf("error = %v, want source-as-child rejection", err)
+	}
+	if base.gotIntentSubmit != nil {
+		t.Fatalf("SubmitIntent called for source-as-child pending tuple: %+v", base.gotIntentSubmit)
+	}
+}
+
+func TestForkAuthorizationRejectsResponseChildSubstitution(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewECDSASessionSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeForkClient{forkID: "fork-substituted", nodeID: "node-a"}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-authorized", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signer}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+
+	_, err = forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), `response fork_spawn_id "fork-substituted" does not match authorized "fork-authorized"`) {
+		t.Fatalf("error = %v, want response child substitution rejection", err)
+	}
+	if base.gotIntentSubmit == nil || base.gotIntentSubmit.GetSpawnId() != "source-1" {
+		t.Fatalf("SubmitIntent = %+v, want source-keyed authorized submission", base.gotIntentSubmit)
+	}
+	if base.gotJournalSpawnID != "" {
+		t.Fatalf("journal delivery started for substituted child %q", base.gotJournalSpawnID)
+	}
+}
+
+func TestMoveAndForkPreflightFailureMakesNoCPCall(t *testing.T) {
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) { return NodeCredentials{}, errors.New("login required") })
+	move := &fakeMoveClient{}
+	if err := migrateSpawnAuthorized(context.Background(), move, source, TargetTrust{}, testForkDevice(t), "sp-1", "cloud", io.Discard, time.Now(), MoveOptions{}, nil, true); err == nil {
+		t.Fatal("move accepted missing credentials")
+	}
+	if move.gotMigrate != nil {
+		t.Fatal("MigrateSpawn called before credential preflight")
+	}
+	fork := &fakeForkClient{}
+	if _, err := forkSpawnAuthorized(context.Background(), fork, source, TargetTrust{}, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "sp-1"}, io.Discard, time.Now(), MoveOptions{}); err == nil {
+		t.Fatal("fork accepted missing credentials")
+	}
+	if fork.gotFork != nil {
+		t.Fatal("ForkSpawn called before credential preflight")
+	}
+}
+
 func (f *fakeForkClient) ForkSpawn(_ context.Context, req *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error) {
 	f.gotFork = req.Msg
+	time.Sleep(f.forkDelay)
 	if f.forkErr != nil {
 		return nil, f.forkErr
 	}
@@ -447,6 +540,35 @@ func (f *fakeForkClient) ForkSpawn(_ context.Context, req *connect.Request[cpv1.
 	}), nil
 }
 
+type signOnlyFailer struct{}
+
+func (signOnlyFailer) PublicSPKIDER() ([]byte, error) { return []byte{1}, nil }
+func (signOnlyFailer) SignP1363(string, []byte) ([]byte, error) {
+	return nil, errors.New("fork sign failed")
+}
+
+func TestForkAuthorizationErrorCancelsAndDrainsDelayedRPCPeer(t *testing.T) {
+	fx := issueProdNode(t, "node-a", "alice")
+	base := &fakeForkClient{forkID: "fork-1", nodeID: "node-a", forkDelay: 30 * time.Millisecond}
+	client := &readyForkClient{fakeForkClient: base, pending: &cpv1.GetPendingIntentResponse{
+		Ready: true, Generation: 7, TargetNodeId: "node-a", TargetNodeClass: pki.ClassSelfHosted,
+		TargetNodeAccountId: "alice", NodeCertChain: fx.chainPEM,
+		Pending: &cpv1.PendingIntent{Op: string(intent.OpForkSpawn), SpawnId: "fork-1", Generation: 7, TargetNodeId: "node-a"},
+	}}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) {
+		return NodeCredentials{AccessToken: "node-token", Signer: signOnlyFailer{}}, nil
+	})
+	trust := TargetTrust{RootPEM: fx.rootPEM, TrustDomain: pki.DefaultTrustDomain, AccountID: "alice", CertificateRevocations: func(_, _ *big.Int) bool { return false }, Now: time.Now}
+	started := time.Now()
+	_, err := forkSpawnAuthorized(context.Background(), client, source, trust, testForkDevice(t), &cpv1.ForkSpawnRequest{SpawnId: "source-1"}, io.Discard, time.Now(), MoveOptions{})
+	if err == nil || !strings.Contains(err.Error(), "fork sign failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if time.Since(started) < 25*time.Millisecond {
+		t.Fatal("fork returned before delayed RPC peer drained")
+	}
+}
+
 func (f *fakeForkClient) GetPendingIntent(_ context.Context, req *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error) {
 	f.gotIntentPollSpawnID = req.Msg.SpawnId
 	// Never report ready: the concurrent pollAndSign goroutine keeps polling until ForkSpawn
@@ -454,7 +576,8 @@ func (f *fakeForkClient) GetPendingIntent(_ context.Context, req *connect.Reques
 	return connect.NewResponse(&cpv1.GetPendingIntentResponse{Ready: false}), nil
 }
 
-func (f *fakeForkClient) SubmitIntent(_ context.Context, _ *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+func (f *fakeForkClient) SubmitIntent(_ context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
+	f.gotIntentSubmit = req.Msg
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
 }
 

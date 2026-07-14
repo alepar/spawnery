@@ -52,6 +52,7 @@ message NodeMessage {
     ManagedPodsReport            managed_pods          = 19;  // node -> CP: pods observed at startup; asks adopt-or-reap (SE3 §4.2)
     SkillInstallReport            skill_install_report  = 20; // node -> CP: apply-report envelope from the agent container's `agentinstall apply --report` (sp-mwco.2.7)
     RepresignArtifactsRequest     represign_artifacts_request = 21; // node -> CP: mint fresh presigned GETs for by-ref skill artifacts staging on this node (sp-mwco.4.3)
+    SessionAuthClosed             session_auth_closed     = 22; // node -> CP: addressed client auth expiry/rejection
   }
 }
 message CPMessage {
@@ -79,6 +80,7 @@ message CPMessage {
     GitHubTokenRotatedSignal     github_token_rotated  = 21;            // CP -> node: token-free rotation heads-up (lazy invalidate + repull)
     ManagedPodsDecisions         readopt_decisions     = 22;            // CP -> node: per-spawn adopt/reap/defer answer (SE3 §4.2)
     RepresignArtifactsResponse   represign_artifacts_response = 23;     // CP -> node: response to a RepresignArtifactsRequest (sp-mwco.4.3)
+    SessionReauth               session_reauth        = 24;            // CP -> node: opaque replacement node authorization
   }
 }
 
@@ -320,8 +322,8 @@ message SpawnStatus {
 }
 // auth (field 20): the client's signed intent + aud=node access token (A4). The node verifies
 // the full chain: AS sig on token -> aud=node -> owner match -> SPKI/cnf match -> intent sig
-// -> field-by-field correspondence -> freshness -> jti uniqueness. In verify-and-log mode
-// (NODE_AUTH_MODE=insecure) failures are logged but not enforced.
+// -> exact op/domain/field correspondence -> freshness -> jti uniqueness. Failures are fatal
+// in every runtime transport mode.
 // asserted_owner (field 21): the CP-asserted spawn owner (cloud split model, sp-ova §7a).
 // base_image_digest (field 22): pinned base digest for cross-node resume (sp-ei4.1.10);
 // empty on fresh create. The node resolves and records the digest at create time; on resume
@@ -353,6 +355,7 @@ message StartSpawn  {
   // spawnery/delta:<spawn_id> image. The node must not restore them and must fail the start
   // if that local delta image is absent. Unset means rootfs_artifacts are restore inputs.
   bool                 rootfs_artifacts_local_only = 26;
+  string               intent_op = 27; // exact signed lifecycle operation
 }
 message StopSpawn   { string spawn_id = 1; uint64 generation = 2; }
 message Suspend     { string spawn_id = 1; uint64 generation = 2; bool capture_rootfs_artifact = 3; }
@@ -487,8 +490,28 @@ message SessionOpen  {
   string session_id = 5;
   auth.v1.AuthEnvelope auth           = 10;
   string               asserted_owner = 11;
+  string               attachment_id = 12;
+  uint64               attachment_sequence = 13;
+  auth.v1.ExecRequest  exec_request = 14;
 }
-message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; string session_id = 4; }
+message SessionClose { string spawn_id = 1; uint64 generation = 2; string client_id = 3; string session_id = 4; string attachment_id = 5; }
+message SessionReauth {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  string client_id = 3;
+  string session_id = 4;
+  auth.v1.AuthEnvelope auth = 5;
+  string asserted_owner = 6;
+  string attachment_id = 7;
+}
+message SessionAuthClosed {
+  string spawn_id = 1;
+  uint64 generation = 2;
+  string client_id = 3;
+  string session_id = 4;
+  string reason = 5;
+  string attachment_id = 6;
+}
 // Frame carries no generation: data frames are correlated to an episode by spawn_id at the session layer.
 message Frame        { string spawn_id = 1; bytes data = 2; string client_id = 3; string session_id = 4; }
 

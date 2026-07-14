@@ -52,9 +52,8 @@ message SessionTokenBody {
   string account_id = 1;
   string handle = 2; // display-only; nothing keys or authorizes on it [AM9]
   string token_id = 3;
-  // "cp" | "node" [MC2] — split: node-relayed tokens are aud=node, REJECTED by the CP
-  // interceptor; aud=cp never leaves CP-bound use. A1 mints "cp" only; "node"-audience
-  // minting is A4's flow — do not mint node tokens here.
+  // "cp" | "node" [MC2] — node-relayed tokens are aud=node and REJECTED by the CP
+  // interceptor; aud=cp never leaves CP-bound use. The AS mints both audiences as one pair.
   string audience = 4;
   int64 issued_at = 5;
   int64 expires_at = 6;
@@ -62,6 +61,7 @@ message SessionTokenBody {
   // x509.MarshalPKIXPublicKey emit [AM11].
   bytes session_key_hash = 7;
   string key_id = 8; // AS signing-key selector [AM4]
+  string family_id = 9; // refresh family shared by the paired cp/node credentials
 }
 
 // RevocationEntry is one signed entry in the AS revocation feed (design §4 [AM10]); the CP
@@ -72,8 +72,38 @@ message RevocationEntry {
   int64 seq = 1;
   string account_id = 2;
   string family_id = 3;
-  repeated string token_ids = 4; // access-token token_ids the family had live at revocation
+  reserved 4;
+  reserved "token_ids";
   int64 revoked_at = 5;
+  repeated RevokedToken revoked_tokens = 6;
+  int64 revoke_tokens_issued_before = 7;
+}
+
+message RevokedToken {
+  string token_id = 1;
+  int64 retain_until = 2;
+}
+
+// SignedAuthArtifact is the self-describing envelope for every AS authorization artifact.
+// signer_chain is DER encoded, leaf first, with the locally trusted root omitted. key_id is
+// SHA-256 of the leaf SPKI and is a cache selector only; it grants no authority.
+message SignedAuthArtifact {
+  string artifact_type       = 1;
+  bytes payload              = 2;
+  bytes signature            = 3;
+  repeated bytes signer_chain = 4;
+  bytes key_id               = 5;
+}
+
+// SignerRevocationStatement is signed by the offline auth-signing intermediate under
+// spawnery/signer-revocation/v1. Verifiers persist the highest accepted generation.
+message SignerRevocationStatement {
+  string environment                 = 1;
+  uint64 generation                  = 2;
+  int64 issued_at                    = 3;
+  repeated bytes revoked_serials     = 4;
+  repeated bytes revoked_spki_sha256 = 5;
+  int64 minimum_signer_not_before    = 6;
 }
 
 // MountRef is one mount binding inside an IntentBody. Structurally mirrors node.v1.MountBinding but
@@ -95,7 +125,7 @@ message MountRef {
 // correspondence check compares exactly the fields it is about to execute.
 //
 // Domain tags: spawnery/intent/<op>/v1 for op ∈ {create-spawn, resume-spawn,
-// recreate-spawn, migrate-spawn, session-open}.
+// recreate-spawn, migrate-spawn, session-open, session-reauth, exec-open}.
 message IntentBody {
   string jti            = 1;  // unique intent id (UUID); node caches to detect replay
   int64  issued_at      = 2;  // unix seconds; node enforces freshness window ±skew
@@ -109,6 +139,15 @@ message IntentBody {
   string data_ref       = 10; // resume/recreate/migrate: mount data reference
   string session_id     = 11; // session-open: session being opened
   repeated MountRef mounts = 12; // create/resume: mount bindings
+  repeated string attached_secret_ids = 13; // canonical complete startup secret-id set
+  string new_token_id = 14; // session-reauth: verified replacement node-token id
+  ExecRequest exec_request = 15; // exec-open: exact ordered command relayed separately to the node
+}
+
+// ExecRequest is the exact ordered command selected by an exec-open intent. The relay carries a
+// separate copy unchanged; the node requires exact protobuf equality before execution.
+message ExecRequest {
+  repeated string argv = 1;
 }
 
 // SignedIntent carries a client-signed per-operation intent [AC1][AM11].

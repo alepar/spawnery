@@ -95,7 +95,7 @@ export function buildAuthorizeUrl({
 // ── parseCallback ─────────────────────────────────────────────────────────────
 
 export type CallbackResult =
-  | { kind: "ok"; accessToken: string; refreshTokenHash: string; route: string }
+  | { kind: "ok"; cpAccessToken: string; nodeAccessToken: string; refreshTokenHash: string; route: string }
   | { kind: "error"; code: string; description: string }
   | { kind: "none" }; // no callback params present
 
@@ -118,12 +118,17 @@ export function parseCallback(
   if (!search) return { kind: "none" };
 
   const params = new URLSearchParams(search);
-  const accessToken = params.get("access_token");
+  const cpAccessToken = params.get("cp_access_token");
+  const nodeAccessToken = params.get("node_access_token");
+  const refreshTokenHash = params.get("refresh_token_hash");
+  const legacyAccessToken = params.get("access_token");
   const stateParam = params.get("state");
   const errorCode = params.get("error");
 
   // No callback parameters at all.
-  if (!accessToken && !errorCode) return { kind: "none" };
+  const hasCredentialParams = cpAccessToken !== null || nodeAccessToken !== null ||
+    refreshTokenHash !== null || legacyAccessToken !== null;
+  if (!hasCredentialParams && !errorCode) return { kind: "none" };
 
   // Error callback.
   if (errorCode) {
@@ -156,14 +161,17 @@ export function parseCallback(
     return { kind: "error", code: "state_mismatch", description: "State mismatch (CSRF check)" };
   }
 
-  const refreshTokenHash = params.get("refresh_token_hash") ?? "";
-
   // Strip token + state from URL (access_token must not survive in browser history).
   history.replaceState(history.locationPathname());
 
+  if (legacyAccessToken !== null || !cpAccessToken || !nodeAccessToken || !refreshTokenHash) {
+    return { kind: "error", code: "malformed_credentials", description: "Incomplete credential pair" };
+  }
+
   return {
     kind: "ok",
-    accessToken: accessToken!,
+    cpAccessToken,
+    nodeAccessToken,
     refreshTokenHash,
     route: stored.route,
   };

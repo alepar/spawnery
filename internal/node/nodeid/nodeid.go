@@ -5,16 +5,27 @@ package nodeid
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/net/http2"
 
 	"spawnery/internal/h2keepalive"
+	"spawnery/internal/mtls"
+	"spawnery/internal/pki"
 )
+
+type ClientOptions struct {
+	TrustDomain         string
+	ServerName          string
+	ExpectedServiceRole string
+	IsRevoked           func(issuer, serial *big.Int) bool
+	ConnectionRegistry  *mtls.ConnectionRegistry
+}
 
 // Identity is a node's on-disk mTLS material (all PEM).
 type Identity struct {
@@ -75,22 +86,31 @@ func Load(dir string) (Identity, error) {
 
 // MTLSClient builds an HTTP/2 client that presents the node's client certificate (leaf + chain) and
 // verifies the CP server against the pinned root.
-func (id Identity) MTLSClient() (*http.Client, error) {
+func (id Identity) MTLSClient(opts ClientOptions) (*http.Client, error) {
+	if opts.IsRevoked == nil {
+		return nil, errors.New("nodeid: certificate revocation state is required")
+	}
 	chain := append(append([]byte{}, id.CertPEM...), id.ChainPEM...)
 	cert, err := tls.X509KeyPair(chain, id.KeyPEM)
 	if err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(id.RootPEM) {
+	root, err := pki.ParseCertPEM(id.RootPEM)
+	if err != nil {
 		return nil, errors.New("nodeid: no usable certificate in pinned root PEM")
 	}
+	tlsConfig, err := mtls.ClientConfig(mtls.ClientOptions{
+		Root: root, TrustDomain: opts.TrustDomain, Identity: cert, ServerName: opts.ServerName,
+		ExpectedServiceRole: opts.ExpectedServiceRole, CurrentTime: time.Now, IsRevoked: opts.IsRevoked,
+	})
+	if err != nil {
+		return nil, err
+	}
 	tr := &http2.Transport{
-		TLSClientConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      pool,
-			MinVersion:   tls.VersionTLS12,
-		},
+		TLSClientConfig: tlsConfig,
+	}
+	if opts.ConnectionRegistry != nil {
+		tr.DialTLSContext = mtls.DialTLSContextHTTP2(tlsConfig, opts.ConnectionRegistry)
 	}
 	h2keepalive.ConfigureTransport(tr)
 	return &http.Client{Transport: tr}, nil

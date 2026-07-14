@@ -28,6 +28,7 @@ type fakeSpawnClient struct {
 	stopErr      error
 
 	gotResume    *cpv1.ResumeSpawnRequest
+	gotCreate    *cpv1.CreateSpawnRequest
 	gotSuspend   *cpv1.SuspendSpawnRequest
 	gotSetModel  *cpv1.SetSpawnModelRequest
 	gotDelete    *cpv1.DeleteSpawnRequest
@@ -45,6 +46,7 @@ func (f *fakeSpawnClient) SubmitIntent(_ context.Context, _ *connect.Request[cpv
 }
 
 func (f *fakeSpawnClient) CreateSpawn(_ context.Context, req *connect.Request[cpv1.CreateSpawnRequest]) (*connect.Response[cpv1.CreateSpawnResponse], error) {
+	f.gotCreate = req.Msg
 	return connect.NewResponse(&cpv1.CreateSpawnResponse{SpawnId: "sp-created"}), nil
 }
 
@@ -203,6 +205,26 @@ func TestResumePropagatesRPCError(t *testing.T) {
 	err := resumeSpawn(context.Background(), f, "sp-1", nil)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestResumePreflightFailureMakesNoCPCall(t *testing.T) {
+	f := &fakeSpawnClient{}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) { return NodeCredentials{}, errors.New("login required") })
+	err := resumeSpawnAuthorized(context.Background(), f, source, TargetTrust{}, "sp-1", nil)
+	if err == nil || f.gotResume != nil {
+		t.Fatalf("error = %v, ResumeSpawn = %+v", err, f.gotResume)
+	}
+}
+
+func TestCreatePreflightFailureMakesNoCPCall(t *testing.T) {
+	f := &fakeSpawnClient{}
+	source := nodeCredentialSourceFunc(func(context.Context) (NodeCredentials, error) { return NodeCredentials{}, errors.New("login required") })
+	if _, err := createSpawnAuthorized(context.Background(), f, source, TargetTrust{}, &cpv1.CreateSpawnRequest{}); err == nil {
+		t.Fatal("create accepted missing credentials")
+	}
+	if f.gotCreate != nil {
+		t.Fatal("CreateSpawn called before credential preflight")
 	}
 }
 

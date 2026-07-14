@@ -47,6 +47,10 @@ func openBun(cfg Config) (*bun.DB, error) {
 		// SQLite is single-writer; cap the pool to 1 connection so concurrent ops are serialized
 		// at the driver level rather than fighting the retry mutex (R5 / AM3 ops note).
 		sqldb.SetMaxOpenConns(1)
+		if _, err := sqldb.ExecContext(context.Background(), "PRAGMA foreign_keys = ON"); err != nil {
+			sqldb.Close()
+			return nil, fmt.Errorf("authsvc/store: enabling foreign keys: %w", err)
+		}
 		if err := migrate(sqldb, "sqlite3", "migrations/sqlite"); err != nil {
 			sqldb.Close()
 			return nil, err

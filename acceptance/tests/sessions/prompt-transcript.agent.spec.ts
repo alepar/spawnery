@@ -13,7 +13,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "../../src/harness/test";
 import { SessionPage } from "../../src/drivers/session";
-import { agentAppId, agentModel, newMarker, recordAgentCost, waitActiveApi } from "./support";
+import { agentAppId, agentInferenceAvailable, agentModel, newMarker, recordAgentCost, waitActiveApi } from "./support";
 
 const MARKER_FILE = "acc-marker.txt";
 
@@ -26,6 +26,10 @@ test.describe("@agent sessions: prompt → rendered transcript + reload + exec s
     "prompt renders a structural transcript, survives reload, and its exec side-effect is fresh · web+cli",
     { tag: ["@agent", "@mutating"] },
     async ({ target, api, cli, ctx, page, ledger, ns }) => {
+      test.fixme(
+        !agentInferenceAvailable(target),
+        "target explicitly has no live inference provider; ACP/session-open remains covered by production authorization",
+      );
       const appId = agentAppId(target);
       const model = agentModel(target);
       const estimate = Number(process.env.ACC_AGENT_TOKEN_ESTIMATE ?? "2000");

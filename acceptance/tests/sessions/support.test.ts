@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { newMarker, parseUsageTokens, agentAppId, agentModel } from "./support";
+import { newMarker, parseUsageTokens, agentAppId, agentInferenceAvailable, agentModel } from "./support";
 import type { TargetConfig } from "../../src/config/target";
 
 describe("newMarker", () => {
@@ -61,7 +61,6 @@ describe("agentAppId / agentModel", () => {
     tokenBudget: 200000,
     wallclockMs: 1800000,
     staleTtlMs: 3600000,
-    nodeAddr: "http://127.0.0.1:9092",
   };
 
   it("throws naming ACC_AGENT_APP_ID when absent", () => {
@@ -76,5 +75,14 @@ describe("agentAppId / agentModel", () => {
     const cfg = { ...base, agentAppId: "acc/agent-app", agentModel: "cheap/model" };
     expect(agentAppId(cfg)).toBe("acc/agent-app");
     expect(agentModel(cfg)).toBe("cheap/model");
+  });
+
+  it("requires targets to declare whether real inference is available", () => {
+    expect(() => agentInferenceAvailable(base)).toThrow(/ACC_AGENT_INFERENCE_AVAILABLE/);
+  });
+
+  it("returns the target's declared inference capability", () => {
+    expect(agentInferenceAvailable({ ...base, agentInferenceAvailable: true })).toBe(true);
+    expect(agentInferenceAvailable({ ...base, agentInferenceAvailable: false })).toBe(false);
   });
 });

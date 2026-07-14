@@ -33,7 +33,6 @@ type asLinkChecker interface {
 // httpASLinkChecker is the production implementation: POSTs to the AS link-status endpoint.
 type httpASLinkChecker struct {
 	asURL  string
-	secret string
 	client *http.Client
 }
 
@@ -56,8 +55,6 @@ func (c *httpASLinkChecker) CheckLinkStatus(ctx context.Context, accountID strin
 		return 0, fmt.Errorf("build link-status request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Spawnery-AS-Secret", c.secret)
-
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("AS link-status request: %w", err)
@@ -86,11 +83,11 @@ func (c *httpASLinkChecker) CheckLinkStatus(ctx context.Context, accountID strin
 }
 
 // newHTTPASLinkChecker constructs an httpASLinkChecker. Pass nil client to use http.DefaultClient.
-func newHTTPASLinkChecker(asURL, secret string, client *http.Client) asLinkChecker {
+func newHTTPASLinkChecker(asURL string, client *http.Client) asLinkChecker {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &httpASLinkChecker{asURL: asURL, secret: secret, client: client}
+	return &httpASLinkChecker{asURL: asURL, client: client}
 }
 
 // mountsHaveGitHubBackend reports whether any mount in the slice has a github: backend URI.

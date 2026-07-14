@@ -12,12 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/urfave/cli/v3"
 )
 
-// terminalFlags are shared by attach/exec/shell: -addr is the node terminal endpoint (the mosh data
-// plane goes straight there); -cp/-token/-config-dir are used only to list+pick a spawn when -spawn is omitted.
+// terminalFlags are shared by the standalone/development attach and shell paths.
 func terminalFlags() []cli.Flag {
 	return []cli.Flag{
 		configDirFlag(),
@@ -25,6 +26,20 @@ func terminalFlags() []cli.Flag {
 		&cli.StringFlag{Name: "spawn", Usage: "spawn id (omit to pick interactively)"},
 		&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane (for listing/picking spawns)"},
 		&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP); superseded by stored login credentials"},
+	}
+}
+
+func execFlags() []cli.Flag {
+	return []cli.Flag{
+		configDirFlag(),
+		&cli.StringFlag{Name: "spawn", Usage: "spawn id (omit to pick interactively)"},
+		&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
+		&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP); production exec requires stored login credentials"},
+		&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for node verification"},
+		&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain"},
+		&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint"},
+		&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable)"},
+		&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM (repeatable)"},
 	}
 }
 
@@ -66,15 +81,35 @@ func execCmd() *cli.Command {
 			"so it is pipeable and scriptable. For an interactive shell use `spawnctl shell`; for the TUI use " +
 			"`spawnctl attach`.",
 		ArgsUsage: "-- <command> [args...]",
-		Flags: append(terminalFlags(),
+		Flags: append(execFlags(),
 			// -it is a no-op kept for docker muscle-memory: exec is always non-interactive.
 			&cli.BoolFlag{Name: "it", Aliases: []string{"i", "t"}, Usage: "no-op (exec is always non-interactive; use `spawnctl shell` for a TTY)"}),
-		Action: func(_ context.Context, c *cli.Command) error {
+		Action: func(ctx context.Context, c *cli.Command) error {
 			cmd := c.Args().Slice()
 			if len(cmd) == 0 {
 				return cli.Exit("usage: spawnctl exec [-spawn <id>] -- <command> [args...]", 2)
 			}
-			code, err := runExec(c.String("addr"), resolveSpawn(c), cmd, os.Stdout, os.Stderr)
+			dir, err := resolveDir(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")), strings.TrimSpace(c.String("crl-state")), c.StringSlice("crl-issuer"), c.StringSlice("crl"), time.Now)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer func() { _ = opts.CloseCertificateRevocations() }()
+			}
+			trust, err := targetTrustFromMoveOptions(opts)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			source := buildTokenSource(dir, c.String("token"), connectClient())
+			sdk, err := buildAuthenticatedExecClient(c.String("cp"), source, trust)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			code, err := runExec(ctx, sdk, resolveSpawn(c), cmd, c.Writer, c.ErrWriter)
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("spawnctl exec: %v", err), 1)
 			}

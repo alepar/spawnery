@@ -5,6 +5,7 @@ addr         := "127.0.0.1:9090"
 addr_cp      := "127.0.0.1:8080"
 addr_cp_node := "127.0.0.1:8081"   # CP mTLS node listener (enforced mode)
 addr_as      := "127.0.0.1:8090"
+addr_as_internal := "127.0.0.1:8091"
 # Web origin the BROWSER uses to reach the dev SPA (vite). For LAN/remote access without an SSH
 # tunnel this is the box's domain; override via DEV_WEB_ORIGIN. It is the AS's single canonical SPA
 # origin and must be a registered GitHub App callback host (login: <origin>/oauth/callback, link:
@@ -33,14 +34,28 @@ spawnlet agent="agent": (_images agent)
 # control plane (foreground)
 cp:
     @make bin/spawnery_cp
-    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl {{repo}}/bin/spawnery_cp
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    @install -d -m700 {{repo}}/.envs/dev/revocations/cp-plain-signers
+    SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
+    CP_AUTH_ENVIRONMENT=dev CP_AUTH_ROOT_CA={{devca}}/root.pem \
+    CP_AUTH_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-plain-signers/state.json \
+    CP_INSECURE_DEV_NODE_ON_PUBLIC=true \
+    {{repo}}/bin/spawnery_cp
 
 # auth service (foreground; dev = ephemeral in-memory CA, not for production)
 authsvc:
     @make bin/authsvc
-    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} {{repo}}/bin/authsvc
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} \
+    AS_ROOT_CA_PEM={{devca}}/root.pem \
+    AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
+    AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
+    AS_AUTH_SIGNING_ENVIRONMENT=dev AS_AUTH_SIGNING_ROOT_PEM={{devca}}/root.pem \
+    AS_AUTH_SIGNING_CURRENT_KEY_PEM={{devca}}/auth-signer-current-key.pem AS_AUTH_SIGNING_CURRENT_CHAIN_PEM={{devca}}/auth-signer-current-chain.pem \
+    AS_AUTH_SIGNING_NEXT_KEY_PEM={{devca}}/auth-signer-next-key.pem AS_AUTH_SIGNING_NEXT_CHAIN_PEM={{devca}}/auth-signer-next-chain.pem \
+    {{repo}}/bin/authsvc
 
-# spawnlet attached to the CP — root-free dev node (self-hosted + egress floor off). `just node stub` = echo agent.
+# spawnlet attached to the CP — h2c transport with root-anchored client authorization. `just node stub` = echo agent.
 # Sources deploy/garage/dev-creds.env when present (written by `just garage`), enabling the
 # transient-tier s3 journal against the dev Garage; without it journaling stays off.
 # USERNS_MODE=remap (writable-rootfs, sp-ei4.1) gives the agent the default cap set so apt/useradd/
@@ -48,12 +63,16 @@ authsvc:
 #   echo '{"userns-remap":"default"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
 # Without it, spawnlet probes the daemon, logs a warning, and FALLS BACK to cap-drop=ALL (apt fails).
 node agent="agent": (_images agent)
+    @test -f {{devca}}/root.pem || just gen-dev-ca
+    @install -d -m700 {{repo}}/.envs/dev/revocations/node-plain-signers
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes,pi" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_ID=node-1 \
+    NODE_ROOT_CA={{devca}}/root.pem NODE_AUTH_ENVIRONMENT=dev \
+    NODE_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-plain-signers/state.json \
     NODE_CLASS=self-hosted NODE_OWNER=alice EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     USERNS_MODE=remap DELTA_CAPTURE=1 \
@@ -68,10 +87,9 @@ _images agent="agent":
 web:
     cd web && npm run dev -- --host
 
-# web for the github lane: auth ENABLED so the SPA uses the AS session for CP calls AND signs spawn
-# intents (pollAndSign). The github lane's CP runs the intent flow (CP_DEV_INTENT_ENABLED=1) and
-# validates AS sessions (CP_AS_SESSION_PUBKEYS); the generic `just web` leaves auth off in dev
-# (authEnabled()=false), so it would skip intent signing and every spawn would hang in 'starting'.
+# web for the github lane: auth ENABLED so the SPA uses the AS session for CP calls, relays its
+# AS-issued node token, and signs spawn intents. The CP always requires this flow; the generic
+# `just web` leaves auth off and therefore cannot authorize a spawn on an enforced stack.
 web-github:
     cd web && VITE_AUTH_ENABLED=1 npm run dev -- --host
 
@@ -102,15 +120,12 @@ gen-web-tls:
 dev-plain: garage
     mprocs
 
-# full A4 signing path in dev: CP + node with intent flow enabled (CP_DEV_INTENT_ENABLED=1).
-# Use `spawnctl create` to exercise the two-phase pollAndSign cycle end-to-end.
-# NOT the default for `just dev` because the web SPA does not yet implement GetPendingIntent
-# /SubmitIntent (A5 scope) — web-initiated spawns would hang at the await until TTL.
-# When ready: `just cp-intent` in one pane, `just node` in another, `spawnctl create ...` from CLI.
+# CP lane for exercising the mandatory two-phase authorization flow in development.
+# Use an AS-authenticated client carrying paired CP/node credentials; unsigned clients fail closed.
 cp-intent:
     @make bin/spawnery_cp
     SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
-    CP_DEV_INTENT_ENABLED=1 \
+    CP_INSECURE_DEV_NODE_ON_PUBLIC=true \
     {{repo}}/bin/spawnery_cp
 
 # --- enforced node-auth dev stack (mTLS node<->CP) -----------------------
@@ -124,10 +139,16 @@ gen-dev-ca:
 # control plane with enforced node auth: mTLS node listener on a second port; clients still use :8080.
 cp-enforced:
     @make bin/spawnery_cp
+    @install -d -m700 {{repo}}/.envs/dev/revocations/cp-certificates {{repo}}/.envs/dev/revocations/cp-signers
     SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=alice CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
-    NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
-    CP_NODE_ROOT_CA={{devca}}/root.pem \
-    CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
+    CP_AUTH_ENVIRONMENT=dev CP_AUTH_ROOT_CA={{devca}}/root.pem CP_AUTH_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-signers/state.json \
+    CP_INTERNAL_LISTEN={{addr_cp_node}} CP_INTERNAL_TRUST_DOMAIN=dev.spawnery.internal \
+    CP_INTERNAL_ROOT_CA={{devca}}/root.pem CP_INTERNAL_TLS_CERT={{devca}}/cp-service.pem \
+    CP_INTERNAL_TLS_CHAIN={{devca}}/cp-service-chain.pem CP_INTERNAL_TLS_KEY={{devca}}/cp-service-key.pem \
+    CP_INTERNAL_SERVER_NAME=authsvc.internal CP_INTERNAL_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-certificates/state.json \
+    CP_INTERNAL_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
+    CP_INTERNAL_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
+    CP_INTERNAL_REVOCATION_REFRESH=5s \
     {{repo}}/bin/spawnery_cp
 
 # auth service loaded with the persistent dev CA (issues real certs; mints enrollment + session tokens).
@@ -139,16 +160,24 @@ authsvc-enforced:
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
     AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
-    AS_SESSION_KEY_PEM={{devca}}/session-key.pem \
+    AS_AUTH_SIGNING_ENVIRONMENT=dev AS_AUTH_SIGNING_ROOT_PEM={{devca}}/root.pem \
+    AS_AUTH_SIGNING_CURRENT_KEY_PEM={{devca}}/auth-signer-current-key.pem AS_AUTH_SIGNING_CURRENT_CHAIN_PEM={{devca}}/auth-signer-current-chain.pem \
+    AS_AUTH_SIGNING_NEXT_KEY_PEM={{devca}}/auth-signer-next-key.pem AS_AUTH_SIGNING_NEXT_CHAIN_PEM={{devca}}/auth-signer-next-chain.pem \
     {{repo}}/bin/authsvc
 
 # node with enforced auth: pre-provisioned identity from .dev-ca/node, mTLS to the CP node listener.
 node-enforced agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    install -d -m700 {{repo}}/.envs/dev/revocations/node-enforced-certificates {{repo}}/.envs/dev/revocations/node-enforced-signers; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
-    CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
+    CP_NODE_ADDR=https://{{addr_cp_node}} CP_SERVER_NAME=cp.internal NODE_ID=node-1 NODE_ID_DIR={{devca}}/node \
+    NODE_ROOT_CA={{devca}}/root.pem NODE_TRUST_DOMAIN=dev.spawnery.internal NODE_AUTH_ENVIRONMENT=dev \
+    NODE_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-enforced-signers/state.json \
+    NODE_CERTIFICATE_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-enforced-certificates/state.json \
+    NODE_CERTIFICATE_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
+    NODE_CERTIFICATE_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
     NODE_CLASS=self-hosted EGRESS_ENFORCE=false \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
@@ -159,20 +188,27 @@ dev-enforced:
     @test -f {{devca}}/root.pem || just gen-dev-ca
     mprocs --config {{repo}}/mprocs-enforced.yaml
 
-# --- github-mount dev stack (real GitHub App + journaled mounts + D3 relaxed AS mint) ----------
+# --- github-mount dev stack (real GitHub App + journaled mounts + internal mTLS) -----------------
 
-# AS for the github lane: enforced dev CA + real GitHub App link/mint + AS->CP fanout + D3 relaxed
-# node identity. Requires GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET in .env (the throwaway App). The
-# AS_DEV_RELAX_NODE_AUTH=1 header trust is DEV-ONLY (containment d) and MUST NOT be used in prod.
+# AS for the github lane: provisioned dev CA + real GitHub App link/mint + direct internal mTLS.
 authsvc-github:
     @make bin/authsvc
-    @mkdir -p {{data_root}}
-    SPAWNERY_ENV=dev AS_LISTEN={{addr_as}} \
+    @mkdir -p {{data_root}}; install -d -m700 {{repo}}/.envs/dev/revocations/authsvc-certificates
+    SPAWNERY_ENV=dev AS_DEV=1 AS_LISTEN={{addr_as}} \
     AS_DB_DSN="file:{{data_root}}/authsvc.db?_pragma=foreign_keys(1)" \
     AS_ROOT_CA_PEM={{devca}}/root.pem \
     AS_INTERMEDIATE_CERT_PEM={{devca}}/self-hosted-intermediate.pem \
     AS_INTERMEDIATE_KEY_PEM={{devca}}/self-hosted-intermediate-key.pem \
-    AS_SESSION_KEY_PEM={{devca}}/session-key.pem \
+    AS_INTERNAL_LISTEN={{addr_as_internal}} AS_INTERNAL_TRUST_DOMAIN=dev.spawnery.internal \
+    AS_INTERNAL_ROOT_CA={{devca}}/root.pem \
+    AS_INTERNAL_CERT={{devca}}/authsvc-service.pem AS_INTERNAL_CHAIN={{devca}}/authsvc-service-chain.pem \
+    AS_INTERNAL_KEY={{devca}}/authsvc-service-key.pem AS_INTERNAL_SERVER_NAME=authsvc.internal \
+    AS_INTERNAL_REVOCATION_STATE={{repo}}/.envs/dev/revocations/authsvc-certificates/state.json \
+    AS_INTERNAL_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
+    AS_INTERNAL_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
+    AS_AUTH_SIGNING_ENVIRONMENT=dev AS_AUTH_SIGNING_ROOT_PEM={{devca}}/root.pem \
+    AS_AUTH_SIGNING_CURRENT_KEY_PEM={{devca}}/auth-signer-current-key.pem AS_AUTH_SIGNING_CURRENT_CHAIN_PEM={{devca}}/auth-signer-current-chain.pem \
+    AS_AUTH_SIGNING_NEXT_KEY_PEM={{devca}}/auth-signer-next-key.pem AS_AUTH_SIGNING_NEXT_CHAIN_PEM={{devca}}/auth-signer-next-chain.pem \
     AS_GITHUB_TOKEN_ENC_KEY="$(printf %s 'spawnery-dev-github-mount-enck32' | base64)" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env (GitHub App client_id)}" \
     GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}" \
@@ -180,50 +216,51 @@ authsvc-github:
     AS_GITHUB_LINK_REDIRECT_URI=${AS_GITHUB_LINK_REDIRECT_URI:-{{dev_web_origin}}/github/link/callback} \
     AS_GITHUB_POST_REDEEM_REDIRECT=${AS_GITHUB_POST_REDEEM_REDIRECT:-{{dev_web_origin}}/settings} \
     AS_REDIRECT_URIS=http://127.0.0.1/cb,{{dev_web_origin}}/callback,http://localhost:5173/callback \
-    AS_CP_URL=http://{{addr_cp}} \
-    AS_CP_RPC_SECRET=dev-as-cp-secret \
-    AS_DEV_RELAX_NODE_AUTH=1 \
+    AS_CP_URL=https://{{addr_cp_node}} AS_CP_SERVER_NAME=cp.internal \
     {{repo}}/bin/authsvc
 
 # CP for the github lane: enforced node mTLS + mount-intent signing (pollAndSign) + AS->CP RPC auth.
-# Validates real AS session tokens (CP_AS_SESSION_PUBKEYS) so the spawn owner == the AS accountID
+# Validates real AS session artifacts under the environment root so the spawn owner == the AS accountID
 # the GitHub link is filed under — the gh:<owner> mount credential resolves end-to-end. The
 # dev-token shortcut stays available for non-github smoke tests.
 cp-github:
     @make bin/spawnery_cp
-    @test -f {{devca}}/session-pub.pem || just gen-dev-ca
-    @mkdir -p {{repo}}/.envs/dev
+    @test -f {{devca}}/auth-signer-current-chain.pem || just gen-dev-ca
+    @install -d -m700 {{repo}}/.envs/dev/revocations/cp-certificates {{repo}}/.envs/dev/revocations/cp-signers
     SPAWNERY_ENV=dev CP_LISTEN={{addr_cp}} CP_DEV_TOKENS=dev-token=${CP_DEV_OWNER:-alice} CP_TELEMETRY={{repo}}/telemetry/events.jsonl \
     CP_STORE_DSN="file:{{repo}}/.envs/dev/cp.db?_pragma=busy_timeout(5000)" \
-    CP_AS_SESSION_PUBKEYS={{devca}}/session-pub.pem \
-    NODE_AUTH_MODE=enforced CP_NODE_LISTEN={{addr_cp_node}} \
-    CP_NODE_ROOT_CA={{devca}}/root.pem \
-    CP_NODE_TLS_CERT={{devca}}/cp-server.pem CP_NODE_TLS_KEY={{devca}}/cp-server-key.pem \
-    CP_DEV_INTENT_ENABLED=1 \
-    CP_DEV_AS_KEY={{devca}}/session-key.pem \
-    CP_AS_RPC_SECRET=dev-as-cp-secret \
-    CP_AS_URL=http://{{addr_as}} \
+    CP_AUTH_ENVIRONMENT=dev CP_AUTH_ROOT_CA={{devca}}/root.pem CP_AUTH_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-signers/state.json \
+    CP_INTERNAL_LISTEN={{addr_cp_node}} CP_INTERNAL_TRUST_DOMAIN=dev.spawnery.internal \
+    CP_INTERNAL_ROOT_CA={{devca}}/root.pem CP_INTERNAL_TLS_CERT={{devca}}/cp-service.pem \
+    CP_INTERNAL_TLS_CHAIN={{devca}}/cp-service-chain.pem CP_INTERNAL_TLS_KEY={{devca}}/cp-service-key.pem \
+    CP_INTERNAL_SERVER_NAME=authsvc.internal CP_INTERNAL_REVOCATION_STATE={{repo}}/.envs/dev/revocations/cp-certificates/state.json \
+    CP_INTERNAL_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
+    CP_INTERNAL_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
+    CP_INTERNAL_REVOCATION_REFRESH=5s \
+    CP_AS_URL=https://{{addr_as_internal}} \
     CP_ALLOWED_ORIGINS=${CP_ALLOWED_ORIGINS:-{{dev_web_origin}},http://localhost:5173,https://localhost:5173} \
     {{repo}}/bin/spawnery_cp
 
-# Node for the github lane: cloud-class (multi-tenant — no account-ID match needed) + enforced
-# mTLS to CP + journaled mounts (sources garage-creds.env) + D3 relaxed AS mint (plain HTTP,
-# NODE_GITHUB_MINT_DEV_NODE_ID header). EGRESS_FLOOR_FORCE_OFF=1 because the rootless dev
-# node cannot run iptables; cloud class would otherwise force the floor on. DEV-ONLY relaxations.
+# Node for the github lane: cloud-class (multi-tenant), one node SVID reused for CP and AS mTLS,
+# and journaled mounts. EGRESS_FLOOR_FORCE_OFF remains the rootless local-network compatibility.
 node-github agent="agent": (_images agent)
     @bin=spawnery/{{ if agent == "stub" { "stubagent" } else { "agent" } }}:dev; \
+    install -d -m700 {{repo}}/.envs/dev/revocations/node-certificates {{repo}}/.envs/dev/revocations/node-signers; \
     set -a; [ -f {{repo}}/.envs/dev/garage-creds.env ] && . {{repo}}/.envs/dev/garage-creds.env; set +a; \
     SPAWNERY_ENV=dev \
     AGENT_IMAGE=$bin SIDECAR_IMAGE=spawnery/sidecar:dev DATA_ROOT={{data_root}} \
     AGENT_BINARIES="{{ if agent == "stub" { "" } else { "opencode,goose,claude-code,codex,hermes,pi" } }}" \
     CP_ADDR=http://{{addr_cp}} NODE_AUTH_MODE=enforced \
-    CP_NODE_ADDR=https://{{addr_cp_node}} NODE_ID=node-1 NODE_ID_DIR={{devca}}/node-cloud \
+    CP_NODE_ADDR=https://{{addr_cp_node}} CP_SERVER_NAME=cp.internal NODE_ID=node-1 NODE_ID_DIR={{devca}}/node-cloud \
     NODE_CLASS=cloud EGRESS_FLOOR_FORCE_OFF=1 \
+    NODE_ROOT_CA={{devca}}/root.pem NODE_TRUST_DOMAIN=dev.spawnery.internal NODE_AUTH_ENVIRONMENT=dev \
+    NODE_SIGNER_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-signers/state.json \
+    NODE_CERTIFICATE_REVOCATION_STATE={{repo}}/.envs/dev/revocations/node-certificates/state.json \
+    NODE_CERTIFICATE_REVOCATION_ISSUERS={{devca}}/service-intermediate.pem,{{devca}}/cloud-intermediate.pem,{{devca}}/self-hosted-intermediate.pem \
+    NODE_CERTIFICATE_REVOCATION_CRLS={{devca}}/service.crl.pem,{{devca}}/cloud-node.crl.pem,{{devca}}/self-hosted-node.crl.pem \
     NODE_ADVERTISE_IP=127.0.0.1 NODE_TERMINAL_ADDR=127.0.0.1:9092 \
     USERNS_MODE=remap DELTA_CAPTURE=1 \
-    AS_URL=http://{{addr_as}} \
-    NODE_AS_PUBKEYS={{devca}}/session-pub.pem \
-    NODE_GITHUB_MINT_DEV_NODE_ID=node-1 \
+    AS_URL=https://{{addr_as_internal}} AS_SERVER_NAME=authsvc.internal \
     OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-unused}" \
     {{repo}}/bin/spawnlet
 

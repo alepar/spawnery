@@ -2,8 +2,7 @@ package cp
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"google.golang.org/protobuf/proto"
 
 	authv1 "spawnery/gen/auth/v1"
 	"spawnery/internal/authsvc/token"
@@ -21,43 +21,32 @@ import (
 
 // helpers for WS tests
 
-func genWSKey(t *testing.T) ed25519.PrivateKey {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return priv
+type wsSigner struct {
+	credential *token.SigningCredential
+	verifier   *token.Verifier
 }
 
-func wsKeySet(t *testing.T, privs ...ed25519.PrivateKey) token.KeySet {
+func genWSKey(t *testing.T) wsSigner {
 	t.Helper()
-	pubs := make([]ed25519.PublicKey, len(privs))
-	for i, p := range privs {
-		pubs[i] = p.Public().(ed25519.PublicKey)
-	}
-	ks, err := token.NewKeySet(pubs...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ks
+	credential, verifier := cpArtifactFixture(t, time.Now())
+	return wsSigner{credential: credential, verifier: verifier}
 }
 
-func wsMintToken(t *testing.T, priv ed25519.PrivateKey, accountID, tokenID, audience string, now time.Time) string {
+func wsMintToken(t *testing.T, signer wsSigner, accountID, tokenID, audience string, now time.Time) string {
 	t.Helper()
-	kid, err := token.KeyID(priv.Public().(ed25519.PublicKey))
-	if err != nil {
-		t.Fatal(err)
-	}
 	body := &authv1.SessionTokenBody{
 		AccountId: accountID,
 		Audience:  audience,
 		TokenId:   tokenID,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(15 * time.Minute).Unix(),
-		KeyId:     kid,
+		KeyId:     hex.EncodeToString(signer.credential.KeyID[:]),
 	}
-	wire, err := token.Mint(body, priv)
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := signer.credential.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,16 +54,15 @@ func wsMintToken(t *testing.T, priv ed25519.PrivateKey, accountID, tokenID, audi
 }
 
 // newWSTestServer builds a test Server+verifier and returns an httptest.Server serving /ws/session.
-func newWSTestServer(t *testing.T, priv ed25519.PrivateKey, devMode bool, devTokens map[string]string) (*Server, *auth.Verifier, *auth.SessionRegistry, *httptest.Server) {
+func newWSTestServer(t *testing.T, signer wsSigner, devMode bool, devTokens map[string]string) (*Server, *auth.Verifier, *auth.SessionRegistry, *httptest.Server) {
 	t.Helper()
 	s, _, _ := newTestServer(t)
 
 	sessions := auth.NewSessionRegistry()
 	revreg := auth.NewRevocationRegistry(sessions)
 
-	ks := wsKeySet(t, priv)
 	v := auth.NewVerifier(auth.VerifierConfig{
-		Keys:      ks,
+		Artifacts: signer.verifier,
 		DevTokens: devTokens,
 		DevMode:   devMode,
 		Revoked:   revreg,
@@ -92,6 +80,18 @@ func newWSTestServer(t *testing.T, priv ed25519.PrivateKey, devMode bool, devTok
 // dial connects to the ws test server and sends the bind frame. Returns the connection.
 func dialAndBind(t *testing.T, ts *httptest.Server, spawnID, tokenWire, clientID string) *websocket.Conn {
 	t.Helper()
+	siBytes, err := proto.Marshal(&authv1.SignedIntent{Domain: "opaque", Body: []byte("exact-body")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dialAndBindFrame(t, ts, map[string]interface{}{
+		"spawnId": spawnID, "token": tokenWire, "clientId": clientID,
+		"nodeAccessToken": "as-issued-node-token", "signedIntent": siBytes,
+	})
+}
+
+func dialAndBindFrame(t *testing.T, ts *httptest.Server, bind map[string]interface{}) *websocket.Conn {
+	t.Helper()
 	ctx := context.Background()
 	wsURL := "ws" + ts.URL[len("http"):] + ""
 
@@ -99,16 +99,70 @@ func dialAndBind(t *testing.T, ts *httptest.Server, spawnID, tokenWire, clientID
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	bind := map[string]interface{}{
-		"spawnId":  spawnID,
-		"token":    tokenWire,
-		"clientId": clientID,
-	}
 	if err := wsjson.Write(ctx, conn, bind); err != nil {
 		conn.CloseNow()
 		t.Fatalf("send bind: %v", err)
 	}
 	return conn
+}
+
+func TestHandleWSRequiresAndPreservesNodeAuthorization(t *testing.T) {
+	priv := genWSKey(t)
+	now := time.Now()
+	s, _, _, ts := newWSTestServer(t, priv, false, nil)
+	spawnID := seedSpawn(t, context.Background(), s, "acct-auth")
+	sender := &capSender{}
+	s.rt.Bind(spawnID, "n1", sender)
+	cpToken := wsMintToken(t, priv, "acct-auth", "cp-token-id", "cp", now)
+	si := &authv1.SignedIntent{Domain: "opaque", Body: []byte("exact-body")}
+	si.ProtoReflect().SetUnknown([]byte{0xa0, 0x06, 0x2a})
+	siBytes, _ := proto.Marshal(si)
+
+	invalid := []struct {
+		name string
+		bind map[string]interface{}
+	}{
+		{name: "missing node token", bind: map[string]interface{}{"spawnId": spawnID, "token": cpToken, "clientId": "c1", "signedIntent": siBytes}},
+		{name: "missing intent", bind: map[string]interface{}{"spawnId": spawnID, "token": cpToken, "clientId": "c1", "nodeAccessToken": "node-token"}},
+		{name: "malformed intent", bind: map[string]interface{}{"spawnId": spawnID, "token": cpToken, "clientId": "c1", "nodeAccessToken": "node-token", "signedIntent": []byte{0xff}}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := dialAndBindFrame(t, ts, tt.bind)
+			defer conn.CloseNow()
+			readCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			_, _, err := conn.Read(readCtx)
+			if err == nil {
+				t.Fatal("expected authorization bind rejection")
+			}
+			if websocket.CloseStatus(err) == -1 {
+				t.Fatalf("connection stayed open for incomplete authorization: %v", err)
+			}
+		})
+	}
+	if len(sender.sessionOpens()) != 0 {
+		t.Fatal("SessionOpen emitted for incomplete WebSocket authorization")
+	}
+
+	conn := dialAndBindFrame(t, ts, map[string]interface{}{
+		"spawnId": spawnID, "token": cpToken, "clientId": "valid",
+		"nodeAccessToken": "exact-node-token", "signedIntent": siBytes,
+	})
+	defer conn.CloseNow()
+	deadline := time.Now().Add(time.Second)
+	want, _ := proto.MarshalOptions{Deterministic: true}.Marshal(si)
+	for time.Now().Before(deadline) {
+		if opens := sender.sessionOpens(); len(opens) > 0 {
+			got, _ := proto.MarshalOptions{Deterministic: true}.Marshal(opens[0].GetAuth().GetIntent())
+			if opens[0].GetAuth().GetAccessToken() != "exact-node-token" || string(got) != string(want) {
+				t.Fatalf("WebSocket SessionOpen authorization changed: token=%q intent=%x", opens[0].GetAuth().GetAccessToken(), got)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("WebSocket SessionOpen not emitted")
 }
 
 func TestHandleWS_ValidASTokenBindAttaches(t *testing.T) {

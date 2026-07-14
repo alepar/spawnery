@@ -17,7 +17,7 @@ import (
 // handler via context.
 func TestMiddlewareEnforcedSetsIdentity(t *testing.T) {
 	root, state := issue(t, pki.ClassSelfHosted)
-	var got pki.Identity
+	var got pki.Principal
 	var ok bool
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok = nodeauth.IdentityFromContext(r.Context())
@@ -26,7 +26,7 @@ func TestMiddlewareEnforcedSetsIdentity(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.TLS = state
 	rec := httptest.NewRecorder()
-	nodeauth.Middleware(nodeauth.ModeEnforced, root, next).ServeHTTP(rec, req)
+	mustMiddleware(t, nodeauth.ModeEnforced, root, next).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !ok || got.NodeID != "n1" {
 		t.Fatalf("code=%d ok=%v id=%+v", rec.Code, ok, got)
 	}
@@ -39,9 +39,16 @@ func TestMiddlewareEnforcedRejectsNoCert(t *testing.T) {
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true })
 	req := httptest.NewRequest(http.MethodPost, "/", nil) // no TLS
 	rec := httptest.NewRecorder()
-	nodeauth.Middleware(nodeauth.ModeEnforced, root, next).ServeHTTP(rec, req)
+	mustMiddleware(t, nodeauth.ModeEnforced, root, next).ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized || reached {
 		t.Fatalf("code=%d reached=%v, want 401 + not reached", rec.Code, reached)
+	}
+}
+
+func TestMiddlewareEnforcedRequiresCertificateRevocations(t *testing.T) {
+	root, _ := issue(t, pki.ClassSelfHosted)
+	if _, err := nodeauth.Middleware(nodeauth.ModeEnforced, root, nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})); err == nil {
+		t.Fatal("enforced middleware accepted nil certificate revocation checker")
 	}
 }
 
@@ -54,7 +61,7 @@ func TestMiddlewareInsecurePassesThrough(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
-	nodeauth.Middleware(nodeauth.ModeInsecure, nil, next).ServeHTTP(rec, req)
+	mustMiddleware(t, nodeauth.ModeInsecure, nil, next).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || hadID {
 		t.Fatalf("code=%d hadID=%v, want 200 + no identity", rec.Code, hadID)
 	}
@@ -63,7 +70,7 @@ func TestMiddlewareInsecurePassesThrough(t *testing.T) {
 func issue(t *testing.T, class string) (root *x509.Certificate, state *tls.ConnectionState) {
 	t.Helper()
 	r, _ := pki.NewRootCA("R")
-	inter, _ := r.NewIntermediate(class)
+	inter, _ := r.NewIntermediate(pki.IssuerRole(class))
 	node, _ := inter.IssueNode("n1", "acct1", class, time.Now().Add(time.Hour))
 	return r.Cert, &tls.ConnectionState{PeerCertificates: []*x509.Certificate{node.Cert, inter.Cert}}
 }
@@ -71,11 +78,11 @@ func issue(t *testing.T, class string) (root *x509.Certificate, state *tls.Conne
 // A verified mTLS peer cert yields the node identity (from the SAN), derived against the pinned root.
 func TestDeriveIdentity(t *testing.T) {
 	root, state := issue(t, pki.ClassSelfHosted)
-	id, err := nodeauth.DeriveIdentity(state, root, time.Now())
+	id, err := nodeauth.DeriveIdentity(state, root, allowNoCertificateRevocations, time.Now())
 	if err != nil {
 		t.Fatalf("DeriveIdentity: %v", err)
 	}
-	if id.NodeID != "n1" || id.AccountID != "acct1" || id.Class != pki.ClassSelfHosted {
+	if id.NodeID != "n1" || id.AccountID != "acct1" || id.Role != pki.ClassSelfHosted || id.Kind != pki.KindNode {
 		t.Fatalf("identity = %+v", id)
 	}
 }
@@ -83,28 +90,38 @@ func TestDeriveIdentity(t *testing.T) {
 // No client cert presented -> rejected.
 func TestDeriveIdentityNoCert(t *testing.T) {
 	root, _ := issue(t, pki.ClassSelfHosted)
-	if _, err := nodeauth.DeriveIdentity(&tls.ConnectionState{}, root, time.Now()); err == nil {
+	if _, err := nodeauth.DeriveIdentity(&tls.ConnectionState{}, root, allowNoCertificateRevocations, time.Now()); err == nil {
 		t.Fatal("a connection with no peer cert must be rejected")
 	}
-	if _, err := nodeauth.DeriveIdentity(nil, root, time.Now()); err == nil {
+	if _, err := nodeauth.DeriveIdentity(nil, root, allowNoCertificateRevocations, time.Now()); err == nil {
 		t.Fatal("a nil TLS state must be rejected")
 	}
 }
 
-// A cloud-SAN leaf forged by a self-hosted intermediate must NOT yield an identity (name constraints).
+// A cloud-path leaf forged by a self-hosted intermediate must NOT yield an identity (issuer policy).
 func TestDeriveIdentityRejectsForgedCloud(t *testing.T) {
 	root, _ := pki.NewRootCA("R")
 	selfHosted, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	forged, _ := selfHosted.IssueNode("evil", "victim", pki.ClassCloud, time.Now().Add(time.Hour))
 	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{forged.Cert, selfHosted.Cert}}
-	if _, err := nodeauth.DeriveIdentity(state, root.Cert, time.Now()); err == nil {
+	if _, err := nodeauth.DeriveIdentity(state, root.Cert, allowNoCertificateRevocations, time.Now()); err == nil {
 		t.Fatal("SECURITY: a forged cloud leaf must not derive an identity")
+	}
+}
+
+func TestDeriveIdentityRejectsConfiguredTrustDomainMismatch(t *testing.T) {
+	root, _ := pki.NewRootCA("R")
+	issuer, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "staging.spawnery.internal")
+	leaf, _ := issuer.IssueNode("n", "a", pki.RoleSelfHosted, "staging.spawnery.internal", time.Now().Add(time.Hour))
+	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf.Cert, issuer.Cert}}
+	if _, err := nodeauth.DeriveIdentity(state, root.Cert, allowNoCertificateRevocations, time.Now(), "prod.spawnery.internal"); err == nil {
+		t.Fatal("same-root leaf from the wrong configured trust domain was accepted")
 	}
 }
 
 // Identity round-trips through the request context (how the middleware hands it to the Attach handler).
 func TestIdentityContext(t *testing.T) {
-	want := pki.Identity{NodeID: "n", AccountID: "a", Class: pki.ClassCloud}
+	want := pki.Principal{Kind: pki.KindNode, Role: pki.ClassCloud, NodeID: "n", AccountID: "a"}
 	ctx := nodeauth.WithIdentity(context.Background(), want)
 	got, ok := nodeauth.IdentityFromContext(ctx)
 	if !ok || got != want {

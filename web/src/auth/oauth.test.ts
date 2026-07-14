@@ -105,7 +105,7 @@ describe("parseCallback — error", () => {
 
   it("returns state_mismatch when no stored state", () => {
     const storage = makeMemStorage(); // empty
-    const history = makeHistory("?access_token=tok&state=abc123");
+    const history = makeHistory("?cp_access_token=cp&node_access_token=node&refresh_token_hash=rth&state=abc123");
     const result = parseCallback(storage, history);
     expect(result).toMatchObject({ kind: "error", code: "state_mismatch" });
     expect(history.replaced).toHaveLength(1);
@@ -114,7 +114,7 @@ describe("parseCallback — error", () => {
   it("returns state_mismatch when state does not match", () => {
     const storage = makeMemStorage();
     storage.set("spawnery-oauth-state", JSON.stringify({ state: "correct-state", route: "/" }));
-    const history = makeHistory("?access_token=tok&state=wrong-state");
+    const history = makeHistory("?cp_access_token=cp&node_access_token=node&refresh_token_hash=rth&state=wrong-state");
     const result = parseCallback(storage, history);
     expect(result).toMatchObject({ kind: "error", code: "state_mismatch" });
   });
@@ -126,13 +126,14 @@ describe("parseCallback — success", () => {
     const state = "my-state-123";
     storage.set("spawnery-oauth-state", JSON.stringify({ state, route: "/spawns" }));
     const history = makeHistory(
-      `?access_token=token-wire&state=${state}&refresh_token_hash=abc123`,
+      `?cp_access_token=cp-token&node_access_token=node-token&state=${state}&refresh_token_hash=abc123`,
     );
 
     const result = parseCallback(storage, history);
     expect(result).toMatchObject({
       kind: "ok",
-      accessToken: "token-wire",
+      cpAccessToken: "cp-token",
+      nodeAccessToken: "node-token",
       refreshTokenHash: "abc123",
       route: "/spawns",
     });
@@ -143,12 +144,18 @@ describe("parseCallback — success", () => {
     expect(storage.store.size).toBe(0);
   });
 
-  it("returns empty refreshTokenHash if missing from URL", () => {
+  it.each([
+    `?cp_access_token=cp&node_access_token=node&state=st123`,
+    `?cp_access_token=cp&refresh_token_hash=rth&state=st123`,
+    `?node_access_token=node&refresh_token_hash=rth&state=st123`,
+    `?access_token=legacy&state=st123`,
+  ])("rejects incomplete, single, or legacy credentials and strips them", (search) => {
     const storage = makeMemStorage();
     const state = "st123";
     storage.set("spawnery-oauth-state", JSON.stringify({ state, route: "/" }));
-    const history = makeHistory(`?access_token=tok&state=${state}`);
+    const history = makeHistory(search);
     const result = parseCallback(storage, history);
-    expect(result).toMatchObject({ kind: "ok", refreshTokenHash: "" });
+    expect(result).toMatchObject({ kind: "error", code: "malformed_credentials" });
+    expect(history.replaced).toEqual(["/callback"]);
   });
 });

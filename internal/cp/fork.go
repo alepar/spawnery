@@ -288,7 +288,7 @@ func (s *Server) startFork(ctx context.Context, owner, sourceID string, fork sto
 		return "", presignErr
 	}
 	return s.sched.Provision(ctx, fork.ID, fork.AppRef, fork.Model, fork.Name, fork.AppID, fork.RunnableID, fork.Mode,
-		targetGeneration, placement, env, storeToNodeMounts(mounts), fork.BaseImageDigest, schedulerRootfsRestore(rootfs), nodeArts, secrets)
+		targetGeneration, placement, env, storeToNodeMounts(mounts), fork.BaseImageDigest, schedulerRootfsRestore(rootfs), nodeArts, secrets, intent.OpForkSpawn)
 }
 
 func (s *Server) ForkSpawn(ctx context.Context, req *connect.Request[cpv1.ForkSpawnRequest]) (*connect.Response[cpv1.ForkSpawnResponse], error) {

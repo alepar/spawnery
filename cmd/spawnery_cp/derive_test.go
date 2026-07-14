@@ -26,3 +26,16 @@ func TestCPDerive(t *testing.T) {
 		t.Errorf("AllowedOrigins = %q, want empty when public_url unset", c3.AllowedOrigins)
 	}
 }
+
+func TestCPDeriveSplitsInternalRevocationPathLists(t *testing.T) {
+	c := &CP{}
+	c.Internal.RevocationIssuers = []string{"/pki/service.pem,/pki/cloud.pem,/pki/self.pem"}
+	c.Internal.RevocationCRLs = []string{"/pki/service.crl,/pki/cloud.crl,/pki/self.crl"}
+	c.derive()
+	if len(c.Internal.RevocationIssuers) != 3 || c.Internal.RevocationIssuers[1] != "/pki/cloud.pem" {
+		t.Fatalf("issuers = %#v", c.Internal.RevocationIssuers)
+	}
+	if len(c.Internal.RevocationCRLs) != 3 || c.Internal.RevocationCRLs[2] != "/pki/self.crl" {
+		t.Fatalf("CRLs = %#v", c.Internal.RevocationCRLs)
+	}
+}

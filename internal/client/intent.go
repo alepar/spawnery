@@ -1,27 +1,11 @@
 package client
 
-// intent.go: the A4 two-phase sign-after-resolve loop [AC1][AM12], absorbed from
-// cmd/spawnctl/intent.go. pollAndSign is the client half of the protocol: it generates an
-// ephemeral ECDSA P-256 session key, polls GetPendingIntent until the CP registers the pending
-// intent, builds and signs the IntentBody, then submits via SubmitIntent. It must be called
-// concurrently with the lifecycle RPC (CreateSpawn, MigrateSpawn, etc.) that blocks until the
-// envelope is submitted.
-//
-// provisionWithIntent wraps a blocking lifecycle RPC (e.g. MigrateSpawn) with the pollAndSign
-// goroutine and implements retry-once on retryable NACK codes [AC1]. Non-blocking RPCs (e.g.
-// CreateSpawn which returns before provisioning completes) do not use this helper since the NACK
-// would surface via the spawn's status rather than the RPC error return — see SignProvision.
-//
-// Both functions take the narrow intentClient interface (rather than being *Client methods) so
-// they stay unit-testable with narrow fakes exactly as they were in spawnctl.
-
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -31,200 +15,280 @@ import (
 	"spawnery/internal/intent"
 )
 
-// intentClient is the minimal A4 client interface for polling and signing [AC1][AM12].
-// cpv1connect.SpawnServiceClient satisfies this interface, enabling both the real implementation
-// and narrow fakes for unit tests that don't exercise the intent path.
 type intentClient interface {
 	GetPendingIntent(context.Context, *connect.Request[cpv1.GetPendingIntentRequest]) (*connect.Response[cpv1.GetPendingIntentResponse], error)
 	SubmitIntent(context.Context, *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error)
 }
 
-// IntentParams holds the user-initiated parameters the caller knows before pollAndSign — used to
-// validate the CP's PendingIntent against the originating request [AM1]. A zero field is not
-// validated (the caller did not specify or know that value).
 type IntentParams struct {
-	AppRef       string // user's requested app_ref (create flow)
-	Model        string // user's requested model (create flow)
-	TargetNodeID string // user's explicit target node (migrate flow; "" = cloud/CP-assigned)
+	Op                intent.Op
+	AppRef            string
+	Model             string
+	Image             string
+	TargetNodeID      string
+	TargetClass       string
+	Mounts            []*cpv1.MountBinding
+	AttachedSecretIDs []string
 }
 
-// pollAndSign polls GetPendingIntent until the CP registers the pending intent for spawnID, then
-// validates the returned tuple against params [AM1], builds and submits a signed AuthEnvelope. An
-// ephemeral ECDSA P-256 session key is generated per call; the caller need not manage key material.
-// In dev mode the CP mints the cnf-bearing aud=node token from the SPKI DER embedded in the
-// SignedIntent (NodeAccessToken left empty here).
-//
-// pollAndSign MUST be called concurrently with the lifecycle RPC that triggers the two-phase flow —
-// that RPC blocks at the CP until the envelope is submitted. Cancel the context to abort early.
-func pollAndSign(ctx context.Context, ic intentClient, spawnID string, params IntentParams) error {
-	sessionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return fmt.Errorf("pollAndSign %s: generate session key: %w", spawnID, err)
-	}
+func pollAndSign(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, spawnID string, params IntentParams) error {
+	_, err := pollAndSignResolved(ctx, ic, credentials, trust, spawnID, params, func(*cpv1.GetPendingIntentResponse) (string, error) {
+		return spawnID, nil
+	})
+	return err
+}
 
-	// Poll until the CP registers the pending intent, with a generous deadline (> CP's defaultIntentTTL).
+func pollAndSignFork(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, sourceSpawnID string, params IntentParams) (string, error) {
+	return pollAndSignResolved(ctx, ic, credentials, trust, sourceSpawnID, params, func(response *cpv1.GetPendingIntentResponse) (string, error) {
+		forkSpawnID := response.GetPending().GetSpawnId()
+		if forkSpawnID == "" {
+			return "", errors.New("pending fork spawn_id is empty")
+		}
+		if forkSpawnID == sourceSpawnID {
+			return "", errors.New("pending fork spawn_id must differ from source")
+		}
+		return forkSpawnID, nil
+	})
+}
+
+func pollAndSignResolved(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, lookupSpawnID string, params IntentParams, resolveAuthorizedSpawnID func(*cpv1.GetPendingIntentResponse) (string, error)) (string, error) {
 	const pollInterval = 200 * time.Millisecond
 	const pollDeadline = 120 * time.Second
 	deadline := time.Now().Add(pollDeadline)
-	var pi *cpv1.PendingIntent
+	var response *cpv1.GetPendingIntentResponse
 	for {
-		resp, err := ic.GetPendingIntent(ctx, connect.NewRequest(&cpv1.GetPendingIntentRequest{SpawnId: spawnID}))
+		resp, err := ic.GetPendingIntent(ctx, connect.NewRequest(&cpv1.GetPendingIntentRequest{SpawnId: lookupSpawnID}))
 		if err != nil {
-			return fmt.Errorf("pollAndSign %s: GetPendingIntent: %w", spawnID, err)
+			return "", fmt.Errorf("pollAndSign %s: GetPendingIntent: %w", lookupSpawnID, err)
 		}
-		if resp.Msg.Ready {
-			pi = resp.Msg.Pending
-			// Validate the CP-supplied tuple against the user's known parameters [AM1]:
-			// a compromised CP could substitute a different workload; reject on mismatch.
-			if params.AppRef != "" && pi.GetAppRef() != params.AppRef {
-				return fmt.Errorf("pollAndSign %s: AM1: CP offered app_ref %q but client requested %q", spawnID, pi.GetAppRef(), params.AppRef)
-			}
-			if params.Model != "" && pi.GetModel() != params.Model {
-				return fmt.Errorf("pollAndSign %s: AM1: CP offered model %q but client requested %q", spawnID, pi.GetModel(), params.Model)
-			}
-			if params.TargetNodeID != "" && pi.GetTargetNodeId() != params.TargetNodeID {
-				return fmt.Errorf("pollAndSign %s: AM1: CP offered target_node_id %q but client requested %q", spawnID, pi.GetTargetNodeId(), params.TargetNodeID)
-			}
+		if resp.Msg.GetReady() {
+			response = resp.Msg
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("pollAndSign %s: GetPendingIntent did not become ready within %s", spawnID, pollDeadline)
+			return "", fmt.Errorf("pollAndSign %s: GetPendingIntent did not become ready within %s", lookupSpawnID, pollDeadline)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-time.After(pollInterval):
 		}
 	}
 
-	op := intent.Op(pi.GetOp())
-
-	// Unique JTI: 16 random bytes hex-encoded. A replay within the node's JTI cache window
-	// (defaulted to FreshnessWindow + SkewBudget) would be rejected regardless.
-	var jtiBytes [16]byte
-	if _, err := rand.Read(jtiBytes[:]); err != nil {
-		return fmt.Errorf("pollAndSign %s: generate jti: %w", spawnID, err)
-	}
-	body := &authv1.IntentBody{
-		Jti:          fmt.Sprintf("%x", jtiBytes),
-		IssuedAt:     time.Now().Unix(),
-		SpawnId:      pi.GetSpawnId(),
-		Generation:   pi.GetGeneration(),
-		TargetNodeId: pi.GetTargetNodeId(),
-		Op:           string(op),
-		AppRef:       pi.GetAppRef(),
-		Image:        pi.GetImage(),
-		Model:        pi.GetModel(),
-		DataRef:      pi.GetDataRef(),
-	}
-	if len(pi.GetMounts()) > 0 {
-		body.Mounts = make([]*authv1.MountRef, 0, len(pi.GetMounts()))
-		for _, mount := range pi.GetMounts() {
-			if mount == nil {
-				continue
-			}
-			body.Mounts = append(body.Mounts, &authv1.MountRef{
-				Name:               mount.GetName(),
-				BackendUri:         mount.GetBackendUri(),
-				CredentialSecretId: mount.GetCredentialSecretId(),
-				CreateIfMissing:    mount.GetCreateIfMissing(),
-				RepositoryId:       mount.GetRepositoryId(),
-			})
-		}
-	}
-	si, err := intent.Build(op, body, sessionKey)
+	authorizedSpawnID, err := resolveAuthorizedSpawnID(response)
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: build intent: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: %w", lookupSpawnID, err)
+	}
+	pi, op, err := validatePendingIntent(response, authorizedSpawnID, params)
+	if err != nil {
+		return "", fmt.Errorf("pollAndSign %s: %w", lookupSpawnID, err)
+	}
+	if _, err := verifyResolvedTarget(response.GetNodeCertChain(), response.GetTargetNodeId(), response.GetTargetNodeClass(), response.GetTargetNodeAccountId(), trust); err != nil {
+		return "", fmt.Errorf("pollAndSign %s: verify target: %w", lookupSpawnID, err)
+	}
+	if credentials == nil {
+		return "", fmt.Errorf("pollAndSign %s: node authorization requires login credentials", lookupSpawnID)
+	}
+	creds, err := credentials.NodeCredentials(ctx)
+	if err != nil {
+		return "", fmt.Errorf("pollAndSign %s: node credentials: %w", lookupSpawnID, err)
+	}
+	if creds.AccessToken == "" || creds.Signer == nil {
+		return "", fmt.Errorf("pollAndSign %s: incomplete node credentials", lookupSpawnID)
 	}
 
-	// NodeAccessToken is intentionally empty in dev mode: the CP mints a cnf-bearing aud=node token
-	// from si.SpkiDer in SubmitIntent when its dev AS key is configured [AM12]. In a production
-	// deployment the client would obtain this token from the AS before calling SubmitIntent.
+	body, err := intentBodyFromPending(pi, op)
+	if err != nil {
+		return "", fmt.Errorf("pollAndSign %s: %w", lookupSpawnID, err)
+	}
+	signed, err := buildSignedIntent(op, body, creds.Signer)
+	if err != nil {
+		return "", fmt.Errorf("pollAndSign %s: build intent: %w", lookupSpawnID, err)
+	}
 	_, err = ic.SubmitIntent(ctx, connect.NewRequest(&cpv1.SubmitIntentRequest{
-		SpawnId: spawnID,
-		Intent:  si,
+		SpawnId: lookupSpawnID, Intent: signed, NodeAccessToken: creds.AccessToken,
 	}))
 	if err != nil {
-		return fmt.Errorf("pollAndSign %s: SubmitIntent: %w", spawnID, err)
+		return "", fmt.Errorf("pollAndSign %s: SubmitIntent: %w", lookupSpawnID, err)
 	}
-	return nil
+	return authorizedSpawnID, nil
 }
 
-// provisionWithIntent orchestrates a blocking lifecycle RPC (doRPC) concurrently with the
-// pollAndSign loop. If doRPC returns a retryable NACK error (e.g. STALE from a node clock
-// skew), it runs the pair exactly once more with a fresh session key and jti. Non-retryable
-// NACKs (CORRESPONDENCE, BAD_SIG, …) fail immediately without retry.
-//
-// doRPC MUST block until the CP provision is complete (or failed). Use this only for
-// synchronous RPCs such as MigrateSpawn/ResumeSpawn; for the async CreateSpawn path the
-// NACK surfaces via spawn status, not the RPC return.
-//
-// On a retryable NACK the caller's context is reused without a fresh cancel; the second
-// pollAndSign gets a fresh cancel so it does not outlive doRPC's second call. warn (nil-safe)
-// receives the pollAndSign goroutine's error when it is non-nil and not context.Canceled — the
-// two log.Printf sites this replaces in spawnctl.
-func provisionWithIntent(ctx context.Context, ic intentClient, spawnID string, params IntentParams, doRPC func(context.Context) error, warn func(error)) error {
+func validatePendingIntent(response *cpv1.GetPendingIntentResponse, spawnID string, params IntentParams) (*cpv1.PendingIntent, intent.Op, error) {
+	if response == nil || response.GetPending() == nil {
+		return nil, "", errors.New("ready response has no pending intent")
+	}
+	pi := response.GetPending()
+	op := intent.Op(pi.GetOp())
+	switch op {
+	case intent.OpCreateSpawn, intent.OpResumeSpawn, intent.OpRecreateSpawn, intent.OpMigrateSpawn, intent.OpForkSpawn:
+	default:
+		return nil, "", fmt.Errorf("unsupported operation %q", pi.GetOp())
+	}
+	if params.Op == "" || op != params.Op {
+		return nil, "", fmt.Errorf("operation %q does not match requested %q", op, params.Op)
+	}
+	if pi.GetSpawnId() != spawnID {
+		return nil, "", fmt.Errorf("pending spawn_id %q does not match requested %q", pi.GetSpawnId(), spawnID)
+	}
+	if params.AppRef != "" && pi.GetAppRef() != params.AppRef {
+		return nil, "", fmt.Errorf("AM1: app_ref %q does not match requested %q", pi.GetAppRef(), params.AppRef)
+	}
+	if params.Model != "" && pi.GetModel() != params.Model {
+		return nil, "", fmt.Errorf("AM1: model %q does not match requested %q", pi.GetModel(), params.Model)
+	}
+	if params.Image != "" && pi.GetImage() != params.Image {
+		return nil, "", fmt.Errorf("AM1: image %q does not match requested %q", pi.GetImage(), params.Image)
+	}
+	if params.AttachedSecretIDs != nil && !containsAllStrings(pi.GetAttachedSecretIds(), params.AttachedSecretIDs) {
+		return nil, "", fmt.Errorf("AM1: resolved attached_secret_ids %v omit caller-selected %v", pi.GetAttachedSecretIds(), params.AttachedSecretIDs)
+	}
+	if params.TargetNodeID != "" && pi.GetTargetNodeId() != params.TargetNodeID {
+		return nil, "", fmt.Errorf("AM1: target_node_id %q does not match requested %q", pi.GetTargetNodeId(), params.TargetNodeID)
+	}
+	if response.GetGeneration() != pi.GetGeneration() {
+		return nil, "", fmt.Errorf("response generation %d does not match pending %d", response.GetGeneration(), pi.GetGeneration())
+	}
+	if response.GetTargetNodeId() == "" || response.GetTargetNodeId() != pi.GetTargetNodeId() {
+		return nil, "", fmt.Errorf("response target_node_id %q does not match pending %q", response.GetTargetNodeId(), pi.GetTargetNodeId())
+	}
+	if params.TargetClass != "" && response.GetTargetNodeClass() != params.TargetClass {
+		return nil, "", fmt.Errorf("target_node_class %q does not match requested %q", response.GetTargetNodeClass(), params.TargetClass)
+	}
+	if params.Mounts != nil && !mountBindingsContain(pi.GetMounts(), params.Mounts) {
+		return nil, "", errors.New("mounts do not match requested mounts")
+	}
+	return pi, op, nil
+}
+
+func containsAllStrings(resolved, expected []string) bool {
+	set := make(map[string]struct{}, len(resolved))
+	for _, value := range resolved {
+		set[value] = struct{}{}
+	}
+	for _, value := range expected {
+		if _, ok := set[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mountBindingsContain(resolved, selected []*cpv1.MountBinding) bool {
+	byName := make(map[string]*cpv1.MountBinding, len(resolved))
+	for _, mount := range resolved {
+		if mount == nil || mount.GetName() == "" {
+			return false
+		}
+		if _, duplicate := byName[mount.GetName()]; duplicate {
+			return false
+		}
+		byName[mount.GetName()] = mount
+	}
+	for _, want := range selected {
+		if want == nil || want.GetName() == "" {
+			return false
+		}
+		got := byName[want.GetName()]
+		if got == nil || got.GetBackendUri() != want.GetBackendUri() ||
+			got.GetCreateIfMissing() != want.GetCreateIfMissing() || got.GetRepositoryId() != want.GetRepositoryId() ||
+			(want.GetCredentialSecretId() != "" && got.GetCredentialSecretId() != want.GetCredentialSecretId()) {
+			return false
+		}
+	}
+	return true
+}
+
+func intentBodyFromPending(pi *cpv1.PendingIntent, op intent.Op) (*authv1.IntentBody, error) {
+	var jti [16]byte
+	if _, err := rand.Read(jti[:]); err != nil {
+		return nil, fmt.Errorf("generate jti: %w", err)
+	}
+	body := &authv1.IntentBody{
+		Jti: fmt.Sprintf("%x", jti), IssuedAt: time.Now().Unix(), SpawnId: pi.GetSpawnId(),
+		Generation: pi.GetGeneration(), TargetNodeId: pi.GetTargetNodeId(), Op: string(op),
+		AppRef: pi.GetAppRef(), Image: pi.GetImage(), Model: pi.GetModel(), DataRef: pi.GetDataRef(),
+	}
+	body.AttachedSecretIds = canonicalStringSet(pi.GetAttachedSecretIds())
+	for _, mount := range pi.GetMounts() {
+		if mount != nil {
+			body.Mounts = append(body.Mounts, &authv1.MountRef{Name: mount.GetName(), BackendUri: mount.GetBackendUri(), CredentialSecretId: mount.GetCredentialSecretId(), CreateIfMissing: mount.GetCreateIfMissing(), RepositoryId: mount.GetRepositoryId()})
+		}
+	}
+	return body, nil
+}
+
+func canonicalStringSet(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func provisionWithIntent(ctx context.Context, ic intentClient, credentials NodeCredentialSource, trust TargetTrust, spawnID string, params IntentParams, doRPC func(context.Context) error, warn func(error)) error {
 	if warn == nil {
 		warn = func(error) {}
 	}
 	attempt := func() error {
-		pollCtx, cancel := context.WithCancel(ctx)
+		attemptCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		go func() {
-			if err := pollAndSign(pollCtx, ic, spawnID, params); err != nil && !errors.Is(err, context.Canceled) {
-				warn(fmt.Errorf("provisionWithIntent %s: pollAndSign: %w", spawnID, err))
+		signCh := make(chan error, 1)
+		rpcCh := make(chan error, 1)
+		go func() { signCh <- pollAndSign(attemptCtx, ic, credentials, trust, spawnID, params) }()
+		go func() { rpcCh <- doRPC(attemptCtx) }()
+		signDone, rpcDone := false, false
+		var firstErr error
+		ctxDone := ctx.Done()
+		for !signDone || !rpcDone {
+			select {
+			case err := <-signCh:
+				if err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("provisionWithIntent %s: pollAndSign: %w", spawnID, err)
+					cancel()
+				}
+				signDone = true
+				signCh = nil
+			case err := <-rpcCh:
+				if err != nil && firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				rpcDone = true
+				rpcCh = nil
+			case <-ctxDone:
+				if firstErr == nil {
+					firstErr = ctx.Err()
+				}
+				cancel()
+				ctxDone = nil
 			}
-		}()
-		return doRPC(ctx)
+		}
+		return firstErr
 	}
-
 	err := attempt()
 	if err == nil {
 		return nil
 	}
-	// Classify: is this a retryable node NACK that a fresh key + fresh jti can resolve?
 	var connErr *connect.Error
-	if errors.As(err, &connErr) && connErr.Code() == connect.CodeFailedPrecondition {
-		if intent.RetryableNACK(connErr.Message()) {
-			warn(fmt.Errorf("provisionWithIntent %s: retryable NACK (%s); retrying once", spawnID, connErr.Message()))
-			return attempt()
-		}
+	if errors.As(err, &connErr) && connErr.Code() == connect.CodeFailedPrecondition && intent.RetryableNACK(connErr.Message()) {
+		warn(fmt.Errorf("provisionWithIntent %s: retryable NACK (%s); retrying once", spawnID, connErr.Message()))
+		return attempt()
 	}
 	return err
 }
 
-// SignProvision is a thin exported wrapper over pollAndSign for the async create/fork path, where
-// the caller runs it in its own goroutine concurrently with a non-blocking lifecycle RPC (e.g.
-// CreateSpawn) and cancels the context once the RPC's result is known. Unlike provisionWithIntent
-// it does not retry — a NACK on the async path surfaces via the spawn's status, not here.
 func (c *Client) SignProvision(ctx context.Context, spawnID string, p IntentParams) error {
-	return pollAndSign(ctx, c.rpc, spawnID, p)
-}
-
-// BuildSessionOpenIntent builds a signed session-open AuthEnvelope for binding a new Session
-// stream to spawnID at the given episode generation: a fresh ephemeral ECDSA-P256 key, a random
-// 16-byte hex jti, an IntentBody, and its A4 signature. Unlike the inline best-effort version this
-// replaces (main.go's bindFrame construction, which silently drops errors), it returns the error.
-func BuildSessionOpenIntent(spawnID string, generation uint64) (*authv1.AuthEnvelope, error) {
-	sessionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	prepared, err := prepareNodeAuthorization(ctx, c.nodeCredentials, c.targetTrust)
 	if err != nil {
-		return nil, fmt.Errorf("BuildSessionOpenIntent %s: generate session key: %w", spawnID, err)
+		return err
 	}
-	var jtiBytes [16]byte
-	if _, err := rand.Read(jtiBytes[:]); err != nil {
-		return nil, fmt.Errorf("BuildSessionOpenIntent %s: generate jti: %w", spawnID, err)
-	}
-	body := &authv1.IntentBody{
-		Jti:        fmt.Sprintf("%x", jtiBytes),
-		IssuedAt:   time.Now().Unix(),
-		SpawnId:    spawnID,
-		Generation: generation,
-		SessionId:  "0",
-		Op:         string(intent.OpSessionOpen),
-	}
-	si, err := intent.Build(intent.OpSessionOpen, body, sessionKey)
-	if err != nil {
-		return nil, fmt.Errorf("BuildSessionOpenIntent %s: build intent: %w", spawnID, err)
-	}
-	return &authv1.AuthEnvelope{Intent: si}, nil
+	return pollAndSign(ctx, c.rpc, prepared, c.targetTrust, spawnID, p)
 }

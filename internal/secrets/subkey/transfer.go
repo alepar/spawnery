@@ -4,17 +4,18 @@ import (
 	"fmt"
 	"time"
 
+	"spawnery/internal/pki"
 	"spawnery/internal/secrets/seal"
 )
 
 // SealTransferKeyForNode verifies the CP-relayed target node key material
 // against the caller's pinned root and seals a freshly generated transfer key
 // to that verified node.
-func SealTransferKeyForNode(transferKey []byte, leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, expect Expectation, revoked RevocationChecker, aad seal.InFlightAAD, now time.Time) (*seal.NodeSealed, seal.InFlightAAD, error) {
+func SealTransferKeyForNode(transferKey []byte, leafPEM, chainPEM, rootPEM []byte, sk SignedSubKey, expect Expectation, certificateRevocations pki.CertificateRevocationChecker, aad seal.InFlightAAD, now time.Time) (*seal.NodeSealed, seal.InFlightAAD, error) {
 	if len(rootPEM) == 0 {
 		return nil, seal.InFlightAAD{}, fmt.Errorf("subkey: pinned root PEM is required for fork transfer sealing")
 	}
-	hpkePub, id, err := VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, revoked, now)
+	hpkePub, id, err := VerifyNodeForSealing(leafPEM, chainPEM, rootPEM, sk, expect, certificateRevocations, now)
 	if err != nil {
 		return nil, seal.InFlightAAD{}, err
 	}

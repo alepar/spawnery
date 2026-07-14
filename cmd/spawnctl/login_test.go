@@ -10,7 +10,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -55,7 +54,6 @@ func (l *lazyTestMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func buildTestAS(t *testing.T, fake *githubfake.Fake, nowFn func() time.Time) (*httptest.Server, store.Store, authsvc.IdPConfig) {
 	t.Helper()
 
-	_, sigKey, _ := ed25519.GenerateKey(rand.Reader)
 	st := store.NewTestStore(t)
 
 	root, err := pki.NewRootCA("Test Root")
@@ -74,10 +72,14 @@ func buildTestAS(t *testing.T, fake *githubfake.Fake, nowFn func() time.Time) (*
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	signer, err := authsvc.NewDevelopmentSigningCredential(root, "test", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := authsvc.IdPConfig{
 		Store:               st,
 		GitHub:              authsvc.NewGitHubProvider(fake.URL(), fake.URL(), fake.ClientID, fake.ClientSecret),
-		SigningKey:          sigKey,
+		Signer:              signer,
 		GitHubRedirectURI:   srv.URL + "/oauth/callback",
 		SPAOrigin:           "http://localhost:3000",
 		RedirectURIs:        []string{"http://localhost:3000/callback", "http://127.0.0.1:8000/cb"},
@@ -172,7 +174,7 @@ func TestLoopbackLoginEndToEnd(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	fake.SetUser(10002, "looptest2")
-	now := time.Unix(1770000000, 0)
+	now := time.Now().UTC()
 	srv, _, _ := buildTestAS(t, fake, func() time.Time { return now })
 
 	dir := t.TempDir()
@@ -235,8 +237,11 @@ func TestLoopbackLoginEndToEnd(t *testing.T) {
 	if err != nil || s == nil {
 		t.Fatalf("loadState: %v", err)
 	}
-	if s.AccessToken == "" {
-		t.Fatal("access_token empty")
+	if s.CPAccessToken == "" {
+		t.Fatal("cp_access_token empty")
+	}
+	if s.NodeAccessToken == "" {
+		t.Fatal("node_access_token empty")
 	}
 	if s.RefreshToken == "" {
 		t.Fatal("refresh_token empty — loopback refresh_token seam not working")
@@ -250,8 +255,8 @@ func TestLoopbackLoginEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	if tok != s.AccessToken {
-		t.Fatalf("token source returned %q; want stored access token %q", tok, s.AccessToken)
+	if tok != s.CPAccessToken {
+		t.Fatalf("token source returned %q; want stored access token %q", tok, s.CPAccessToken)
 	}
 }
 
@@ -265,7 +270,7 @@ func TestDeviceFlow(t *testing.T) {
 	fake := githubfake.New()
 	defer fake.Close()
 	fake.SetUser(10003, "devtest")
-	now := time.Unix(1770000000, 0)
+	now := time.Now().UTC()
 	srv, st, _ := buildTestAS(t, fake, func() time.Time { return now })
 
 	dir := t.TempDir()
@@ -321,8 +326,11 @@ func TestDeviceFlow(t *testing.T) {
 	if err != nil || s == nil {
 		t.Fatalf("loadState: %v", err)
 	}
-	if s.AccessToken == "" {
-		t.Fatal("access_token empty after device flow")
+	if s.CPAccessToken == "" {
+		t.Fatal("cp_access_token empty after device flow")
+	}
+	if s.NodeAccessToken == "" {
+		t.Fatal("node_access_token empty after device flow")
 	}
 	if s.RefreshToken == "" {
 		t.Fatal("refresh_token empty after device flow")
@@ -394,8 +402,9 @@ func TestConcurrentRefreshSingleFlight(t *testing.T) {
 
 	// Poll for tokens.
 	var tokenOut struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
+		RefreshToken    string `json:"refresh_token"`
 	}
 	for i := 0; i < 20; i++ {
 		time.Sleep(100 * time.Millisecond)
@@ -406,18 +415,19 @@ func TestConcurrentRefreshSingleFlight(t *testing.T) {
 		}
 		b2, _ := io.ReadAll(tr.Body)
 		tr.Body.Close()
-		if json.Unmarshal(b2, &tokenOut) == nil && tokenOut.AccessToken != "" {
+		if json.Unmarshal(b2, &tokenOut) == nil && tokenOut.CPAccessToken != "" {
 			break
 		}
 	}
-	if tokenOut.AccessToken == "" {
+	if tokenOut.CPAccessToken == "" {
 		t.Fatal("could not get tokens via device flow for refresh test setup")
 	}
 
 	// Seed a near-expiry authState.
 	s := &authState{
 		ASURL:              srv.URL,
-		AccessToken:        tokenOut.AccessToken,
+		CPAccessToken:      tokenOut.CPAccessToken,
+		NodeAccessToken:    tokenOut.NodeAccessToken,
 		AccessExpiresAt:    time.Now().Add(5 * time.Second).Unix(), // within refreshWindow (2min)
 		RefreshToken:       tokenOut.RefreshToken,
 		SessionKeyPKCS8PEM: keyPEM,
@@ -537,8 +547,9 @@ func TestConcurrentRefreshFileLock(t *testing.T) {
 	}
 
 	var tokenOut struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
+		CPAccessToken   string `json:"cp_access_token"`
+		NodeAccessToken string `json:"node_access_token"`
+		RefreshToken    string `json:"refresh_token"`
 	}
 	for i := 0; i < 20; i++ {
 		time.Sleep(100 * time.Millisecond)
@@ -549,17 +560,18 @@ func TestConcurrentRefreshFileLock(t *testing.T) {
 		}
 		b2, _ := io.ReadAll(tr.Body)
 		tr.Body.Close()
-		if json.Unmarshal(b2, &tokenOut) == nil && tokenOut.AccessToken != "" {
+		if json.Unmarshal(b2, &tokenOut) == nil && tokenOut.CPAccessToken != "" {
 			break
 		}
 	}
-	if tokenOut.AccessToken == "" {
+	if tokenOut.CPAccessToken == "" {
 		t.Fatal("could not get tokens via device flow for flock test setup")
 	}
 
 	s := &authState{
 		ASURL:              srv.URL,
-		AccessToken:        tokenOut.AccessToken,
+		CPAccessToken:      tokenOut.CPAccessToken,
+		NodeAccessToken:    tokenOut.NodeAccessToken,
 		AccessExpiresAt:    time.Now().Add(5 * time.Second).Unix(),
 		RefreshToken:       tokenOut.RefreshToken,
 		SessionKeyPKCS8PEM: keyPEM,
@@ -640,7 +652,8 @@ func TestLogout(t *testing.T) {
 
 	s := &authState{
 		ASURL:              srv.URL,
-		AccessToken:        "fake-access",
+		CPAccessToken:      "fake-cp-access",
+		NodeAccessToken:    "fake-node-access",
 		AccessExpiresAt:    time.Now().Add(15 * time.Minute).Unix(),
 		RefreshToken:       rawRefresh,
 		SessionKeyPKCS8PEM: keyPEM,
@@ -789,9 +802,10 @@ func TestPoPP1363Padding(t *testing.T) {
 func TestAtomicRenamePerms(t *testing.T) {
 	dir := t.TempDir()
 	s := &authState{
-		ASURL:        "https://as.example.com",
-		AccessToken:  "at",
-		RefreshToken: "rt",
+		ASURL:           "https://as.example.com",
+		CPAccessToken:   "at",
+		NodeAccessToken: "nt",
+		RefreshToken:    "rt",
 	}
 	if err := saveState(dir, s); err != nil {
 		t.Fatalf("saveState: %v", err)
@@ -807,7 +821,7 @@ func TestAtomicRenamePerms(t *testing.T) {
 	if err != nil || loaded == nil {
 		t.Fatalf("loadState: %v", err)
 	}
-	if loaded.AccessToken != "at" || loaded.RefreshToken != "rt" {
+	if loaded.CPAccessToken != "at" || loaded.NodeAccessToken != "nt" || loaded.RefreshToken != "rt" {
 		t.Fatalf("round-trip: %+v", loaded)
 	}
 }
@@ -867,7 +881,9 @@ func seedLoginTestFamilyWithSPKI(t *testing.T, st store.Store, accountID string,
 		FamilyID:          "fam-" + accountID,
 		ClientKind:        store.ClientCLI,
 		SessionPubkeySPKI: spkiDER,
-		AccessTokenID:     "tok-" + accountID,
+		CPAccessTokenID:   "cp-" + accountID,
+		NodeAccessTokenID: "node-" + accountID,
+		AccessExpiresAt:   now.Add(15 * time.Minute).Unix(),
 		CreatedAt:         now.Unix(),
 		LastUsedAt:        now.Unix(),
 		ExpiresAt:         now.Add(30 * 24 * time.Hour).Unix(),

@@ -30,8 +30,11 @@ from several branches at once**). It:
 1. **boots** a fresh VM on a copy-on-write overlay of the golden image (`up.sh`);
 2. **rolls** the fresh code in and restarts the stack, waiting until it is app-ready — AS health, CP
    up, **node re-registered over enforced mTLS**, Caddy/web serving (`roll.sh`);
-3. **runs** `acceptance/` against `https://<runid>.e2e.test` with the validated env (dev-token auth
-   wired to the fake-GitHub identity pool, demo app/model, longer active-timeout, the golden CA).
+3. copies only the generated public PKI material out, rebuilds/scans the SPA with the exact root,
+   trust-domain, cloud-account, issuing-intermediate, and CRL pins, publishes it, then **runs**
+   `acceptance/` with real paired OAuth credentials for the fake-GitHub identities and public CRL
+   verification inputs. CRLs are build-stamped; rotation or expiry requires another SPA build, and
+   there is no runtime CRL URL/fetch fallback.
 
 The VM is **always torn down on exit** (`--keep` leaves it up for debugging). Failure artifacts
 (journald, containerd/runsc, Postgres, the Playwright report) are captured **before** teardown under
@@ -95,29 +98,38 @@ For a **single binary** hot-patch (e.g. testing a `spawnlet` change) you can `sc
 
 ## Running the suite against a VM you already have up
 
-`up.sh` writes `~/.local/state/spawnery-e2e/<runid>/acc.env` (base `ACC_*` values). To run the suite
-by hand against it, source that and set the validated env (this is exactly what `run.sh` step 3 does —
-see `scripts/e2e-vm/run.sh`):
+`up.sh` writes `~/.local/state/spawnery-e2e/<runid>/acc.env` (base `ACC_*` values). To run the
+non-destructive suite by hand against it, source that and set the validated environment:
 
 ```bash
 set -a; . ~/.local/state/spawnery-e2e/<runid>/acc.env; set +a
-export ACC_AUTH_MODE=dev-token \
-  ACC_IDENTITY_POOL="devtoken1=acc-owner-1,devtoken2=acc-owner-2,devtoken3=acc-owner-3" \
+PUBLIC=~/.local/state/spawnery-e2e/<runid>/public-pki
+export ACC_AUTH_MODE=oauth-pop \
+  ACC_IDENTITY_POOL="acc-owner-1=acc-owner-1,acc-owner-2=acc-owner-2" \
+  ACC_ROOT_CA_PEM="$PUBLIC/root.pem" ACC_TRUST_DOMAIN=prod.spawnery.internal \
+  ACC_CLOUD_ACCOUNT_ID=spawnery-system ACC_CRL_STATE="$PUBLIC/crl-state.json" \
+  ACC_CRL_ISSUERS="$PUBLIC/service-intermediate.pem,$PUBLIC/cloud-intermediate.pem,$PUBLIC/self-hosted-intermediate.pem" \
+  ACC_CRLS="$PUBLIC/service.crl.pem,$PUBLIC/cloud-node.crl.pem,$PUBLIC/self-hosted-node.crl.pem" \
   ACC_TARGET_REF=vm ACC_BUILD_REF=vm ACC_SPAWNCTL_BIN="$PWD/bin/spawnctl" \
   ACC_TEST_APP_ID=spawnery/secret-app ACC_LIFECYCLE_APP=spawnery/secret-app \
-  ACC_AGENT_APP_ID=spawnery/secret-app ACC_APP_ID=spawnery/secret-app \
-  ACC_TEST_MODEL=openai/gpt-4o-mini ACC_AGENT_MODEL=openai/gpt-4o-mini \
+  ACC_AGENT_INFERENCE_AVAILABLE=0 ACC_APP_ID=spawnery/secret-app \
+  ACC_TEST_MODEL=openai/gpt-4o-mini \
   ACC_SPAWN_ACTIVE_TIMEOUT_MS=240000 \
   NODE_EXTRA_CA_CERTS=/var/lib/libvirt/images/spawnery-e2e/golden-ca.crt
-( cd acceptance && npx playwright test [tests/...] -g "cli" --reporter=list )
+( cd acceptance && npx playwright test [tests/...] --project=chromium -g "cli" --reporter=list )
 ```
+
+This manual path deliberately excludes the `destructive-root-artifacts` project. Its
+`ACC_E2E_VM_RUNID` is not a user-configurable safety assertion: `run.sh` writes the exact run ID to a
+root-owned, boot-local marker in its fresh VM and only then exports the matching acceptance value.
+Do not synthesize either side of that binding. Run the destructive project only through `run.sh`.
 
 ## Auth profiles
 
-- **`--profile fake`** (default, fully headless): the AS stubs GitHub (`AS_FAKE_GITHUB`, reachable
-  multi-user) and the CP runs **dev-token** auth (`CP_DEV_TOKENS` → the identity pool). Covers
-  Phases 0–6. The node is still **`NODE_AUTH_MODE=enforced`**, so spawn creation still requires real
-  A4 intent-signing — the acceptance oracle and `spawnctl` both sign.
+- **`--profile fake`** (default, fully headless): the AS stubs only the GitHub identity provider.
+  Browser, oracle, and CLI still obtain real AS-issued paired credentials. The browser owns a
+  non-extractable session key; `spawnctl` performs real device login and retains its private key and
+  paired state in a per-worker `0600` config directory. CP and node validate root-anchored artifacts.
 - **`--profile github`** (not yet wired end-to-end): real GitHub App, session linked fresh per run.
   Needs the seeded-`storageState` suite auth path + provisioning (deferred; see the design spec).
 
@@ -127,17 +139,17 @@ The suite drives the stack through **layered drivers** and asserts the *real* re
 
 - **`webDriver`** — a real browser (Playwright) clicking the SPA; asserts **rendered DOM**.
 - **`cliDriver`** — shells out to `spawnctl`; asserts CLI output + exit codes. Verbs `spawnctl`
-  lacks (`rename`/`suspend`/`stop`/`delete`) are **failing stubs** — the parity gap shows as red by
-  design.
+  lacks are represented by intentional `test.fixme` product-debt rows; executable driver unit tests
+  retain fail-loud stubs for accidental direct use.
 - **the SDK oracle** (`acceptance/src/drivers/oracle.ts`, over `@spawnery/client`) — an independent
-  Connect cross-check that **signs** (so it can create spawns on the enforced node) and reads
-  `ListSpawns`/status to confirm what a surface did.
+  Connect cross-check supplied atomically with its persistent session key, node credential provider,
+  and strict VM target verifier.
 
 Scenario coverage (`acceptance/tests/`):
 
 | Area | Verifies |
 |---|---|
-| `lifecycle/` | create + list, delete, rename, set-model, stop — spawn lifecycle across web + cli (rename/stop/delete are cli parity-gap reds). |
+| `lifecycle/` | create + list, delete, rename, set-model, stop across web + cli; unavailable surface verbs remain intentional fixme product-debt rows. |
 | `sessions/exec-exitcode` | `spawnctl exec` runs a command in the spawn's container and **propagates its exit code + captures stdout** (the runsc/crictl exec path). |
 | `sessions/prompt-transcript.agent` | a **real LLM agent**: prompt → structurally-rendered transcript, survives reload, and its exec side-effect is fresh (structure, never agent prose; cost-capped, model-pinned). |
 | `suspend-fork` | fork inherits a per-run marker (fork = clone a running spawn); suspend is a cli parity gap. |
@@ -152,10 +164,30 @@ spawn returns to ACTIVE with no operator action, the file and the process surviv
 works inside the agent (the per-spawn MITM CA did not change under it). That is SE3's acceptance criteria,
 end to end — `docs/superpowers/specs/2026-07-12-spawnlet-restart-readoption-design.md` §6.
 
-Because the target is the prod-mode stack, passing these also transitively verifies: **A4
-intent-signing** end-to-end (create/resume/fork), **enforced mTLS** node registration, **runsc/gVisor**
-pod isolation, the **Postgres** CP store, **Caddy TLS** at a fixed hostname, and dev-token (or, when
-wired, OAuth-PoP) auth.
+Because the target is the prod-mode stack, passing these also transitively verifies paired OAuth-PoP
+authorization and intent signing end-to-end (create/resume/fork), enforced mTLS node registration,
+runsc/gVisor pod isolation, the Postgres CP store, and Caddy TLS at a fixed hostname.
+
+The authorization specs require exact `WRONG_AUDIENCE`, `CNF_MISMATCH`, `BAD_SIG`,
+`OWNER_MISMATCH`, `CORRESPONDENCE`, `STALE`, `SKEW`, and `REPLAY` node evidence, with no CRI pod for
+rejected provisioning. Omitted intent or node-token fields are rejected by CP as `InvalidArgument`
+before relay, so this lane makes no node `MISSING_INTENT` claim. Real SPA and stored-login CLI probes
+also substitute node ID, class/account, and certificate chain and must fail target verification
+before any `SubmitIntent`. Logout closes active ACP/MOSH attachments with correlated structured node
+reason `node authorization revoked`; AS outage cannot refresh or reauthenticate past the real
+AS-issued 15-minute node token's signed expiry and must close with `node authorization expired`.
+The one-node VM proves same-node CLI move by a generation increase; the web proves that the current
+node is excluded by showing no targets.
+
+The destructive signer-revocation project runs last and alone. It may temporarily enable the fake
+profile's exact dev token only after the active signer has been revoked; ordinary tests cannot fall
+back to it. This lane deliberately excludes the unmerged `.2.7` rollout approach: no `/node-token`
+exchange, private-key export, injected node bearer, raw signer pin, or CP signing key is allowed.
+
+For normal development, start the enforced AS/CP/node stack with `just dev` (the
+`authsvc-github`/`cp-github`/`node-github` processes), sign in through the web OAuth flow, and run
+`bin/spawnctl login --device --as http://127.0.0.1:8081` before lifecycle commands. A static
+`-token` is a compatibility path, not production client-to-node authorization coverage.
 
 **Out of scope here** (owned by other, host-gated lanes): agent *answer quality* (only structural
 transcript is asserted), egress-floor/cgroup isolation internals, and — until wired — the real-GitHub

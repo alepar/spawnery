@@ -1,29 +1,34 @@
 package authsvc
 
 import (
-	"encoding/base64"
 	"net/http"
 
 	"spawnery/gen/auth/v1/authv1connect"
+	"spawnery/internal/mtls"
 )
 
-// Handler returns the AS's HTTP surface. The skeleton serves liveness and the Root CA for
-// distribution; enrollment (sp-0qc) and session signing (sp-3ca) add their routes here. NOTE: the Root
-// CA is the trust anchor and is meant to be pinned OUT-OF-BAND (baked into client bundles); this
-// endpoint exists for bootstrap/ops convenience, not as the trust mechanism.
-//
-// Identity routes (A1, sp-ussy.1) are registered when an *IdP is attached via WithIdP:
-//
-//	GET  /oauth/authorize     — start auth-code+PKCE flow (rate-limited)
-//	GET  /oauth/callback      — GitHub redirects here; mints tokens
-//	POST /refresh             — credentialed-CORS; PoP-gated rotation [AM2,AM5]
-//	POST /logout              — revoke family + expire cookie [AM10]
-//	GET  /revocations         — signed revocation feed for CP (A2) [AM10]
-//	POST /device/authorize    — RFC 8628: spawnctl POSTs session pubkey [AM7]
-//	GET  /device/verify       — user confirmation page (authed browser) [AM7]
-//	POST /device/verify       — user submits user_code [AM7]
-//	POST /device/token        — spawnctl polls for tokens [AM7]
-func (s *Service) Handler() http.Handler {
+const (
+	operationEnroll         = "authsvc.enroll"
+	operationCredentialMint = "authsvc.credential-mint"
+	operationRevocations    = "authsvc.revocations"
+	operationGitHubLink     = "authsvc.github-link-status"
+)
+
+// DefaultInternalPolicy is the complete AS internal route/principal matrix.
+func DefaultInternalPolicy() mtls.Policy {
+	return mtls.Policy{
+		"anonymous":        {operationEnroll: {}},
+		"node:cloud":       {operationCredentialMint: {}, operationRevocations: {}},
+		"node:self-hosted": {operationCredentialMint: {}, operationRevocations: {}},
+		"service:cp":       {operationRevocations: {}, operationGitHubLink: {}},
+	}
+}
+
+// Handler is retained as the public-handler compatibility entry point.
+func (s *Service) Handler() http.Handler { return s.PublicHandler() }
+
+// PublicHandler returns only browser and CLI identity routes.
+func (s *Service) PublicHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -33,27 +38,15 @@ func (s *Service) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		_, _ = w.Write(s.RootCAPEM())
 	})
-	mux.HandleFunc("POST /enroll", s.enrollHandler)
-	mux.HandleFunc("GET /session/pubkey", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte(base64.RawURLEncoding.EncodeToString(s.SessionPubKey())))
-	})
-	if s.nodeRevocations != nil {
-		mux.HandleFunc("GET /node-revocations", s.serveNodeRevocations)
-	}
-	mux.Handle(authv1connect.NewAuthServiceHandler(s))
-
-	// CP→AS internal link-status endpoint: registered only when the shared secret is configured.
-	// Server-to-server only — not CORS/SPA-exposed. Requires X-Spawnery-AS-Secret header.
-	if s.cpRPCSecret != "" {
-		mux.HandleFunc("POST /internal/github/link-status", s.serveGitHubLinkStatus)
+	if s.enrollmentAccountFromReq != nil {
+		mux.HandleFunc("POST /enrollment-tokens", s.enrollmentTokenHandler)
 	}
 
 	if s.githubLinkExchanger != nil {
 		ghNoop := func(http.ResponseWriter, *http.Request) {}
 		mux.HandleFunc("POST /github/link/start", s.ghLinkCORSBearerSimple(s.serveGitHubLinkStart))
 		mux.HandleFunc("OPTIONS /github/link/start", s.ghLinkCORSBearerSimple(ghNoop))
-		mux.HandleFunc("GET /github/link/callback", s.serveGitHubLinkCallback) // top-level nav from GitHub; no CORS
+		mux.HandleFunc("GET /github/link/callback", s.serveGitHubLinkCallback)
 		mux.HandleFunc("POST /github/link/redeem", s.ghLinkCORSCredentialed(s.serveGitHubLinkRedeem))
 		mux.HandleFunc("OPTIONS /github/link/redeem", s.ghLinkCORSCredentialed(ghNoop))
 		mux.HandleFunc("GET /github/links", s.ghLinkCORSBearerSimple(s.serveGitHubLinkList))
@@ -66,46 +59,71 @@ func (s *Service) Handler() http.Handler {
 		ds := s.deviceSet
 		mux.HandleFunc("POST /devices/append", ds.corsBearerSimple(ds.serveAppend))
 		mux.HandleFunc("GET /devices", ds.corsBearerSimple(ds.serveList))
-		mux.HandleFunc("OPTIONS /devices/append", ds.corsBearerSimple(func(w http.ResponseWriter, r *http.Request) {}))
-		mux.HandleFunc("OPTIONS /devices", ds.corsBearerSimple(func(w http.ResponseWriter, r *http.Request) {}))
+		mux.HandleFunc("OPTIONS /devices/append", ds.corsBearerSimple(func(http.ResponseWriter, *http.Request) {}))
+		mux.HandleFunc("OPTIONS /devices", ds.corsBearerSimple(func(http.ResponseWriter, *http.Request) {}))
 	}
 
 	if s.idp != nil {
 		idp := s.idp
-		// OAuth flow.
 		mux.HandleFunc("GET /oauth/authorize", idp.serveAuthorize)
 		mux.HandleFunc("GET /oauth/callback", idp.serveCallback)
-
-		// /refresh is credentialed-CORS [AM2]: wrap with CORS middleware.
 		mux.HandleFunc("POST /refresh", idp.corsCredentialed(idp.serveRefresh))
-		mux.HandleFunc("OPTIONS /refresh", idp.corsCredentialed(func(w http.ResponseWriter, r *http.Request) {
-			// Pre-flight handled by corsCredentialed itself.
-		}))
-
-		// Logout.
+		mux.HandleFunc("OPTIONS /refresh", idp.corsCredentialed(func(http.ResponseWriter, *http.Request) {}))
 		mux.HandleFunc("POST /logout", idp.corsCredentialed(idp.serveLogout))
-		mux.HandleFunc("OPTIONS /logout", idp.corsCredentialed(func(w http.ResponseWriter, r *http.Request) {
-			// Pre-flight handled by corsCredentialed itself.
-		}))
-
-		// Revocation feed (A2 consumption) — no CORS needed (server-to-server).
-		mux.HandleFunc("GET /revocations", idp.serveRevocations)
-
-		// Device grant (RFC 8628) [AM7].
+		mux.HandleFunc("OPTIONS /logout", idp.corsCredentialed(func(http.ResponseWriter, *http.Request) {}))
 		mux.HandleFunc("POST /device/authorize", idp.serveDeviceAuthorize)
 		mux.HandleFunc("GET /device/verify", idp.serveDeviceVerifyGet)
 		mux.HandleFunc("POST /device/verify", idp.serveDeviceVerifyPost)
 		mux.HandleFunc("POST /device/token", idp.serveDeviceToken)
 	}
+	return mux
+}
 
-	var inner http.Handler = mux
-	if s.devNodeIdentityHeader != "" {
-		// NOTE: devNodeIdentityMiddleware wraps the entire mux (not just the GitHub mint endpoint),
-		// so AS_DEV_RELAX_NODE_AUTH=1 relaxes header-trust on all node-identity-gated routes
-		// (enroll, fanout, revocation, mint). This is broader than the spec's "relaxed node->AS
-		// mint channel" framing but is strictly gated by AS_DEV_RELAX_NODE_AUTH=1 — never set in
-		// any enforced/prod recipe — and never overrides a verified mTLS identity (D3 invariant).
-		inner = devNodeIdentityMiddleware(s.devNodeIdentityHeader, inner)
+// InternalHandler returns direct-TLS routes protected by the supplied principal policy.
+func (s *Service) InternalHandler(policy mtls.Policy) http.Handler {
+	_, credentialMint := authv1connect.NewAuthServiceHandler(s)
+	routes := internalRouteHandlers{enroll: http.HandlerFunc(s.enrollHandler), credentialMint: credentialMint, githubLink: http.HandlerFunc(s.serveGitHubLinkStatus)}
+	if s.idp != nil {
+		routes.revocations = http.HandlerFunc(s.idp.serveRevocations)
 	}
-	return nodeIdentityMiddleware(s.root, inner)
+	return internalHandler(policy, routes)
+}
+
+type internalRouteHandlers struct {
+	enroll         http.Handler
+	credentialMint http.Handler
+	revocations    http.Handler
+	githubLink     http.Handler
+}
+
+func internalHandler(policy mtls.Policy, routes internalRouteHandlers) http.Handler {
+	mux := http.NewServeMux()
+	if routes.enroll != nil {
+		mux.Handle("POST /enroll", routes.enroll)
+	}
+	if routes.credentialMint != nil {
+		mux.Handle(authv1connect.AuthServiceMintGitHubAccessTokenProcedure, routes.credentialMint)
+	}
+	if routes.revocations != nil {
+		mux.Handle("GET /revocations", routes.revocations)
+	}
+	if routes.githubLink != nil {
+		mux.Handle("POST /internal/github/link-status", routes.githubLink)
+	}
+
+	operation := func(r *http.Request) string {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/enroll":
+			return operationEnroll
+		case r.Method == http.MethodPost && r.URL.Path == authv1connect.AuthServiceMintGitHubAccessTokenProcedure:
+			return operationCredentialMint
+		case r.Method == http.MethodGet && r.URL.Path == "/revocations":
+			return operationRevocations
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/github/link-status":
+			return operationGitHubLink
+		default:
+			return ""
+		}
+	}
+	return policy.HTTPMiddleware(operation, mux)
 }

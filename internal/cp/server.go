@@ -5,10 +5,11 @@ package cp
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -23,7 +24,6 @@ import (
 	"spawnery/gen/cp/v1/cpv1connect"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/agentcaps"
-	"spawnery/internal/authsvc/token"
 	"spawnery/internal/cp/auth"
 	"spawnery/internal/cp/cpmetrics"
 	"spawnery/internal/cp/journalkeys"
@@ -121,16 +121,9 @@ type Server struct {
 	devMode        bool
 	reauthInterval time.Duration // reauth deadline; 0 uses defaultReauthInterval
 
-	// intentEnabled gates the A4 two-phase sign-after-resolve flow. Decoupled from devMode so that
-	// dev instances can run the full A4 flow (verify-and-log at the node) when a dev AS key is
-	// available. Default false keeps existing tests passing — tests that need the intent flow call
-	// SetIntentEnabled(true). Production callers also call SetIntentEnabled(true) after auth mode
-	// is confirmed [AM12].
+	// intentEnabled is a hermetic fixture seam for tests that predate the two-phase flow. Runtime
+	// startup always enables it; there is no configuration bypass.
 	intentEnabled bool
-	// devASKey is the dev-only AS Ed25519 signing key used to mint aud=node tokens in SubmitIntent
-	// when the client does not supply NodeAccessToken. Set via SetDevASKey; nil = no dev minting.
-	devASKey   ed25519.PrivateKey
-	devASKeyID string
 
 	// pendingIntents is the A4 two-phase sign-after-resolve registry [AC1]. Lifecycle handlers
 	// (Create/Resume/Recreate/Migrate) register a pending intent BEFORE calling Provision; the
@@ -460,6 +453,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 		if nodeID == "" || !s.reg.RemoveIfCurrent(nodeID, token) {
 			return
 		}
+		s.nodeKeys.removeIfCurrent(nodeID, token)
 		dropped := s.rt.DropNode(nodeID)
 		if len(dropped) > 0 {
 			_, _ = s.st.Spawns().MarkUnreachable(context.Background(), dropped)
@@ -520,7 +514,7 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 					slog.Warn("node: self-asserted node_id != verified identity; using verified",
 						"node", id.NodeID, "asserted", m.Register.NodeId)
 				}
-				nodeID, nodeClass, nodeOwner = id.NodeID, id.Class, id.AccountID
+				nodeID, nodeClass, nodeOwner = id.NodeID, id.Role, id.AccountID
 			}
 			if nodeClass == "" {
 				nodeClass = "cloud" // safe default: an unidentified node is assumed restricted
@@ -541,14 +535,13 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			// Cache the node's published sub-key + relayed cert chain (sp-2ckv.4). The chain is the
 			// mTLS-verified peer chain (empty in insecure mode); the sub-key is the node's published JSON.
 			certChain, _ := nodeauth.CertChainFromContext(ctx)
-			s.nodeKeys.put(nodeID, m.Register.SignedSubkey, certChain)
+			s.nodeKeys.put(nodeID, token, nodeClass, nodeOwner, m.Register.SignedSubkey, certChain)
 			s.reconcileInventory(ctx, nodeID, sender, m.Register.Running) // a returning node reports what it still runs
 			s.upsertAgentCatalog(ctx, m.Register.AgentImages, m.Register.Binaries)
 		case *nodev1.NodeMessage_Heartbeat:
 			s.reg.Heartbeat(nodeID, token, m.Heartbeat.ActiveSpawns, m.Heartbeat.FreeSlots)
 			if len(m.Heartbeat.SignedSubkey) > 0 {
-				certChain, _ := nodeauth.CertChainFromContext(ctx)
-				s.nodeKeys.put(nodeID, m.Heartbeat.SignedSubkey, certChain) // sub-key rotated -> refresh cache
+				s.nodeKeys.updateSubkey(nodeID, token, m.Heartbeat.SignedSubkey)
 			}
 			s.reconcileInventory(ctx, nodeID, sender, m.Heartbeat.Running)
 		case *nodev1.NodeMessage_Status:
@@ -596,6 +589,11 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			}
 		case *nodev1.NodeMessage_Frame:
 			s.rt.FromNode(m.Frame.SpawnId, m.Frame.SessionId, m.Frame.ClientId, m.Frame.Data) // opaque bytes; never inspected
+		case *nodev1.NodeMessage_SessionAuthClosed:
+			s.rt.SessionAuthClosed(
+				m.SessionAuthClosed.GetSpawnId(), m.SessionAuthClosed.GetSessionId(), m.SessionAuthClosed.GetClientId(),
+				nodeID, m.SessionAuthClosed.GetGeneration(), m.SessionAuthClosed.GetAttachmentId(),
+			)
 		case *nodev1.NodeMessage_Roster:
 			s.rt.UpdateRoster(m.Roster.SpawnId, nodeID, m.Roster.Sessions) // node-authoritative session set; CP mirrors
 		case *nodev1.NodeMessage_SessionStatus:
@@ -1046,31 +1044,21 @@ func (s *Server) SetVerify(v func(string) (auth.Identity, error)) { s.verify = v
 // SetDevMode sets whether the server is in dev mode (reauth enforced in prod only).
 func (s *Server) SetDevMode(dev bool) { s.devMode = dev }
 
-// SetIntentEnabled enables or disables the A4 two-phase sign-after-resolve flow [AC1][AM12].
-// Defaults to false so existing tests are unaffected. Production main and dev instances with a
-// dev AS key call SetIntentEnabled(true).
+// SetIntentEnabled controls the A4 two-phase sign-after-resolve flow in hermetic tests. Runtime
+// startup always calls it with true and exposes no corresponding configuration.
 func (s *Server) SetIntentEnabled(v bool) { s.intentEnabled = v }
-
-// SetDevASKey configures the dev-only AS Ed25519 signing key used to mint aud=node tokens in
-// SubmitIntent when the client omits NodeAccessToken. priv must be non-nil; keyID is the derived
-// token.KeyID. In prod mode this MUST NOT be set — prod clients obtain node tokens from the real AS.
-func (s *Server) SetDevASKey(priv ed25519.PrivateKey, keyID string) {
-	s.devASKey = priv
-	s.devASKeyID = keyID
-}
 
 // SetReauthInterval overrides the in-band reauth deadline (default 15 min).
 func (s *Server) SetReauthInterval(d time.Duration) { s.reauthInterval = d }
 
 // SetASLinkChecker installs the CP→AS GitHub link-status checker used by the CreateSpawn preflight.
-// asURL is the AS base URL (e.g. "http://127.0.0.1:8090"); secret is CP_AS_RPC_SECRET. Both must
-// be non-empty — the method is a no-op when either is empty. Call from cmd/spawnery_cp/main.go
+// asURL is the AS internal base URL (e.g. "https://authsvc.internal:8091"). Call from cmd/spawnery_cp/main.go
 // when CP_AS_URL is configured; non-github lanes leave the checker nil (preflight skipped).
-func (s *Server) SetASLinkChecker(asURL, secret string) {
-	if asURL == "" || secret == "" {
+func (s *Server) SetASLinkChecker(asURL string, client *http.Client) {
+	if asURL == "" || client == nil {
 		return
 	}
-	s.linkChecker = newHTTPASLinkChecker(asURL, secret, nil)
+	s.linkChecker = newHTTPASLinkChecker(asURL, client)
 }
 
 // checkSpawnQuota returns ResourceExhausted if the owner is at/over the per-owner spawn cap.
@@ -1646,7 +1634,7 @@ func (s *Server) provisionSpawn(ctx context.Context, spawnID, ownerID, appRef, m
 		}
 		return
 	}
-	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, nodeArts, secrets)
+	nodeID, err := s.sched.Provision(ctx, spawnID, appRef, model, sp.Name, sp.AppID, sp.RunnableID, sp.Mode, 1, placement, env, storeToNodeMounts(mounts), "", nil, nodeArts, secrets, intent.OpCreateSpawn)
 	if err != nil {
 		slog.Error("provisionSpawn: Provision failed", "spawn", spawnID, "err", err)
 		var step string
@@ -1768,11 +1756,16 @@ func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1
 	pi, ready := s.pendingIntents.get(req.Msg.SpawnId)
 	resp := &cpv1.GetPendingIntentResponse{Pending: pi, Ready: ready}
 	if ready {
-		if entry, ok := s.pendingIntentNodeKey(pi); ok {
-			resp.NodeCertChain = append([]byte(nil), entry.certChain...)
-			resp.SignedSubkey = append([]byte(nil), entry.subkey...)
-			resp.Generation = pi.GetGeneration()
+		entry, ok := s.pendingIntentNodeKey(pi)
+		if !ok {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("target node has not published verifiable identity metadata"))
 		}
+		resp.NodeCertChain = append([]byte(nil), entry.certChain...)
+		resp.SignedSubkey = append([]byte(nil), entry.subkey...)
+		resp.Generation = pi.GetGeneration()
+		resp.TargetNodeId = entry.nodeID
+		resp.TargetNodeClass = entry.nodeClass
+		resp.TargetNodeAccountId = entry.accountID
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -1780,10 +1773,6 @@ func (s *Server) GetPendingIntent(ctx context.Context, req *connect.Request[cpv1
 // SubmitIntent delivers the client's SignedIntent + node access token, unblocking the pending
 // provision. The node_access_token is the aud=node AS-signed token bound to the client's
 // session key (the cnf claim). Both are threaded verbatim into StartSpawn as an AuthEnvelope.
-//
-// In dev mode (devASKey set), if node_access_token is empty the CP mints a cnf-bearing aud=node
-// token from the intent's SPKI DER so the full A4 verification chain can run at the node in
-// verify-and-log mode (NODE_AUTH_MODE=insecure) [AM12].
 func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.SubmitIntentRequest]) (*connect.Response[cpv1.SubmitIntentResponse], error) {
 	owner, ok := auth.OwnerFromContext(ctx)
 	if !ok {
@@ -1796,22 +1785,15 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 	if sp.OwnerID != owner {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
 	}
-
-	nodeTok := req.Msg.NodeAccessToken
-	// Dev-mode cnf-bearing node token minting [AM12]: if the client omits the node token and a dev
-	// AS key is configured, mint one bound to the intent's SPKI DER so the node can run the full
-	// eight-step verification chain in AuthModeVerifyLog (verify-and-log, not skip).
-	if nodeTok == "" && s.devASKey != nil && req.Msg.Intent != nil && len(req.Msg.Intent.SpkiDer) > 0 {
-		minted, mintErr := token.MintNode(s.devASKey, s.devASKeyID, owner, req.Msg.Intent.SpkiDer, s.now())
-		if mintErr != nil {
-			slog.Warn("SubmitIntent: dev AS mint failed (node token empty)", "spawn", req.Msg.SpawnId, "err", mintErr)
-		} else {
-			nodeTok = minted
-		}
+	if req.Msg.NodeAccessToken == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("node_access_token required"))
+	}
+	if req.Msg.Intent == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("intent required"))
 	}
 
 	env := &authv1.AuthEnvelope{
-		AccessToken: nodeTok,
+		AccessToken: req.Msg.NodeAccessToken,
 		Intent:      req.Msg.Intent,
 	}
 	submission := &pendingIntentSubmission{
@@ -1822,25 +1804,6 @@ func (s *Server) SubmitIntent(ctx context.Context, req *connect.Request[cpv1.Sub
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	return connect.NewResponse(&cpv1.SubmitIntentResponse{}), nil
-}
-
-// mintSessionEnv builds the session-open AuthEnvelope from a client-supplied envelope.
-// In dev mode (devASKey set), if access_token is empty the CP mints a cnf-bearing aud=node
-// token from the intent's SPKI DER so the full A4 verification chain runs [AM12].
-func (s *Server) mintSessionEnv(owner string, sa *authv1.AuthEnvelope) *authv1.AuthEnvelope {
-	if sa == nil || sa.Intent == nil {
-		return nil
-	}
-	nodeTok := sa.AccessToken
-	if nodeTok == "" && s.devASKey != nil && len(sa.Intent.SpkiDer) > 0 {
-		minted, err := token.MintNode(s.devASKey, s.devASKeyID, owner, sa.Intent.SpkiDer, s.now())
-		if err != nil {
-			slog.Warn("mintSessionEnv: dev AS mint failed", "err", err)
-		} else {
-			nodeTok = minted
-		}
-	}
-	return &authv1.AuthEnvelope{AccessToken: nodeTok, Intent: sa.Intent}
 }
 
 // buildPendingIntent constructs the cp.v1.PendingIntent from the committed provision tuple.
@@ -1973,12 +1936,39 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	if owner == "" {
 		owner, _ = auth.OwnerFromContext(ctx)
 	}
+	if owner == "" {
+		return connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("no owner"))
+	}
 	sp, err := s.st.Spawns().Get(ctx, spawnID)
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound, fmt.Errorf("unknown spawn"))
 	}
 	if owner != sp.OwnerID {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not your spawn"))
+	}
+	container, live, err := s.st.Spawns().LiveContainer(ctx, spawnID)
+	if err != nil || !live {
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("spawn has no live episode"))
+	}
+	generation := uint64(container.Generation)
+	sessionID := first.GetSessionId()
+	execRequest := first.GetExecRequest()
+	if execRequest != nil {
+		if sessionID == "" {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exec_request requires explicit session_id"))
+		}
+		if len(execRequest.GetArgv()) == 0 || execRequest.GetArgv()[0] == "" {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exec_request requires non-empty argv"))
+		}
+		if len(first.GetData()) != 0 {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("exec bind frame must not contain data"))
+		}
+	} else if sessionID == "" {
+		sessionID = "0"
+	}
+	sessionEnv := first.GetSessionAuth()
+	if sessionEnv == nil || sessionEnv.GetAccessToken() == "" || sessionEnv.GetIntent() == nil {
+		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_auth with node access token and signed intent required"))
 	}
 
 	// Per-session context for revocation cancellation.
@@ -2019,25 +2009,26 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 
 	clientID := uuid.Must(uuid.NewV7()).String()
 	cs := &clientStream{stream: stream, spawnID: spawnID}
-	// A4: thread session-open AuthEnvelope from the bind frame into SessionOpen [AC1].
-	var sessionEnv *authv1.AuthEnvelope
-	if sa := first.GetSessionAuth(); sa != nil {
-		sessionEnv = s.mintSessionEnv(owner, sa)
-	}
 	// cursor 0: the cp.v1 Session-RPC transport has no resume cursor (only the WS bind does).
 	// session "0": this transport has no per-session selector yet (web uses the WS bind for that).
-	done, err := s.rt.AttachClient(spawnID, "0", clientID, sp.OwnerID, sessionEnv, cs, 0)
+	var done <-chan struct{}
+	var lease router.AttachmentLease
+	if execRequest != nil {
+		done, lease, err = s.rt.AttachExecClient(spawnID, sessionID, clientID, sp.OwnerID, sessionEnv, execRequest, cs, 0, generation)
+	} else {
+		done, lease, err = s.rt.AttachClient(spawnID, sessionID, clientID, sp.OwnerID, sessionEnv, cs, 0, generation)
+	}
 	if err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 	_ = s.tel.Emit(telemetry.Event{Kind: "session_start", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	defer func() {
-		s.rt.DetachClient(spawnID, "0", clientID)
+		s.rt.DetachClient(spawnID, sessionID, clientID, lease)
 		_ = s.tel.Emit(telemetry.Event{Kind: "session_end", Owner: sp.OwnerID, SpawnID: spawnID, Timestamp: time.Now().UTC()})
 	}()
 
 	if len(first.Data) > 0 {
-		_ = s.rt.FromClient(spawnID, "0", clientID, first.Data)
+		_ = s.rt.FromClient(spawnID, sessionID, clientID, first.Data)
 	}
 	recvErr := make(chan error, 1)
 	go func() {
@@ -2083,7 +2074,22 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 				}
 				continue
 			}
-			if ferr := s.rt.FromClient(spawnID, "0", clientID, f.Data); ferr != nil {
+			if env := f.GetSessionReauth(); env != nil {
+				if env.GetAccessToken() == "" || env.GetIntent() == nil {
+					recvErr <- connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_reauth requires node access token and signed intent"))
+					return
+				}
+				if rerr := s.rt.ReauthenticateClient(spawnID, sessionID, clientID, lease, generation, sp.OwnerID, env); rerr != nil {
+					recvErr <- rerr
+					return
+				}
+				continue
+			}
+			if f.GetSessionId() != "" || f.GetExecRequest() != nil || f.GetSessionAuth() != nil {
+				recvErr <- connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("session_id, exec_request, and session_auth are bind-only"))
+				return
+			}
+			if ferr := s.rt.FromClient(spawnID, sessionID, clientID, f.Data); ferr != nil {
 				recvErr <- ferr
 				return
 			}
@@ -2092,8 +2098,11 @@ func (s *Server) Session(ctx context.Context, stream *connect.BidiStream[cpv1.Fr
 	select {
 	case <-done:
 		return nil
-	case <-recvErr:
-		return nil
+	case err := <-recvErr:
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
 	case <-sessCtx.Done():
 		return nil
 	case <-ctx.Done():

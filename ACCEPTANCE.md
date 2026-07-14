@@ -35,10 +35,14 @@ talks to the real instance and is governed by the prod-safety guardrail below.
 ## The one deployment constraint: run co-located (or tunneled)
 
 `spawnctl` speaks **cleartext h2c to the CP** unless the endpoint is `https://` (then it does TLS —
-T1/`schemeTransport`), and `spawnctl exec`/`attach` dial the **node directly** (`ACC_NODE_ADDR`),
-bypassing the CP. For headless real-OAuth, the target must run **`AS_FAKE_GITHUB`** (reachable +
-multi-user — T2), whose redirect must be reachable from where the suite runs. Net: **run the suite
-co-located with the target, or over an SSH tunnel / port-forward** — not fully arms-length yet.
+T1/`schemeTransport`). `spawnctl exec` loads the owner's stored paired credentials, signs the exact
+command for the verified target node, and streams it through the CP Session relay. On an enforced,
+CP-attached production node, `spawnctl attach` and `spawnctl shell` fail closed until they have the
+same authenticated relay treatment; the node's direct `/exec` and `/terminal` handlers are available
+only in standalone/insecure development mode. For headless real-OAuth, the target must run
+**`AS_FAKE_GITHUB`** (reachable + multi-user — T2), whose redirect must be reachable from where the
+suite runs. Net: **run the suite co-located with the target, or over an SSH tunnel / port-forward** —
+not fully arms-length yet.
 
 ## Auth modes (`ACC_AUTH_MODE`)
 

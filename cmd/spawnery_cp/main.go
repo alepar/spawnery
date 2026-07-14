@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
@@ -36,6 +39,7 @@ import (
 	"spawnery/internal/health"
 	applog "spawnery/internal/log"
 	"spawnery/internal/metrics"
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 	"spawnery/internal/rpclog"
 	"spawnery/internal/safego"
@@ -43,6 +47,14 @@ import (
 )
 
 const sqliteDefaultDSN = "file:cp.db?_pragma=busy_timeout(5000)"
+
+type intentFlowEnabler interface {
+	SetIntentEnabled(bool)
+}
+
+func enableIntentFlow(server intentFlowEnabler) {
+	server.SetIntentEnabled(true)
+}
 
 func loadConfig() (*CP, error) {
 	configDir, sets := config.StdFlags("spawnery_cp", os.Args[1:])
@@ -76,8 +88,7 @@ func main() {
 	defer stop()
 
 	// --- Auth mode ---
-	// auth.mode: "dev" (default) | "prod". Default is "dev" — a misconfigured prod is permissive.
-	// Prod REQUIRES auth.as_session_pubkeys; dev tokens are ignored in prod.
+	// auth.mode: "dev" (default) | "prod". Production ignores opaque dev tokens.
 	devMode := cfg.DevMode()
 	if !devMode {
 		log.Printf("cp: auth mode=prod (dev tokens ignored)")
@@ -85,16 +96,33 @@ func main() {
 		log.Printf("cp: auth mode=dev (dev tokens active; NOT FOR PRODUCTION)")
 	}
 
-	// --- AS session pubkeys (auth.as_session_pubkeys = comma-separated PEM file paths) ---
-	ks, err := loadKeySet(cfg.Auth.ASSessionPubkeys)
+	artifacts, signerRevocations, err := loadArtifactVerifier(*cfg, time.Now())
 	if err != nil {
-		log.Fatalf("cp: load AS pubkeys: %v", err)
+		log.Fatalf("cp: load artifact verifier: %v", err)
 	}
-	if len(ks) > 0 {
-		log.Printf("cp: loaded %d AS session pubkey(s)", len(ks))
+	var stopRevocationReloader func() bool
+	if signerRevocations != nil && cfg.Auth.SignerRevocationStatement != "" {
+		reloadCtx, cancelReload := context.WithCancel(ctx)
+		reloadDone := make(chan struct{})
+		reloader := newSignerRevocationReloader(signerRevocations, cfg.Auth.SignerRevocationStatement)
+		safego.Go("cp.signer-revocation-reloader", func() {
+			defer close(reloadDone)
+			reloader.Run(reloadCtx)
+		})
+		stopRevocationReloader = func() bool {
+			return stopSignerRevocationReloader(cancelReload, reloadDone, signerRevocationShutdownBound)
+		}
 	}
-	if !devMode && len(ks) == 0 {
-		log.Fatalf("cp: auth.mode=prod requires auth.as_session_pubkeys (no keys loaded)")
+	if signerRevocations != nil {
+		defer func() {
+			if stopRevocationReloader != nil && !stopRevocationReloader() {
+				log.Printf("cp: signer revocation reloader did not stop within %s; leaving store open for process exit", signerRevocationShutdownBound)
+				return
+			}
+			if err := signerRevocations.Close(); err != nil {
+				log.Printf("cp: close signer revocation store: %v", err)
+			}
+		}()
 	}
 
 	// --- Revocation + session registries ---
@@ -109,7 +137,7 @@ func main() {
 
 	// --- Verifier ---
 	verifier := auth.NewVerifier(auth.VerifierConfig{
-		Keys:      ks,
+		Artifacts: artifacts,
 		DevTokens: devTokens,
 		DevMode:   devMode,
 		Revoked:   revreg,
@@ -188,54 +216,31 @@ func main() {
 		srv.SetReauthInterval(ri)
 	}
 
-	// A4 intent flow setup [AC1][AM12].
-	// Prod mode: intent flow always active; clients obtain node tokens from the real AS.
-	// Dev mode: intent flow is OFF by default — the web SPA does not yet implement
-	// GetPendingIntent/SubmitIntent (A5). The dev AS key is always provisioned so spawnctl's
-	// pollAndSign works when opted in. Set auth.dev_intent_enabled=true to enable the two-phase
-	// flow in dev; without it web-initiated spawns proceed with a nil env and the node runs
-	// in verify-and-log mode.
-	if !devMode {
-		srv.SetIntentEnabled(true)
-	} else {
-		var devASPriv ed25519.PrivateKey
-		var devASKeyID string
-		var devASErr error
-		if p := cfg.Auth.DevASKey; p != "" {
-			var pemBytes []byte
-			pemBytes, devASErr = os.ReadFile(p)
-			if devASErr == nil {
-				devASPriv, devASKeyID, devASErr = token.LoadSigningKey(pemBytes)
-			}
-			if devASErr != nil {
-				log.Fatalf("cp: load auth.dev_as_key: %v", devASErr)
-			}
-			log.Printf("cp: loaded dev AS key from %s (id=%s) [AM12]", p, devASKeyID)
-		} else {
-			_, devASPriv, devASErr = ed25519.GenerateKey(rand.Reader)
-			if devASErr != nil {
-				log.Fatalf("cp: generate ephemeral dev AS key: %v", devASErr)
-			}
-			devASKeyID, devASErr = token.KeyID(devASPriv.Public().(ed25519.PublicKey))
-			if devASErr != nil {
-				log.Fatalf("cp: derive dev AS key id: %v", devASErr)
-			}
-			log.Printf("cp: using ephemeral dev AS key (id=%s) [AM12]", devASKeyID)
-		}
-		srv.SetDevASKey(devASPriv, devASKeyID)
-		// auth.dev_intent_enabled: opt into the two-phase sign flow in dev mode.
-		if cfg.Auth.DevIntentEnabled {
-			srv.SetIntentEnabled(true)
-			log.Printf("cp: dev intent flow enabled (auth.dev_intent_enabled=true) [AM12]")
-		} else {
-			log.Printf("cp: dev intent flow off (set auth.dev_intent_enabled=true to enable; web spawns proceed without signing) [AM12]")
+	// All runtime modes use the same AS-issued node authorization path. SetIntentEnabled remains a
+	// hermetic test seam only; there is no runtime switch that permits unsigned lifecycle operations.
+	enableIntentFlow(srv)
+
+	internalRuntime, err := loadInternalRuntime(*cfg, time.Now)
+	if err != nil {
+		log.Fatalf("cp: load internal mTLS: %v", err)
+	}
+	if internalRuntime != nil {
+		defer internalRuntime.unsubscribe()
+		defer internalRuntime.revocations.Close()
+		if internalRuntime.refresher != nil {
+			safego.Go("cp.certificate-revocation-reloader", func() {
+				internalRuntime.refresher.Run(ctx)
+			})
 		}
 	}
 
-	// CP→AS GitHub link-status preflight: gated on CP_AS_URL; also uses the existing CP_AS_RPC_SECRET.
+	// CP→AS GitHub link-status preflight uses the CP service SVID on the internal transport.
 	// When set, CreateSpawn checks the owner's GitHub link state before persisting a github:-mount spawn.
 	if asURL := strings.TrimSpace(cfg.Auth.ASURL); asURL != "" && !cfg.Auth.GitHubLinkPreflightDisabled {
-		srv.SetASLinkChecker(asURL, string(cfg.Auth.ASRPCSecret))
+		if internalRuntime == nil {
+			log.Fatalf("cp: auth.as_url requires internal mTLS configuration")
+		}
+		srv.SetASLinkChecker(asURL, internalRuntime.client)
 		log.Printf("cp: GitHub link preflight checker wired to AS %s", asURL)
 	} else if cfg.Auth.GitHubLinkPreflightDisabled {
 		log.Printf("cp: GitHub link preflight DISABLED (auth.github_link_preflight_disabled=true) — static-token git-host dev lane")
@@ -283,56 +288,41 @@ func main() {
 
 	// Start revocation feed poller if configured.
 	if feedURL := cfg.Auth.ASRevocationURL; feedURL != "" {
-		bearer := string(cfg.Auth.ASCPSecret)
+		if internalRuntime == nil {
+			log.Fatalf("cp: auth.as_revocation_url requires internal mTLS configuration")
+		}
 		interval := cfg.Auth.RevocationPollInterval
-		poller := auth.NewFeedPoller(http.DefaultClient, feedURL, bearer, ks, revreg, interval)
+		poller := auth.NewFeedPoller(internalRuntime.client, feedURL, artifacts, revreg, interval)
 		safego.Go("cp.revocation-poller", func() { poller.Run(ctx) })
 		log.Printf("cp: revocation feed poller started (url=%s interval=%s)", feedURL, interval)
 	}
 
-	mux := http.NewServeMux()
-	cpAuthInterceptor := verifier.Interceptor()
-	if asSecret := string(cfg.Auth.ASRPCSecret); asSecret != "" {
-		cpAuthInterceptor = auth.NewServiceScopedInterceptor(
-			verifier,
-			auth.ServiceSecretHeader,
-			asSecret,
-			cpv1connect.SpawnServiceAuthorizeGitHubMintProcedure,
-			cpv1connect.SpawnServiceSignalGitHubTokenRotatedProcedure,
-		)
-		log.Printf("cp: AS GitHub coordination RPC secret enabled")
-	}
-	mux.Handle(cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.CorrelationInterceptor(), metrics.RPCInterceptor(), rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp"), cpAuthInterceptor)))
-	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
-	mux.Handle("/metrics", metrics.Handler())
-	health.Register(mux, st.Ping)
-
-	// Node-auth mode (sp-ova). insecure (dev/test default): nodes share the main h2c listener with no
-	// auth — identity falls back to the self-asserted Register fields. enforced: nodes connect over mTLS
-	// on a dedicated listener and their identity is the verified client cert (see internal/cp/nodeauth).
-	mode := nodeauth.Mode(cfg.Node.AuthMode)
 	nodePath, nodeHandler := nodev1connect.NewNodeServiceHandler(srv, connect.WithInterceptors(rpclog.CorrelationInterceptor(), metrics.RPCInterceptor(), rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp")))
-	var nodeTLSSrv *http.Server // non-nil only in enforced mode; shut down alongside httpSrv
-	if mode == nodeauth.ModeEnforced {
-		var tlsErr error
-		nodeTLSSrv, tlsErr = buildNodeTLSServer(cfg.Node.Listen, nodePath, nodeHandler, cfg.Node.RootCA, cfg.Node.TLSCert, cfg.Node.TLSKey)
-		if tlsErr != nil {
-			log.Fatalf("cp: build node mTLS listener: %v", tlsErr)
+	var internalSrv *http.Server
+	devNodePath := ""
+	if internalRuntime != nil {
+		_, internalSpawnHandler := cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(rpclog.CorrelationInterceptor(), metrics.RPCInterceptor(), rpclog.RecoverInterceptor("cp"), rpclog.Interceptor("cp")))
+		internalSrv, err = buildInternalTLSServer(cfg.Internal.Listen, internalRuntime.tlsConfig, buildInternalHandler(internalRuntime.verifier, internalRuntime.connections, internalSpawnHandler, nodeHandler))
+		if err != nil {
+			log.Fatalf("cp: build internal mTLS listener: %v", err)
 		}
-		safego.Go("cp.node-mtls-listener", func() {
-			if err := nodeTLSSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("cp: node mTLS listener: %v", err)
+		safego.Go("cp.internal-mtls-listener", func() {
+			if err := internalSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("cp: internal mTLS listener: %v", err)
 			}
 		})
 	} else {
-		mux.Handle(nodePath, nodeHandler)
+		if cfg.Internal.InsecureDevNodeOnPublic {
+			devNodePath = nodePath
+		}
 	}
+	publicHandler := buildPublicHandler(srv, verifier, allow, st.Ping, devNodePath, nodeHandler)
 
 	addr := cfg.Listen
-	log.Printf("cp listening on %s (node-auth mode=%s)", addr, mode)
+	log.Printf("cp public listener on %s", addr)
 	h2Srv := &http2.Server{}
 	h2keepalive.ConfigureServer(h2Srv)
-	httpSrv := &http.Server{Addr: addr, Handler: h2c.NewHandler(allow.CORS(mux), h2Srv)}
+	httpSrv := &http.Server{Addr: addr, Handler: h2c.NewHandler(publicHandler, h2Srv)}
 	serveErr := make(chan error, 1)
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -351,9 +341,9 @@ func main() {
 		if err := srv.Shutdown(sdCtx); err != nil {
 			log.Printf("cp: drain Attach streams: %v", err)
 		}
-		if nodeTLSSrv != nil {
-			if err := nodeTLSSrv.Shutdown(sdCtx); err != nil {
-				log.Printf("cp: drain node TLS HTTP: %v", err)
+		if internalSrv != nil {
+			if err := internalSrv.Shutdown(sdCtx); err != nil {
+				log.Printf("cp: drain internal TLS HTTP: %v", err)
 			}
 		}
 		if err := httpSrv.Shutdown(sdCtx); err != nil {
@@ -362,61 +352,291 @@ func main() {
 	}
 }
 
-// buildNodeTLSServer configures and returns the NodeService mTLS http.Server without starting it.
-// The caller is responsible for calling ListenAndServeTLS and Shutdown.
-func buildNodeTLSServer(addr, nodePath string, nodeHandler http.Handler, rootCAPath, certPath, keyPath string) (*http.Server, error) {
-	rootPEM, err := os.ReadFile(rootCAPath)
-	if err != nil {
-		return nil, fmt.Errorf("read pinned root CA: %w", err)
+type internalRuntime struct {
+	verifier    *mtls.PeerVerifier
+	tlsConfig   *tls.Config
+	client      *http.Client
+	revocations *pki.RevocationState
+	connections *mtls.ConnectionRegistry
+	unsubscribe func()
+	refresher   *mtls.CRLRefresher
+}
+
+func loadInternalRuntime(cfg CP, now func() time.Time) (*internalRuntime, error) {
+	if cfg.Internal.Listen == "" {
+		return nil, nil
 	}
-	root, err := pki.ParseCertPEM(rootPEM)
+	rootPEM, err := os.ReadFile(cfg.Internal.RootCA)
 	if err != nil {
-		return nil, fmt.Errorf("parse pinned root CA: %w", err)
+		return nil, fmt.Errorf("read root CA: %w", err)
 	}
-	serverCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	root, err := parseSingleRootCertificate(rootPEM)
 	if err != nil {
-		return nil, fmt.Errorf("load CP server cert: %w", err)
+		return nil, fmt.Errorf("parse root CA: %w", err)
 	}
-	nodeMux := http.NewServeMux()
-	nodeMux.Handle(nodePath, nodeHandler)
-	server := &http.Server{
-		Addr:    addr,
-		Handler: nodeauth.Middleware(nodeauth.ModeEnforced, root, nodeMux),
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{serverCert},
-			ClientAuth:   tls.RequireAnyClientCert,
-			MinVersion:   tls.VersionTLS12,
-			NextProtos:   []string{"h2", "http/1.1"},
+	if cfg.Auth.RootCA != "" {
+		artifactRootPEM, readErr := os.ReadFile(cfg.Auth.RootCA)
+		if readErr != nil {
+			return nil, fmt.Errorf("read artifact root CA: %w", readErr)
+		}
+		artifactRoot, parseErr := parseSingleRootCertificate(artifactRootPEM)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse artifact root CA: %w", parseErr)
+		}
+		if !bytes.Equal(root.Raw, artifactRoot.Raw) {
+			return nil, errors.New("internal TLS and auth artifacts must share the environment root")
+		}
+	}
+	certPEM, err := os.ReadFile(cfg.Internal.Cert)
+	if err != nil {
+		return nil, fmt.Errorf("read CP certificate: %w", err)
+	}
+	chainPEM, err := os.ReadFile(cfg.Internal.Chain)
+	if err != nil {
+		return nil, fmt.Errorf("read CP certificate chain: %w", err)
+	}
+	keyPEM, err := os.ReadFile(cfg.Internal.Key)
+	if err != nil {
+		return nil, fmt.Errorf("read CP private key: %w", err)
+	}
+	identity, err := tls.X509KeyPair(append(certPEM, chainPEM...), keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load CP identity: %w", err)
+	}
+
+	issuers := make([]*x509.Certificate, 0, len(cfg.Internal.RevocationIssuers))
+	issuerRoots := x509.NewCertPool()
+	issuerRoots.AddCert(root)
+	for _, path := range cfg.Internal.RevocationIssuers {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, fmt.Errorf("read revocation issuer %s: %w", path, readErr)
+		}
+		issuer, parseErr := pki.ParseCertPEM(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse revocation issuer %s: %w", path, parseErr)
+		}
+		chains, verifyErr := issuer.Verify(x509.VerifyOptions{Roots: issuerRoots, CurrentTime: now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+		if verifyErr != nil {
+			return nil, fmt.Errorf("verify revocation issuer %s against environment root: %w", path, verifyErr)
+		}
+		if len(chains) == 0 || len(chains[0]) != 2 || !bytes.Equal(chains[0][1].Raw, root.Raw) {
+			return nil, fmt.Errorf("verify revocation issuer %s: chain is not directly rooted in the environment root", path)
+		}
+		issuers = append(issuers, issuer)
+	}
+	sources, err := mtls.BuildCRLSources(issuers, cfg.Internal.RevocationCRLs, cfg.Internal.RevocationURLs)
+	if err != nil {
+		return nil, err
+	}
+	state, err := pki.OpenRevocationState(cfg.Internal.RevocationState, issuers, now)
+	if err != nil {
+		return nil, fmt.Errorf("open certificate revocation state: %w", err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = state.Close()
+		}
+	}()
+	refresher := mtls.NewCRLRefresher(http.DefaultClient, sources, state, cfg.Internal.RevocationRefreshInterval)
+	if err := refresher.Refresh(context.Background()); err != nil {
+		return nil, fmt.Errorf("refresh certificate revocations: %w", err)
+	}
+	for _, issuer := range issuers {
+		if _, ok := state.HighestNumber(issuer.SerialNumber); !ok {
+			return nil, fmt.Errorf("certificate revocation state has no current CRL for issuer %s", issuer.SerialNumber.Text(16))
+		}
+	}
+	connections := mtls.NewConnectionRegistry()
+	unsubscribe := mtls.SubscribeConnectionRegistry(state, connections)
+	identityLeaf, err := x509.ParseCertificate(identity.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse CP identity leaf: %w", err)
+	}
+	identityChain := make([]*x509.Certificate, 0, len(identity.Certificate)-1)
+	for _, raw := range identity.Certificate[1:] {
+		cert, parseErr := x509.ParseCertificate(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse CP identity chain: %w", parseErr)
+		}
+		identityChain = append(identityChain, cert)
+	}
+	principal, err := pki.VerifyPrincipal(identityLeaf, identityChain, pki.VerifyOptions{
+		Root: root, TrustDomain: cfg.Internal.TrustDomain, CurrentTime: now(),
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsRevoked: state.IsRevoked,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("verify CP service identity: %w", err)
+	}
+	if principal.Kind != pki.KindService || principal.Role != pki.RoleCP {
+		return nil, fmt.Errorf("CP identity is %s:%s, want service:%s", principal.Kind, principal.Role, pki.RoleCP)
+	}
+	verifier, err := mtls.NewPeerVerifier(mtls.PeerVerifierOptions{Root: root, TrustDomain: cfg.Internal.TrustDomain, CurrentTime: now, IsRevoked: state.IsRevoked})
+	if err != nil {
+		return nil, err
+	}
+	serverTLS, err := mtls.ServerConfig(mtls.ServerOptions{Verifier: verifier, Identity: identity, ClientMode: mtls.RequireClientCertificate})
+	if err != nil {
+		return nil, err
+	}
+	var client *http.Client
+	if cfg.Internal.ServerName != "" {
+		clientTLS, clientErr := mtls.ClientConfig(mtls.ClientOptions{Root: root, TrustDomain: cfg.Internal.TrustDomain, Identity: identity, ServerName: cfg.Internal.ServerName, ExpectedServiceRole: pki.RoleAuthService, CurrentTime: now, IsRevoked: state.IsRevoked})
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		client = &http.Client{
+			Transport:     &http.Transport{TLSClientConfig: clientTLS, ForceAttemptHTTP2: true, DialTLSContext: mtls.DialTLSContext(clientTLS, connections)},
+			CheckRedirect: checkInternalRedirect,
+		}
+	}
+	closeOnError = false
+	return &internalRuntime{verifier: verifier, tlsConfig: serverTLS, client: client, revocations: state, connections: connections, unsubscribe: unsubscribe, refresher: refresher}, nil
+}
+
+func checkInternalRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return errors.New("internal redirect has no originating request")
+	}
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, "https") || req.URL.User != nil {
+		return errors.New("internal redirect requires https without userinfo")
+	}
+	if !strings.EqualFold(origin.Scheme, req.URL.Scheme) || !strings.EqualFold(origin.Host, req.URL.Host) {
+		return fmt.Errorf("internal redirect crosses origin from %s://%s to %s://%s", origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+func buildPublicHandler(srv *cp.Server, verifier *auth.Verifier, allow weborigin.Allowlist, ready func(context.Context) error, devNodePath string, devNodeHandler http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	spawnPath, spawnHandler := cpv1connect.NewSpawnServiceHandler(srv, connect.WithInterceptors(
+		rpclog.CorrelationInterceptor(), metrics.RPCInterceptor(), rpclog.RecoverInterceptor("cp"),
+		rpclog.Interceptor("cp"), publicAuthInterceptor(verifier),
+	))
+	mux.Handle(spawnPath, spawnHandler)
+	mux.HandleFunc("/ws/session", srv.HandleWS(verifier, allow))
+	mux.Handle("/metrics", metrics.Handler())
+	health.Register(mux, ready)
+	mountInsecureDevNodeRoute(mux, devNodePath != "", devNodePath, devNodeHandler)
+	return allow.CORS(mux)
+}
+
+func mountInsecureDevNodeRoute(mux *http.ServeMux, enabled bool, nodePath string, nodeHandler http.Handler) {
+	if enabled && nodePath != "" && nodeHandler != nil {
+		mux.Handle(nodePath, nodeHandler)
+	}
+}
+
+func buildInternalHandler(verifier *mtls.PeerVerifier, connections *mtls.ConnectionRegistry, spawnHandler, nodeHandler http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/"+cpv1connect.SpawnServiceName+"/", spawnHandler)
+	mux.Handle(nodev1connect.NodeServiceAttachProcedure, nodeHandler)
+	policy := mtls.Policy{
+		"service:authsvc": {
+			cpv1connect.SpawnServiceAuthorizeGitHubMintProcedure:      {},
+			cpv1connect.SpawnServiceSignalGitHubTokenRotatedProcedure: {},
 		},
+		"node:cloud":       {nodev1connect.NodeServiceAttachProcedure: {}},
+		"node:self-hosted": {nodev1connect.NodeServiceAttachProcedure: {}},
 	}
-	nodeTLSH2Srv := &http2.Server{}
-	h2keepalive.ConfigureServer(nodeTLSH2Srv)
-	if err := http2.ConfigureServer(server, nodeTLSH2Srv); err != nil {
-		return nil, fmt.Errorf("configure http2: %w", err)
+	bridge := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if principal, ok := mtls.PrincipalFromContext(r.Context()); ok && principal.Kind == pki.KindNode {
+			ctx := nodeauth.WithIdentity(r.Context(), principal)
+			ctx = nodeauth.WithCertChain(ctx, peerCertChainPEM(r.TLS))
+			r = r.WithContext(ctx)
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return mtls.PrincipalMiddleware(verifier, mtls.ConnectionRegistryMiddleware(connections, policy.HTTPMiddleware(func(r *http.Request) string { return r.URL.Path }, bridge)))
+}
+
+func peerCertChainPEM(state *tls.ConnectionState) []byte {
+	if state == nil {
+		return nil
 	}
-	log.Printf("cp: node mTLS listener on %s", addr)
+	var out []byte
+	for _, cert := range state.PeerCertificates {
+		out = append(out, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+	}
+	return out
+}
+
+func buildInternalTLSServer(addr string, tlsConfig *tls.Config, handler http.Handler) (*http.Server, error) {
+	if tlsConfig == nil {
+		return nil, errors.New("internal TLS config is required")
+	}
+	server := &http.Server{Addr: addr, Handler: handler, TLSConfig: tlsConfig}
+	h2Server := &http2.Server{}
+	h2keepalive.ConfigureServer(h2Server)
+	if err := http2.ConfigureServer(server, h2Server); err != nil {
+		return nil, fmt.Errorf("configure internal HTTP/2: %w", err)
+	}
 	return server, nil
 }
 
-// loadKeySet parses comma-separated PEM file paths into an ordered token.KeySet.
-// Empty s returns an empty set (valid in dev mode).
-func loadKeySet(s string) (token.KeySet, error) {
-	if s == "" {
-		return token.KeySet{}, nil
-	}
-	var pubs []ed25519.PublicKey
-	for _, p := range splitTrim(s, ",") {
-		pemBytes, err := os.ReadFile(p)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", p, err)
+type publicAuth struct{ fallback connect.Interceptor }
+
+func publicAuthInterceptor(verifier *auth.Verifier) connect.Interceptor {
+	return publicAuth{fallback: verifier.Interceptor()}
+}
+
+func (i publicAuth) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	userNext := i.fallback.WrapUnary(next)
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		switch req.Spec().Procedure {
+		case cpv1connect.SpawnServiceAuthorizeGitHubMintProcedure, cpv1connect.SpawnServiceSignalGitHubTokenRotatedProcedure:
+			return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("internal procedure"))
+		default:
+			return userNext(ctx, req)
 		}
-		pub, err := token.ParsePublicKeyPEM(pemBytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", p, err)
-		}
-		pubs = append(pubs, pub)
 	}
-	return token.NewKeySet(pubs...)
+}
+func (i publicAuth) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return i.fallback.WrapStreamingHandler(next)
+}
+func (publicAuth) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+func parseSingleRootCertificate(data []byte) (*x509.Certificate, error) {
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("expected exactly one CERTIFICATE PEM block")
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+func loadArtifactVerifier(cpCfg CP, now time.Time) (*token.Verifier, *token.SignerRevocationStore, error) {
+	cfg := cpCfg.Auth
+	if cfg.RootCA == "" && cfg.Environment == "" && cfg.SignerRevocationState == "" {
+		return nil, nil, nil
+	}
+	rootPEM, err := os.ReadFile(cfg.RootCA)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read root %s: %w", cfg.RootCA, err)
+	}
+	root, err := parseSingleRootCertificate(rootPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse root %s: %w", cfg.RootCA, err)
+	}
+	store, err := token.OpenSignerRevocationStore(cfg.SignerRevocationState, root, cfg.Environment, now)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open signer revocation state %s: %w", cfg.SignerRevocationState, err)
+	}
+	if cfg.SignerRevocationStatement != "" {
+		if err := store.LoadAndApply(cfg.SignerRevocationStatement, now); err != nil {
+			_ = store.Close()
+			return nil, nil, fmt.Errorf("apply signer revocation statement %s: %w", cfg.SignerRevocationStatement, err)
+		}
+	}
+	verifier, err := token.NewVerifier(root, cfg.Environment, store)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	return verifier, store, nil
 }
 
 func parseTokens(s string) map[string]string {

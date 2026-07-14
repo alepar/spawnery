@@ -137,6 +137,14 @@ describe("Sidebar", () => {
     expect(actions.onFork).toHaveBeenCalledWith("a");
   });
 
+  it("kebab → Move to exposes the acceptance selector and calls onMoveTo", async () => {
+    const actions = { ...noopActions, onMoveTo: vi.fn() };
+    render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);
+    await userEvent.click(screen.getByTestId("spawn-kebab-a"));
+    await userEvent.click(screen.getByTestId("spawn-moveto-a"));
+    expect(actions.onMoveTo).toHaveBeenCalledWith("a");
+  });
+
   it("kebab → Fork is disabled for non-active spawns", async () => {
     const actions = { ...noopActions, onFork: vi.fn() };
     render(<Sidebar nav={spawnNav("a")} navigate={vi.fn()} spawns={spawns} actions={actions} />);

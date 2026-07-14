@@ -4,7 +4,7 @@
  * Reads internal/secrets/subkey/testdata/subkey/verify_node.json (generated
  * by internal/secrets/subkey/vectors_test.go -update-subkey) and validates:
  *   1. verifyCertChain succeeds against the pinned root.
- *   2. parseSANIdentity extracts nodeId/accountId/class correctly.
+ *   2. parseSPIFFEPrincipal extracts nodeId/accountId/role correctly.
  *   3. verifySignedSubKey verifies the sub-key signature + expiry.
  *   4. verifyNodeForSealing returns the expected HPKE pubkey + identity.
  */
@@ -16,11 +16,10 @@ import {
   verifyNodeForSealing,
   verifySignedSubKey,
   type SignedSubKey,
-  type RevocationChecker,
 } from "./subkey";
 import {
   verifyCertChain,
-  parseSANIdentity,
+  parseSPIFFEPrincipal,
   importCertPubKey,
 } from "./x509";
 
@@ -28,6 +27,7 @@ const VECTORS_FILE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../internal/secrets/subkey/testdata/subkey/verify_node.json",
 );
+const TRUST_DOMAIN = "prod.spawnery.internal";
 
 interface SubKeyVector {
   root_pem:              string;
@@ -43,7 +43,9 @@ interface SubKeyVector {
   not_after:             string;
   leaf_not_after:        string;  // leaf cert expiry — for cert-validity negative tests
   forged_cloud_chain_pem: string; // cloud-SAN leaf signed by SH intermediate
+  legacy_dns_cloud_chain_pem: string; // retired DNS cloud leaf signed by SH intermediate
   non_ca_leaf_chain_pem:  string; // leaf cert used as CA to sign another leaf
+  duplicate_uri_chain_pem: string; // otherwise valid leaf with duplicate URI GeneralNames
 }
 
 function loadVectors(): SubKeyVector | null {
@@ -72,27 +74,29 @@ describe("subkey Go-TS cross-language vectors", () => {
   const verifyAt = new Date(new Date(v.not_before).getTime() + 60 * 60 * 1000);
 
   it("verifyCertChain accepts the node leaf against the pinned root", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
-    expect(leaf.sanDNS).toContain("nodes.spawnery.internal");
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN);
+    expect(leaf.sanURIs).toEqual([`spiffe://${TRUST_DOMAIN}/node/self-hosted/alice/node1`]);
   });
 
-  it("parseSANIdentity extracts correct identity from SAN", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
-    const id = parseSANIdentity(leaf.sanDNS);
+  it("parseSPIFFEPrincipal extracts correct identity from URI SAN", async () => {
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN);
+    const id = parseSPIFFEPrincipal(leaf.sanURIs[0], TRUST_DOMAIN);
+    expect(id.kind).toBe("node");
+    if (id.kind !== "node") return;
     expect(id.nodeId).toBe(v.expected_node_id);
     expect(id.accountId).toBe(v.expected_account_id);
-    expect(id.nodeClass).toBe(v.expected_class);
+    expect(id.role).toBe(v.expected_class);
   });
 
   it("verifySignedSubKey accepts valid sub-key", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN);
     const certPub = await importCertPubKey(leaf);
     const sk: SignedSubKey = JSON.parse(v.subkey_json);
     await expect(verifySignedSubKey(sk, certPub, verifyAt)).resolves.toBeUndefined();
   });
 
   it("verifySignedSubKey rejects an expired sub-key", async () => {
-    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt);
+    const leaf = await verifyCertChain(v.chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN);
     const certPub = await importCertPubKey(leaf);
     const sk: SignedSubKey = JSON.parse(v.subkey_json);
     const notAfter = new Date(v.not_after);
@@ -106,7 +110,7 @@ describe("subkey Go-TS cross-language vectors", () => {
       v.chain_pem,
       v.root_pem,
       v.subkey_json,
-      { tenancy: "self-hosted", accountId: v.expected_account_id },
+      { trustDomain: TRUST_DOMAIN, tenancy: "self-hosted", accountId: v.expected_account_id },
       verifyAt,
     );
     // Check returned HPKE pubkey matches expected.
@@ -125,7 +129,7 @@ describe("subkey Go-TS cross-language vectors", () => {
         "",
         v.root_pem,
         v.subkey_json,
-        { tenancy: "self-hosted", accountId: v.expected_account_id },
+        { trustDomain: TRUST_DOMAIN, tenancy: "self-hosted", accountId: v.expected_account_id },
         verifyAt,
       ),
     ).rejects.toThrow("cert chain");
@@ -136,7 +140,7 @@ describe("subkey Go-TS cross-language vectors", () => {
       "",
       "",
       v.subkey_json,
-      { tenancy: "self-hosted", accountId: v.expected_account_id },
+      { trustDomain: TRUST_DOMAIN, tenancy: "self-hosted", accountId: v.expected_account_id },
       verifyAt,
     );
     expect(result.identity.nodeId).toBe(v.expected_node_id);
@@ -146,61 +150,41 @@ describe("subkey Go-TS cross-language vectors", () => {
 
   it("verifyNodeForSealing rejects wrong tenancy expectation", async () => {
     await expect(
-      verifyNodeForSealing(v.chain_pem, v.root_pem, v.subkey_json, { tenancy: "cloud" }, verifyAt),
+      verifyNodeForSealing(v.chain_pem, v.root_pem, v.subkey_json, { trustDomain: TRUST_DOMAIN, tenancy: "cloud" }, verifyAt),
     ).rejects.toThrow("tenancy");
   });
 
-  // WM8: revoked-node-refusal — delivery to a node with a revoked cert must fail closed.
-  it("verifyNodeForSealing rejects a revoked node (WM8)", async () => {
-    const revokedChecker: RevocationChecker = {
-      async check(_nodeId: string): Promise<void> {
-        throw new Error("node is on the AS revocation deny-list");
-      },
-    };
-    await expect(
-      verifyNodeForSealing(
-        v.chain_pem,
-        v.root_pem,
-        v.subkey_json,
-        { tenancy: "self-hosted", accountId: v.expected_account_id },
-        verifyAt,
-        revokedChecker,
-      ),
-    ).rejects.toThrow("revocation deny-list");
-  });
-
-  // WM8: revocation checker that errors (e.g., network failure) must also fail closed.
-  it("verifyNodeForSealing fails closed when revocation check errors (WM8)", async () => {
-    const errorChecker: RevocationChecker = {
-      async check(_nodeId: string): Promise<void> {
-        throw new Error("revocation list unavailable (network error)");
-      },
-    };
-    await expect(
-      verifyNodeForSealing(
-        v.chain_pem,
-        v.root_pem,
-        v.subkey_json,
-        { tenancy: "self-hosted", accountId: v.expected_account_id },
-        verifyAt,
-        errorChecker,
-      ),
-    ).rejects.toThrow("network error");
-  });
-
-  // SECURITY: name constraints — a cloud-SAN leaf signed by a self-hosted intermediate
+  // SECURITY: a cloud-path leaf signed by a self-hosted issuer
   // must be rejected even though the signature chain is cryptographically valid.
-  it("verifyCertChain rejects forged-cloud cert (name constraints, security)", async () => {
+  it("verifyCertChain rejects forged-cloud cert (issuer policy, security)", async () => {
     await expect(
-      verifyCertChain(v.forged_cloud_chain_pem, v.root_pem, verifyAt),
-    ).rejects.toThrow("name constraints");
+      verifyCertChain(v.forged_cloud_chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN),
+    ).rejects.toThrow("issuer policy");
+  });
+
+  it("verifyCertChain rejects legacy DNS cloud identity from self-hosted issuer", async () => {
+    await expect(
+      verifyCertChain(v.legacy_dns_cloud_chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN),
+    ).rejects.toThrow();
+  });
+
+  it("verifyCertChain rejects same-root certificate under wrong configured trust domain", async () => {
+    await expect(
+      verifyCertChain(v.chain_pem, v.root_pem, verifyAt, "staging.spawnery.internal"),
+    ).rejects.toThrow("trust domain");
   });
 
   // SECURITY: non-CA intermediate — a chain where the intermediate lacks CA:TRUE must be rejected.
   it("verifyCertChain rejects chain with non-CA intermediate (basicConstraints, security)", async () => {
     await expect(
-      verifyCertChain(v.non_ca_leaf_chain_pem, v.root_pem, verifyAt),
+      verifyCertChain(v.non_ca_leaf_chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN),
     ).rejects.toThrow("CA:TRUE");
+  });
+
+  it("verifyCertChain rejects duplicate URI GeneralNames", async () => {
+    await expect(
+      verifyCertChain(v.duplicate_uri_chain_pem, v.root_pem, verifyAt, TRUST_DOMAIN),
+    ).rejects.toThrow("exactly one URI SAN");
   });
 
   // SECURITY: validity — a cert that has expired (notAfter in the past) must be rejected.
@@ -208,7 +192,7 @@ describe("subkey Go-TS cross-language vectors", () => {
     const leafNotAfter = new Date(v.leaf_not_after);
     const pastExpiry = new Date(leafNotAfter.getTime() + 1000); // 1s past leaf notAfter
     await expect(
-      verifyCertChain(v.chain_pem, v.root_pem, pastExpiry),
+      verifyCertChain(v.chain_pem, v.root_pem, pastExpiry, TRUST_DOMAIN),
     ).rejects.toThrow("expired");
   });
 });

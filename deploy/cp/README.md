@@ -9,26 +9,24 @@ CP_AUTH_MODE=prod    # required for production; default is "dev"
 **IMPORTANT:** the default is `dev` (mirrors `NODE_AUTH_MODE`). A misconfigured prod instance
 is permissive (dev tokens accepted). Always set `CP_AUTH_MODE=prod` on production.
 
-In `prod` mode, `CP_DEV_TOKENS` is silently ignored and `CP_AS_SESSION_PUBKEYS` is required.
-In `dev` mode, both verifiers are active: AS tokens (if keys are configured) and dev tokens.
+In `prod` mode, `CP_DEV_TOKENS` is silently ignored and the certified signer trust settings below
+are required. In `dev` mode, dev tokens remain available.
 
-## AS session pubkeys
+## Certified AS signer trust
 
 ```
-CP_AS_SESSION_PUBKEYS=/etc/spawnery/cp/as-session-pub.pem,/etc/spawnery/cp/as-session-next-pub.pem
+CP_AUTH_ENVIRONMENT=prod
+CP_AUTH_ROOT_CA=/etc/spawnery/cp/root.pem
+CP_AUTH_SIGNER_REVOCATION_STATE=/var/lib/spawnery/cp-signer-revocations/state.json
+CP_AUTH_SIGNER_REVOCATION_STATEMENT=/etc/spawnery/cp/signer-revocations.pb
 ```
 
-Comma-separated ordered list of PEM-encoded Ed25519 public key files (PKIX format, current first
-then next). The CP verifies session tokens against this set; a token whose `key_id` doesn't match
-any key is refused.
+Each auth artifact carries its signer certificate chain. The CP verifies that chain against the
+environment root and rejects revoked signer serials from the durable revocation state.
 
-**Rotation procedure** (mirrors AS `AS_SESSION_KEY_NEXT_PEM`):
-1. Pre-publish the "next" key to `CP_AS_SESSION_PUBKEYS` (append to the comma list) on all CP
-   instances — both current and next are now valid.
-2. Wait for the overlap window to drain in-flight tokens signed by the current key (≥ 15 min, the
-   access-token TTL).
-3. Switch the AS to sign with the next key (`AS_SESSION_KEY_PEM` = next; remove `AS_SESSION_KEY_NEXT_PEM`).
-4. Retire the old key: remove it from `CP_AS_SESSION_PUBKEYS` — tokens signed by it are now refused.
+**Rotation procedure:** provision overlapping current and next certified signers at the AS, switch
+issuance to the next signer, wait at least the token TTL, then revoke the old signer certificate by
+publishing a newer root-authorized revocation statement.
 
 **Emergency (compromise) path:** use the AS PKI chain (enrollment-pinned root) to sign a
 replacement statement; see the auth-identity design §3 [AM4].
@@ -37,20 +35,13 @@ replacement statement; see the auth-identity design §3 [AM4].
 
 ```
 CP_AS_REVOCATION_URL=https://auth.spawnery.example/revocations
-CP_AS_CP_SECRET=<shared-secret>          # optional; required on prod AS (AS_CP_SECRET must match)
 CP_REVOCATION_POLL_INTERVAL=30s          # default 30s
 ```
 
 The CP polls `GET <CP_AS_REVOCATION_URL>?since=<checkpoint>` on the configured interval.
-Each valid entry is verified against `CP_AS_SESSION_PUBKEYS` (same key set, distinct domain prefix)
-then applied: revoked token_ids and account_ids are added to the in-process registry, and all
+Each valid entry is verified through the certified auth signer chain and then applied: revoked
+token_ids and account_ids are added to the in-process registry, and all
 live WS/gRPC sessions bound to those identifiers are terminated immediately.
-
-**Ops gaps (code seam present, ops-pending):**
-- Real AS pubkey distribution (mounting PEM files to the CP) is not automated — ops/Helm/cloud
-  init responsibility (A3/A5).
-- The shared CP secret (`CP_AS_CP_SECRET` / `AS_CP_SECRET`) must be provisioned out-of-band.
-- `just dev` dev-AS-key wiring (dev mode only, A3/A5).
 
 ## In-band session reauth
 

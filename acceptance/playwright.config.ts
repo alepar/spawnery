@@ -1,5 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const vmHostname = process.env.ACC_WEB_ORIGIN ? new URL(process.env.ACC_WEB_ORIGIN).hostname : "";
+const vmIP = process.env.ACC_E2E_VM_IP ?? "";
+const vmResolverArgs = vmHostname && vmIP ? [`--host-resolver-rules=MAP ${vmHostname} ${vmIP}`] : [];
+
 // Points at an ALREADY-RUNNING spawnery instance (ACC_WEB_ORIGIN) — this suite provisions
 // nothing. Load your target's .env.<target> before running (see README.md / .env.example).
 //
@@ -25,6 +29,7 @@ export default defineConfig({
   globalTeardown: "./src/harness/global-teardown.ts",
   use: {
     baseURL: process.env.ACC_WEB_ORIGIN,
+    launchOptions: { args: vmResolverArgs },
     trace: "retain-on-failure",
     // Trace/video/HAR/state may carry auth material; redacted before upload — see
     // fixtures/redact.ts and the CI workflow's artifact-upload step.
@@ -34,6 +39,13 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+      testIgnore: "auth/root-anchored-artifacts.spec.ts",
+    },
+    {
+      name: "destructive-root-artifacts",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: "auth/root-anchored-artifacts.spec.ts",
+      dependencies: ["chromium"],
     },
   ],
 });

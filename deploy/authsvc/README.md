@@ -82,53 +82,76 @@ sqlite3 /data/authsvc/identity.db "PRAGMA integrity_check;"
 | Both lost | Restore DB + emergency key rotation; users must re-login |
 | Restore behind WM6 chain head | Session families from before the restore gap expire naturally; no manual cleanup |
 
-## Signing Key Custody [AM13]
+## Signing Credential Custody [AM13]
 
-The session-signing Ed25519 key is **the most sensitive secret the AS holds**. Its compromise lets
+The certified auth-artifact signer key is **the most sensitive secret the AS holds**. Its compromise lets
 an attacker mint arbitrary session tokens valid at every CP and node until rotation completes.
+
+Authsvc also holds the self-hosted node intermediate key online because enrollment must issue node
+SVIDs. This is an intentional exception to offline issuer custody. The authsvc systemd mount
+namespace may read `/etc/spawnery/authsvc`; CP and spawnlet must not be able to access that bundle.
 
 ### Key file permissions
 
 ```sh
-chmod 600 /etc/spawnery/as/session-key.pem
-chown authsvc:authsvc /etc/spawnery/as/session-key.pem
+chmod 600 /etc/spawnery/authsvc/auth-signer-current-key.pem
+chown authsvc:authsvc /etc/spawnery/authsvc/auth-signer-current-key.pem
 ```
 
 The key file must be owned by the authsvc process user and readable only by that user.
 
-### Key generation (one-time setup)
-
-```sh
-# Generate a new Ed25519 key (PKCS#8 PEM):
-openssl genpkey -algorithm ed25519 -out /etc/spawnery/as/session-key.pem
-chmod 600 /etc/spawnery/as/session-key.pem
-
-# The AS derives key_id automatically from the key material.
-```
+The key must be paired with a leaf-first signer certificate chain issued by the environment's
+auth-signing intermediate. Raw Ed25519 public-key distribution is not a supported trust path.
 
 ### Offline escrow
 
-Store a copy of the session signing key in offline escrow:
+Store a copy of the signer key and certificate chain in offline escrow:
 - Encrypted with age/GPG (operator key ceremony, similar to root CA ceremony)
 - Stored offline (not in the same cloud region as production)
 - Access requires 2-of-N operator approval (recommended)
 
 ### Key rotation (routine) [AM4]
 
-1. Generate a new key (`AS_SESSION_KEY_NEXT_PEM`) and deploy to all CP/node verifiers (config push).
-2. Wait for the overlap window (≥ token TTL = 15 min recommended, 24h for safety).
-3. Move `AS_SESSION_KEY_NEXT_PEM` → `AS_SESSION_KEY_PEM`; restart authsvc.
-4. Monitor for verification failures; retire old key from verifier configs after all old tokens expire.
-5. Update offline escrow with the new key.
+The environment root and auth-signing intermediate remain offline throughout this ceremony. The
+offline auth-signing intermediate issues a purpose-constrained leaf; only that leaf's private key
+and leaf-first certificate chain are transferred to the AS.
+
+1. Issue a distinct next signer key and leaf-first chain with the offline auth-signing intermediate.
+   Before deployment, validate the **private-key/leaf match** by comparing these SPKI hashes; they
+   must be identical:
+   ```sh
+   openssl pkey -in auth-signer-next-key.pem -pubout -outform DER | sha256sum
+   openssl x509 -in auth-signer-next-chain.pem -pubkey -noout \
+     | openssl pkey -pubin -outform DER | sha256sum
+   ```
+2. Configure the validated credential as `AS_AUTH_SIGNING_NEXT_KEY_PEM` and
+   `AS_AUTH_SIGNING_NEXT_CHAIN_PEM` while the current credential continues issuing. Keep current
+   and next deployed for at least the **maximum artifact lifetime plus the verifier's allowed clock
+   skew**, measured from the last artifact issued by the current signer.
+3. Switch issuance by promoting next to current, restart authsvc, and immediately provision a new,
+   distinct next credential. Confirm CP and node verifiers accept newly issued artifacts while old
+   artifacts continue to verify during their drain window.
+4. Once the switch is verified, **delete the retired private key** and every working copy used for
+   the ceremony. **Retain the retired public chain** in the audit/distribution archive until the last
+   old artifact has expired plus allowed clock skew; then it may be removed. Routine retirement does
+   not require a revocation statement.
+5. Update the offline custody inventory with the current and next credential records and the retired
+   public-chain retention deadline.
 
 ### Emergency key rotation (compromise) [AM4]
 
-If the session signing key is compromised:
-1. Generate a replacement key immediately.
-2. Deploy the replacement signed via the enrollment-pinned PKI chain (the CP accepts it on
-   the PKI trust path, bypassing the compromised session key).
-3. Revoke all active refresh families (triggers AS→CP revocation events; severs all sessions).
-4. Update offline escrow.
+If the current signer key is compromised:
+1. Promote the already-certified next signer immediately.
+2. Using the offline issuer, create and sign a root-authorized **higher-generation revocation statement**
+   naming the compromised signer certificate.
+3. Publish the statement atomically to every CP and node. Require **generation convergence** at the
+   new generation on every verifier before declaring the rotation complete; a lagging verifier must
+   fail closed rather than continue with an older generation.
+4. Verify old artifacts now fail with `TOKEN_INVALID`, revoke all active refresh families (triggering
+   AS→CP revocation events), and issue a distinct replacement next credential with the offline
+   auth-signing intermediate.
+5. Delete the compromised private key and every working copy, then update the offline custody
+   inventory and incident record.
 
 ## Re-Binding After DB Restore — Non-Goal [AM13]
 
@@ -146,7 +169,9 @@ Key variables for production:
 | Variable | Required | Notes |
 |---|---|---|
 | `AS_DB_DSN` | Yes | SQLite file path with WAL enabled |
-| `AS_SESSION_KEY_PEM` | Yes | Path to session signing key (0600) |
+| `AS_AUTH_SIGNING_ROOT_PEM` | Yes | Environment root certificate |
+| `AS_AUTH_SIGNING_CURRENT_KEY_PEM` / `AS_AUTH_SIGNING_CURRENT_CHAIN_PEM` | Yes | Current certified signer credential |
+| `AS_AUTH_SIGNING_NEXT_KEY_PEM` / `AS_AUTH_SIGNING_NEXT_CHAIN_PEM` | No | Overlapping next signer credential |
 | `GITHUB_CLIENT_ID` | Yes | GitHub App client_id |
 | `GITHUB_CLIENT_SECRET` | Yes | GitHub App client_secret (the **client secret** string, not the private-key `.pem`) |
 | `AS_GITHUB_REDIRECT_URI` | Yes | AS callback URL registered at GitHub App |

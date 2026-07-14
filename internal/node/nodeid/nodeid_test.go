@@ -2,6 +2,7 @@ package nodeid_test
 
 import (
 	"bytes"
+	"math/big"
 	"testing"
 	"time"
 
@@ -10,6 +11,31 @@ import (
 	"spawnery/internal/node/nodeid"
 	"spawnery/internal/pki"
 )
+
+func TestMTLSClientReusesNodeIdentityWithDistinctServiceExpectations(t *testing.T) {
+	id := makeIdentity(t)
+	revoked := func(*big.Int, *big.Int) bool { return false }
+	cp, err := id.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: pki.DefaultTrustDomain, ServerName: "cp.internal", ExpectedServiceRole: pki.RoleCP, IsRevoked: revoked,
+	})
+	if err != nil {
+		t.Fatalf("CP client: %v", err)
+	}
+	as, err := id.MTLSClient(nodeid.ClientOptions{
+		TrustDomain: pki.DefaultTrustDomain, ServerName: "authsvc.internal", ExpectedServiceRole: pki.RoleAuthService, IsRevoked: revoked,
+	})
+	if err != nil {
+		t.Fatalf("AS client: %v", err)
+	}
+	cpTLS := cp.Transport.(*http2.Transport).TLSClientConfig
+	asTLS := as.Transport.(*http2.Transport).TLSClientConfig
+	if cpTLS.ServerName != "cp.internal" || asTLS.ServerName != "authsvc.internal" {
+		t.Fatalf("server names = %q / %q", cpTLS.ServerName, asTLS.ServerName)
+	}
+	if !bytes.Equal(cpTLS.Certificates[0].Certificate[0], asTLS.Certificates[0].Certificate[0]) {
+		t.Fatal("CP and AS clients did not reuse the persisted node SVID")
+	}
+}
 
 func makeIdentity(t *testing.T) nodeid.Identity {
 	t.Helper()
@@ -44,7 +70,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 // MTLSClient builds an HTTP/2 client carrying the node's client cert + pinning the CP root.
 func TestMTLSClientWiring(t *testing.T) {
-	c, err := makeIdentity(t).MTLSClient()
+	c, err := makeIdentity(t).MTLSClient(nodeid.ClientOptions{
+		TrustDomain: pki.DefaultTrustDomain, ServerName: "cp.internal", ExpectedServiceRole: pki.RoleCP,
+		IsRevoked: func(*big.Int, *big.Int) bool { return false },
+	})
 	if err != nil {
 		t.Fatalf("MTLSClient: %v", err)
 	}

@@ -5,8 +5,8 @@ import {
   type MigrationTarget,
   type OwnerSealedDeliveryResult,
 } from "./migration";
-import { authEnabled, useSessionStore } from "@/auth/session";
-import { pollAndSign, registerPendedOp, clearPendedOp } from "@/auth/intent";
+import { authEnabled } from "@/auth/session";
+import { pollAndSign, registerPendedOp, clearPendedOp, requireSessionSigningKeys } from "@/auth/intent";
 import type { DeviceKeys } from "@/keys/device";
 
 export class ForkError extends Error {
@@ -65,9 +65,13 @@ export async function runFork(
   // waits for the RPC). Mirrors createSpawn/resumeSpawn in spawnlet.ts. The tuple's spawnId is the
   // CP-minted fork id, which we can't know yet; _validateTuple skips the spawnId check for fork.
   if (authEnabled()) {
-    const { getOrCreateSessionKey } = await import("@/auth/keypair");
-    const kp = await getOrCreateSessionKey(useSessionStore.getState().keyStore);
-    const pended = { op: "fork-spawn", spawnId: sourceID };
+    const kp = await requireSessionSigningKeys();
+    const pended = {
+      op: "fork-spawn",
+      spawnId: sourceID,
+      targetNodeId: targetNodeId || undefined,
+      targetNodeClass: targetClass || undefined,
+    };
     registerPendedOp(pended);
     pollAndSign({ spawnId: sourceID, pended, privateKey: kp.privateKey, publicKey: kp.publicKey })
       .catch((e: unknown) => console.error("fork intent sign failed:", e))
@@ -126,7 +130,6 @@ export async function runFork(
       rootPEM,
       now,
       (step) => onProgress?.(step),
-      undefined,
     );
     onProgress?.("done");
     return { forkSpawnId, resolvedNodeId, transferSetId, journalKeysDelivered: delivered.journalKeysDelivered };
@@ -164,7 +167,6 @@ export async function runForkDelivery(
       rootPEM,
       now,
       onProgress,
-      undefined,
     );
   } catch (e: unknown) {
     if (e instanceof ForkError) throw e;

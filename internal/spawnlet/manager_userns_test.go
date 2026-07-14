@@ -2,12 +2,14 @@ package spawnlet
 
 import (
 	"context"
+	"os"
 	"testing"
 )
 
 // TestManagerUsernsMode verifies that the manager computes AgentSpec.DropAllCaps from
 // UsernsMode (via CapPolicyForUsernsMode), and that RemapBase() returns the configured value.
 func TestManagerUsernsMode(t *testing.T) {
+	mappedUID := uint32(os.Getuid())
 	cases := []struct {
 		name            string
 		usernsMode      string
@@ -16,7 +18,7 @@ func TestManagerUsernsMode(t *testing.T) {
 	}{
 		{"off (default)", "off", 0, true},
 		{"empty (default)", "", 0, true},
-		{"remap", "remap", 700000, false},
+		{"remap", "remap", mappedUID, false},
 		{"native", "native", 0, false},
 	}
 	for _, tc := range cases {
@@ -81,4 +83,3 @@ func TestManagerUsernsDefault_DropAllCapsPreserved(t *testing.T) {
 		t.Error("default config (no UsernsMode) must use DropAllCaps=true for backward compatibility")
 	}
 }
-

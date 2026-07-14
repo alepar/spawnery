@@ -39,6 +39,12 @@ func forkCmd() *cli.Command {
 			&cli.StringFlag{Name: "node", Usage: "target node id"},
 			&cli.StringFlag{Name: "class", Usage: "target node class"},
 			&cli.StringFlag{Name: "name", Usage: "optional fork display name"},
+			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM for production node verification"},
+			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain for production node verification"},
+			&cli.StringFlag{Name: "as", Usage: "Auth Service origin for node revocation checks; defaults to the stored login AS URL"},
+			&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint (required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable; required with --root-ca)"},
+			&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM to apply before verification (repeatable)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 1 {
@@ -52,6 +58,14 @@ func forkCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 2)
 			}
+			rootCAPath := strings.TrimSpace(c.String("root-ca"))
+			trustDomain := strings.TrimSpace(c.String("trust-domain"))
+			crlStatePath := strings.TrimSpace(c.String("crl-state"))
+			issuerPaths := c.StringSlice("crl-issuer")
+			crlPaths := c.StringSlice("crl")
+			if err := validateMovePKIFlags(rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths); err != nil {
+				return cli.Exit(err.Error(), 2)
+			}
 			dir, err := resolveDir(c)
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
@@ -60,8 +74,19 @@ func forkCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
+			opts, err := loadMoveOptions(dir, c.String("token"), rootCAPath, trustDomain, crlStatePath, issuerPaths, crlPaths, time.Now)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer func() { _ = opts.CloseCertificateRevocations() }()
+			}
+			trust, err := targetTrustFromMoveOptions(opts)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
 			src := buildTokenSource(dir, c.String("token"), connectClient())
-			sdk := client.New(c.String("cp"), src, nil)
+			sdk := client.New(c.String("cp"), src, nil, client.WithNodeAuthorization(src, trust))
 
 			fmt.Fprintf(c.Writer, "fork %s\n", spawnID)
 			switch {
@@ -72,8 +97,7 @@ func forkCmd() *cli.Command {
 			default:
 				fmt.Fprintln(c.Writer, "  target same node")
 			}
-
-			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), client.MoveOptions{}); err != nil {
+			if _, err := sdk.Fork(ctx, dev, req, c.Writer, time.Now(), opts); err != nil {
 				return cli.Exit("fork failed: "+err.Error(), 1)
 			}
 			fmt.Fprintln(c.Writer, "  done.")

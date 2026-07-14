@@ -17,9 +17,10 @@ IP="$E2E_VM_IP"; HOST="$E2E_VM_HOST"
 log "rolling fresh code into $IP …"
 
 # 1. host Go binaries -> /usr/local/bin (staging area first, then atomic move via ssh)
-vm_ssh "$IP" 'mkdir -p ~/incoming/bin ~/incoming/config'
+vm_ssh "$IP" 'mkdir -p ~/incoming/bin ~/incoming/config ~/incoming/provision/env'
 vm_scp "$STAGE/bin/." "$IP" 'incoming/bin/'
 [ -d "$STAGE/config" ] && vm_scp "$STAGE/config/." "$IP" 'incoming/config/'
+[ -d "$STAGE/provision" ] && vm_scp "$STAGE/provision/." "$IP" 'incoming/provision/'
 
 # 2. fresh sidecar/agent images -> containerd k8s.io namespace (product code lives inside pods)
 if [ -f "$STAGE/images.tar" ]; then
@@ -33,7 +34,32 @@ if [ -d "$STAGE/web-dist" ]; then
   vm_scp "$STAGE/web-dist/." "$IP" 'incoming/web/'
 fi
 
-# 4. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)
+# 4. Reconcile the branch's PKI/env topology, then atomically swap + restart the stack.
+# Preserve the golden Caddy certificate in its isolated directory while rotating the internal root
+# and rebuilding every workload-specific runtime bundle from the branch's current ceremony tool.
+vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spawnery-ca \
+  && sudo install -d -m0750 -o root -g caddy /etc/spawnery/caddy \
+  && ( if sudo test -f /etc/spawnery/pki/wildcard.crt && sudo test -f /etc/spawnery/pki/wildcard.key; then sudo install -m0644 -o root -g caddy /etc/spawnery/pki/wildcard.crt /etc/spawnery/caddy/wildcard.crt && sudo install -m0640 -o root -g caddy /etc/spawnery/pki/wildcard.key /etc/spawnery/caddy/wildcard.key; fi ) \
+  && printf '\''%s\n'\'' '\'':443 {'\'' '\''  tls /etc/spawnery/caddy/wildcard.crt /etc/spawnery/caddy/wildcard.key'\'' '\''  @cp path /cp.v1.*'\'' '\''  @ws path /ws*'\'' '\''  @as path /oauth* /refresh* /logout* /github* /device* /ca/* /enrollment-tokens'\'' '\''  handle @cp {'\'' '\''    reverse_proxy h2c://127.0.0.1:8080'\'' '\''  }'\'' '\''  handle @ws {'\'' '\''    reverse_proxy 127.0.0.1:8080'\'' '\''  }'\'' '\''  handle @as {'\'' '\''    reverse_proxy 127.0.0.1:8090'\'' '\''  }'\'' '\''  handle {'\'' '\''    root * /var/www/spawnery'\'' '\''    try_files {path} /index.html'\'' '\''    file_server'\'' '\''  }'\'' '\''}'\'' '\''github.com, codeload.github.com {'\'' '\''  tls /etc/spawnery/caddy/github.crt /etc/spawnery/caddy/github.key'\'' '\''  reverse_proxy 127.0.0.1:3000'\'' '\''}'\'' | sudo tee /etc/caddy/Caddyfile >/dev/null \
+  && sudo rm -rf /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node \
+  && sudo install -d -m0700 /etc/spawnery/pki /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node /var/lib/spawnery-offline \
+  && sudo env SPAWNERY_OFFLINE_PKI_DIR=/var/lib/spawnery-offline bash ~/incoming/provision/gen-pki.sh /etc/spawnery/pki e2e.test \
+  && sudo cp -rf /etc/spawnery/pki/authsvc/. /etc/spawnery/authsvc/ \
+  && sudo cp -rf /etc/spawnery/pki/cp/. /etc/spawnery/cp/ \
+  && sudo cp -f /etc/spawnery/pki/node-cloud/{cert.pem,chain.pem,key.pem,root.pem} /etc/spawnery/node/ \
+  && sudo cp -f /etc/spawnery/pki/{service-intermediate.pem,cloud-intermediate.pem,self-hosted-intermediate.pem,service.crl.pem,cloud-node.crl.pem,self-hosted-node.crl.pem} /etc/spawnery/node/ \
+  && sudo find /etc/spawnery/authsvc /etc/spawnery/cp /etc/spawnery/node -type f -exec chmod 0600 {} + \
+  && sudo find /etc/spawnery/pki -mindepth 1 -delete \
+  && sudo rm -rf /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
+  && sudo install -d -m0700 /var/lib/spawnery/authsvc-revocations /var/lib/spawnery/cp-revocations /var/lib/spawnery/cp-signer-revocations /var/lib/spawnlet/certificate-revocations /var/lib/spawnlet/signer-revocations /var/lib/spawnlet/user-revocations \
+  && sudo cp -f /etc/spawnery/authsvc/self-hosted-node.crl.pem /var/lib/spawnery/authsvc-revocations/self-hosted-node.crl.pem \
+  && sudo bash ~/incoming/provision/reconcile-gitea-env.sh /etc/spawnery/env.d/gitea.env \
+  && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
+  && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
+  && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \
+  && sudo systemctl restart spawnery-render-env'
+
+# 5. atomic swap + restart the stack (order matters: AS -> CP -> node -> caddy)
 # Re-copying config/ re-introduces cp.prod.yaml's ${sops:store.dsn} ref (pristine config ships it),
 # so re-patch the literal throwaway DSN right after the config copy, every roll.
 vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/* /usr/local/bin/ \
@@ -46,19 +72,10 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/* /usr/local/bin/ \
 # AS and CP bind 127.0.0.1 (Caddy fronts them on :443), so probe localhost INSIDE the VM over ssh —
 # a wait_tcp on the external IP only ever sees Caddy's :443, never 8090/8080.
 log "waiting for app-ready …"
-# (a) AS /healthz (127.0.0.1:8090) — HTTPS since sp-wwtc: AS now terminates TLS itself (AS_TLS_CERT/
-# AS_TLS_KEY), because its node-mTLS identity check reads r.TLS.PeerCertificates and so cannot sit
-# behind a TLS-terminating proxy. This probe presents no client cert, which is fine: AS's ClientAuth is
-# VerifyClientCertIfGiven, so an un-certed caller connects anonymously and /healthz is not identity-gated.
-# Verify against the VM's SYSTEM TRUST STORE, which provision.sh loads the golden root into. NOT --cacert
-# /etc/spawnery/pki/root.pem: that dir is root-owned (it holds private keys) and this probe runs over ssh as
-# the unprivileged 'spawnery' user, so curl cannot read the file — it aborts mid-handshake and AS logs a
-# bare "TLS handshake error: EOF", which looks like a TLS bug and is really a chmod.
-# And NOT -k: the probe must VERIFY AS's certificate, or it masks exactly the misconfiguration it exists to
-# catch. Verifying via the system store also proves the VM's trust store is correctly set up — which the
-# node's own clone-in and the CP's AS calls both depend on.
+# (a) Public AS /healthz remains loopback HTTP behind Caddy. Internal service and node traffic uses the
+# separate mTLS listener on 8091.
 for i in $(seq 1 60); do
-  vm_ssh "$IP" 'curl -fsS --max-time 3 https://127.0.0.1:8090/healthz >/dev/null 2>&1' && break
+  vm_ssh "$IP" 'curl -fsS --max-time 3 http://127.0.0.1:8090/healthz >/dev/null 2>&1' && break
   [ "$i" = 60 ] && die "AS /healthz not ready"
   sleep 1
 done

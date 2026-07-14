@@ -1,0 +1,464 @@
+package node
+
+import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"errors"
+	"math/big"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	authv1 "spawnery/gen/auth/v1"
+	"spawnery/internal/authsvc/token"
+	"spawnery/internal/intent"
+	"spawnery/internal/pki"
+)
+
+type artifactFixture struct {
+	root            *x509.Certificate
+	intermediate    *x509.Certificate
+	intermediateKey *ecdsa.PrivateKey
+	leaf            *x509.Certificate
+	credential      *token.SigningCredential
+	verifier        *token.Verifier
+}
+
+func newArtifactFixture(t *testing.T, now time.Time, environment string) artifactFixture {
+	t.Helper()
+	rootKey := mustArtifactP256(t)
+	root := mustArtifactCert(t, &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(365 * 24 * time.Hour),
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign, BasicConstraintsValid: true, IsCA: true, MaxPathLen: 2,
+	}, nil, &rootKey.PublicKey, rootKey)
+	intermediateKey := mustArtifactP256(t)
+	intermediate := mustArtifactCert(t, &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "auth signing"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(180 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true, IsCA: true, MaxPathLen: 0, MaxPathLenZero: true,
+		Policies: []x509.OID{pki.AuthSigningIntermediatePolicyOID},
+	}, root, &intermediateKey.PublicKey, rootKey)
+	_, leafKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signerURI, err := url.Parse("spiffe://" + environment + ".spawnery.internal/signer/auth-artifact/signer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := mustArtifactCert(t, &x509.Certificate{
+		SerialNumber: new(big.Int).Lsh(big.NewInt(1), 127), Subject: pkix.Name{CommonName: "artifact signer"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(90 * 24 * time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, Policies: []x509.OID{pki.AuthArtifactSignerPolicyOID}, URIs: []*url.URL{signerURI},
+	}, intermediate, leafKey.Public(), intermediateKey)
+	credential, err := token.NewSigningCredential(leafKey, []*x509.Certificate{leaf, intermediate}, root, environment, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := token.NewVerifier(root, environment, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return artifactFixture{root: root, intermediate: intermediate, intermediateKey: intermediateKey, leaf: leaf, credential: credential, verifier: verifier}
+}
+
+func mustArtifactP256(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func mustArtifactCert(t *testing.T, template, parent *x509.Certificate, public any, signer crypto.Signer) *x509.Certificate {
+	t.Helper()
+	if parent == nil {
+		parent = template
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, parent, public, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func mintArtifactSession(t *testing.T, fixture artifactFixture, body *authv1.SessionTokenBody) string {
+	t.Helper()
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := fixture.credential.Sign(token.ArtifactTypeSession, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func TestIntentVerifierRejectsLegacyTokenBeforeIntentState(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now })
+	_, nack, _ := v.VerifyStart(&authv1.AuthEnvelope{AccessToken: "legacy.signature"}, goodStartFields("sp-1", "node-1", 1))
+	if nack != NACKTokenInvalid {
+		t.Fatalf("legacy token: got %q, want %q", nack, NACKTokenInvalid)
+	}
+}
+
+type mutableSignerRevocations struct {
+	generation atomic.Uint64
+	revoked    atomic.Bool
+}
+
+func (r *mutableSignerRevocations) Generation() uint64 { return r.generation.Load() }
+func (r *mutableSignerRevocations) RejectSigner(*x509.Certificate) error {
+	if r.revoked.Load() {
+		return errors.New("revoked signer")
+	}
+	return nil
+}
+
+func TestIntentVerifierRevocationGenerationInvalidatesCachedSigner(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	revocations := &mutableSignerRevocations{}
+	artifacts, err := token.NewVerifier(fixture.root, "prod", revocations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, fields := certifiedIntent(t, fixture, now, "jti-revoked")
+	v := NewIntentVerifier(artifacts, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
+		t.Fatalf("initial verify: %s %s", nack, detail)
+	}
+	revocations.revoked.Store(true)
+	revocations.generation.Store(1)
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("after revocation: got %q, want %q", nack, NACKTokenInvalid)
+	}
+}
+
+func TestIntentVerifierRealStoreRevocationPersistsAcrossRestart(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state", "revocations.json")
+	statementPath := filepath.Join(dir, "deployment.statement")
+	store, err := token.OpenSignerRevocationStore(statePath, fixture.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := token.NewVerifier(fixture.root, "prod", store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, fields := certifiedIntent(t, fixture, now, "jti-real-store")
+	v := NewIntentVerifier(artifacts, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
+		t.Fatalf("initial cached verification: %s %s", nack, detail)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(fixture.leaf.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spkiHash := sha256.Sum256(spki)
+	writeRevocationStatement := func(generation uint64, issuedAt time.Time) {
+		t.Helper()
+		payload, err := proto.Marshal(&authv1.SignerRevocationStatement{
+			Environment: "prod", Generation: generation, IssuedAt: issuedAt.Unix(),
+			RevokedSerials: [][]byte{fixture.leaf.SerialNumber.Bytes()}, RevokedSpkiSha256: [][]byte{spkiHash[:]},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := token.SignSignerRevocationStatement(fixture.intermediate, fixture.intermediateKey, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statementPath, []byte(wire+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRevocationStatement(2, now)
+	if err := store.LoadAndApply(statementPath, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("live revoked cached signer: got %q, want %q", nack, NACKTokenInvalid)
+	}
+	writeRevocationStatement(1, now.Add(-time.Second))
+	rollbackErr := store.LoadAndApply(statementPath, now)
+	if rollbackErr == nil || store.Generation() != 2 {
+		t.Fatalf("rollback error=%v generation=%d, want error and generation 2", rollbackErr, store.Generation())
+	}
+	if err := os.WriteFile(statementPath, []byte("malformed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	malformedErr := store.LoadAndApply(statementPath, now)
+	if malformedErr == nil || store.Generation() != 2 {
+		t.Fatalf("malformed error=%v generation=%d, want error and generation 2", malformedErr, store.Generation())
+	}
+	for _, operationalErr := range []error{rollbackErr, malformedErr} {
+		message := operationalErr.Error()
+		if strings.Contains(message, "CERTIFICATE") || strings.Contains(message, env.AccessToken) || strings.Contains(message, base64.RawURLEncoding.EncodeToString(fixture.leaf.Raw)) {
+			t.Fatalf("operational error exposed credential material: %q", message)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := token.OpenSignerRevocationStore(statePath, fixture.root, "prod", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restartedArtifacts, err := token.NewVerifier(fixture.root, "prod", reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewIntentVerifier(restartedArtifacts, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, _ := restarted.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("persisted revoked signer after restart: got %q, want %q", nack, NACKTokenInvalid)
+	}
+}
+
+func TestIntentVerifierRejectsExpiredCertifiedSessionBeforeIntent(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	env, fields := certifiedIntent(t, fixture, now, "jti-expired")
+	var artifact authv1.SignedAuthArtifact
+	raw, _ := base64.RawURLEncoding.DecodeString(env.AccessToken)
+	if err := proto.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	var body authv1.SessionTokenBody
+	if err := proto.Unmarshal(artifact.Payload, &body); err != nil {
+		t.Fatal(err)
+	}
+	body.ExpiresAt = now.Unix()
+	env.AccessToken = mintArtifactSession(t, fixture, &body)
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("expired certified session: got %q, want %q", nack, NACKTokenInvalid)
+	}
+}
+
+type mutableUserRevocationLookup struct {
+	revoked  atomic.Bool
+	issuedAt atomic.Int64
+	calls    atomic.Int64
+}
+
+func (r *mutableUserRevocationLookup) IsRevoked(_ string, _ string, issuedAt int64) bool {
+	r.calls.Add(1)
+	r.issuedAt.Store(issuedAt)
+	return r.revoked.Load()
+}
+
+func TestIntentVerifierChecksUserRevocationBeforeJTIAdmission(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	env, fields := certifiedIntent(t, fixture, now, "jti-user-revoked")
+	lookup := &mutableUserRevocationLookup{}
+	lookup.revoked.Store(true)
+	v := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKTokenInvalid {
+		t.Fatalf("revoked token: got %q, want %q", nack, NACKTokenInvalid)
+	}
+	if lookup.issuedAt.Load() != now.Unix() {
+		t.Fatalf("revocation lookup issued_at=%d want=%d", lookup.issuedAt.Load(), now.Unix())
+	}
+	lookup.revoked.Store(false)
+	auth, nack, detail := v.VerifyStart(env, fields)
+	if nack != "" {
+		t.Fatalf("revocation rejection admitted JTI: %s %s", nack, detail)
+	}
+	if auth.IssuedAt != now.Unix() {
+		t.Fatalf("authorization issued_at=%d want=%d", auth.IssuedAt, now.Unix())
+	}
+}
+
+func TestIntentVerifierChecksUserRevocationAfterCertifiedTokenValidation(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	for _, test := range []struct {
+		name   string
+		mutate func(*authv1.SessionTokenBody)
+	}{
+		{name: "expired", mutate: func(body *authv1.SessionTokenBody) { body.ExpiresAt = now.Unix() }},
+		{name: "not yet valid", mutate: func(body *authv1.SessionTokenBody) { body.IssuedAt = now.Add(61 * time.Second).Unix() }},
+		{name: "wrong audience", mutate: func(body *authv1.SessionTokenBody) { body.Audience = "cp" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env, fields := certifiedIntent(t, fixture, now, "jti-validation-order-"+test.name)
+			raw, err := base64.RawURLEncoding.DecodeString(env.AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var artifact authv1.SignedAuthArtifact
+			if err := proto.Unmarshal(raw, &artifact); err != nil {
+				t.Fatal(err)
+			}
+			var body authv1.SessionTokenBody
+			if err := proto.Unmarshal(artifact.Payload, &body); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&body)
+			env.AccessToken = mintArtifactSession(t, fixture, &body)
+			lookup := &mutableUserRevocationLookup{}
+			verifier := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+			if _, nack, _ := verifier.VerifyStart(env, fields); nack == "" {
+				t.Fatal("invalid certified token accepted")
+			}
+			if lookup.calls.Load() != 0 {
+				t.Fatalf("revocation lookup called %d times", lookup.calls.Load())
+			}
+		})
+	}
+	t.Run("malformed body", func(t *testing.T) {
+		env, fields := certifiedIntent(t, fixture, now, "jti-validation-order-malformed")
+		wire, err := fixture.credential.Sign(token.ArtifactTypeSession, []byte{0xff})
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.AccessToken = wire
+		lookup := &mutableUserRevocationLookup{}
+		verifier := NewIntentVerifier(fixture.verifier, "alice", "node-1", false, func() time.Time { return now }, lookup)
+		if _, nack, _ := verifier.VerifyStart(env, fields); nack != NACKTokenInvalid {
+			t.Fatalf("malformed certified token nack=%q", nack)
+		}
+		if lookup.calls.Load() != 0 {
+			t.Fatalf("revocation lookup called %d times", lookup.calls.Load())
+		}
+	})
+}
+
+func TestIntentVerifierCertifiedArtifactFailuresPrecedeIntentState(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fixture := newArtifactFixture(t, now, "prod")
+	valid, fields := certifiedIntent(t, fixture, now, "jti-state-proof")
+	wrongRoot := newArtifactFixture(t, now, "prod")
+	wrongRootEnv, _ := certifiedIntent(t, wrongRoot, now, "irrelevant-root")
+	wrongEnvironment := newArtifactFixture(t, now, "staging")
+	wrongEnvironmentEnv, _ := certifiedIntent(t, wrongEnvironment, now, "irrelevant-env")
+	unknown := mutateArtifactWire(t, valid.AccessToken, func(a *authv1.SignedAuthArtifact) { a.ArtifactType = "unknown" })
+	corruptSignature := mutateArtifactWire(t, valid.AccessToken, func(a *authv1.SignedAuthArtifact) { a.Signature[0] ^= 1 })
+	corruptPayload := mutateArtifactWire(t, valid.AccessToken, func(a *authv1.SignedAuthArtifact) { a.Payload[0] ^= 1 })
+	corruptKeyID := mutateArtifactWire(t, valid.AccessToken, func(a *authv1.SignedAuthArtifact) { a.KeyId[0] ^= 1 })
+	corruptChain := mutateArtifactWire(t, valid.AccessToken, func(a *authv1.SignedAuthArtifact) { a.SignerChain[0] = []byte("not DER") })
+	wrongPathLeaf := replacementArtifactLeaf(t, fixture, now, fixture.credential.PrivateKey.Public(), func(c *x509.Certificate) {
+		c.URIs = []*url.URL{{Scheme: "spiffe", Host: "prod.spawnery.internal", Path: "/service/authsvc/signer-1"}}
+	})
+	wrongPolicyLeaf := replacementArtifactLeaf(t, fixture, now, fixture.credential.PrivateKey.Public(), func(c *x509.Certificate) { c.Policies = nil })
+	expiredLeaf := replacementArtifactLeaf(t, fixture, now, fixture.credential.PrivateKey.Public(), func(c *x509.Certificate) { c.NotAfter = now.Add(-time.Second) })
+	ecdsaLeaf := replacementArtifactLeaf(t, fixture, now, &mustArtifactP256(t).PublicKey, nil)
+	withLeaf := func(leaf *x509.Certificate) string {
+		return mutateArtifactWire(t, valid.AccessToken, func(a *authv1.SignedAuthArtifact) { a.SignerChain[0] = leaf.Raw })
+	}
+	for _, tc := range []struct {
+		name      string
+		artifacts *token.Verifier
+		wire      string
+	}{
+		{name: "wrong root", artifacts: fixture.verifier, wire: wrongRootEnv.AccessToken},
+		{name: "wrong environment", artifacts: fixture.verifier, wire: wrongEnvironmentEnv.AccessToken},
+		{name: "unknown artifact", artifacts: fixture.verifier, wire: unknown},
+		{name: "wrong SPIFFE path", artifacts: fixture.verifier, wire: withLeaf(wrongPathLeaf)},
+		{name: "wrong policy", artifacts: fixture.verifier, wire: withLeaf(wrongPolicyLeaf)},
+		{name: "ECDSA signer", artifacts: fixture.verifier, wire: withLeaf(ecdsaLeaf)},
+		{name: "expired certificate", artifacts: fixture.verifier, wire: withLeaf(expiredLeaf)},
+		{name: "corrupt payload", artifacts: fixture.verifier, wire: corruptPayload},
+		{name: "corrupt signature", artifacts: fixture.verifier, wire: corruptSignature},
+		{name: "corrupt key ID", artifacts: fixture.verifier, wire: corruptKeyID},
+		{name: "corrupt chain", artifacts: fixture.verifier, wire: corruptChain},
+		{name: "legacy two part", artifacts: fixture.verifier, wire: "legacy.signature"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := NewIntentVerifier(tc.artifacts, "alice", "node-1", false, func() time.Time { return now })
+			invalid := proto.Clone(valid).(*authv1.AuthEnvelope)
+			invalid.AccessToken = tc.wire
+			if _, nack, _ := v.VerifyStart(invalid, fields); nack != NACKTokenInvalid {
+				t.Fatalf("invalid artifact: got %q, want %q", nack, NACKTokenInvalid)
+			}
+			if _, nack, detail := v.VerifyStart(valid, fields); nack != "" {
+				t.Fatalf("valid intent after artifact failure: %s %s", nack, detail)
+			}
+		})
+	}
+}
+
+func replacementArtifactLeaf(t *testing.T, fixture artifactFixture, now time.Time, public any, mutate func(*x509.Certificate)) *x509.Certificate {
+	t.Helper()
+	signerURI, err := url.Parse("spiffe://prod.spawnery.internal/signer/auth-artifact/replacement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: new(big.Int).Add(fixture.leaf.SerialNumber, big.NewInt(1)),
+		Subject:      pkix.Name{CommonName: "replacement artifact signer"},
+		NotBefore:    now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, Policies: []x509.OID{pki.AuthArtifactSignerPolicyOID}, URIs: []*url.URL{signerURI},
+	}
+	if mutate != nil {
+		mutate(template)
+	}
+	return mustArtifactCert(t, template, fixture.intermediate, public, fixture.intermediateKey)
+}
+
+func certifiedIntent(t *testing.T, fixture artifactFixture, now time.Time, jti string) (*authv1.AuthEnvelope, StartFields) {
+	t.Helper()
+	sessionKey := genECDSA(t)
+	spki, err := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := mintArtifactSession(t, fixture, &authv1.SessionTokenBody{
+		AccountId: "alice", TokenId: "token-1", Audience: "node", IssuedAt: now.Unix(),
+		ExpiresAt: now.Add(time.Minute).Unix(), SessionKeyHash: token.SessionKeyHash(spki),
+	})
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	body.Jti = jti
+	si, err := intent.Build(intent.OpCreateSpawn, body, sessionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &authv1.AuthEnvelope{AccessToken: wire, Intent: si}, goodStartFields("sp-1", "node-1", 1)
+}
+
+func mutateArtifactWire(t *testing.T, wire string, mutate func(*authv1.SignedAuthArtifact)) string {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact authv1.SignedAuthArtifact
+	if err := proto.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&artifact)
+	raw, err = proto.Marshal(&artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}

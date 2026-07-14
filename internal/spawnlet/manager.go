@@ -21,6 +21,7 @@ import (
 	"spawnery/internal/agentcaps"
 	"spawnery/internal/githubcred"
 	"spawnery/internal/manifest"
+	"spawnery/internal/pki"
 	"spawnery/internal/runtime"
 	"spawnery/internal/spawnlet/firewall"
 	"spawnery/internal/storage"
@@ -36,6 +37,7 @@ const journalKeyDeliveryTimeout = 30 * time.Second
 
 type ManagerConfig struct {
 	AgentImage, SidecarImage, OpenRouterKey, DataRoot string
+	CertificateRevocations                            pki.CertificateRevocationChecker
 
 	// SecretsRoot is the per-node root for owner-sealed secret tmpfs dirs (design §6). Each spawn gets
 	// a subdir here, bind-mounted into the agent at SecretsMountPath; the node writes unsealed plaintext
@@ -93,7 +95,7 @@ type ManagerConfig struct {
 	// EgressFloorForceOff bypasses the egress floor entirely — neither applied nor checked.
 	// DEV-ONLY: this flag MUST NOT be set in production. It exists so the rootless dev node
 	// can run under NODE_CLASS=cloud (multi-tenant placement) without kernel iptables access.
-	// Mirrors AS_DEV_RELAX_NODE_AUTH in its danger level and usage pattern.
+	// Treat this as an explicit local-development security bypass.
 	EgressFloorForceOff bool
 
 	MemLimitMB       int64   // memory limit in MiB; default 1024
@@ -746,20 +748,29 @@ func (m *Manager) ExecRun(ctx context.Context, spawnID string, inner []string) e
 // ExecStream runs inner non-interactively in spawnID's agent container, streaming its stdout/stderr to
 // the given writers as they arrive, and returns the inner command's exit code. It is the user-facing
 // `spawnctl exec` path (sp-8v39). Unlike ExecRun (buffered, error-on-nonzero), a non-zero command exit
-// is returned as exitCode with a nil error; err is reserved for failures to LAUNCH the exec — an
-// unknown spawn / no agent container, or the runtime CLI (docker/crictl) failing to start. `docker
+// is returned as exitCode with a nil error; err is reserved for setup, transport, and cancellation
+// failures. `docker
 // exec` propagates the inner exit code and demuxes stdout/stderr natively; `crictl exec` (runsc/CRI
-// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit). NOTE:
-// cancelling ctx kills the docker/crictl client, which may leave the in-container process orphaned
-// until the spawn stops (documented limitation).
+// lane) demuxes but does NOT propagate the code (see runExecStream's parseCrictlExit).
 func (m *Manager) ExecStream(ctx context.Context, spawnID string, inner []string, stdout, stderr io.Writer) (int, error) {
 	sp, ok := m.store.Get(spawnID)
 	if !ok || sp.AgentID == "" {
 		return 1, fmt.Errorf("spawn %s has no agent container", spawnID)
 	}
-	prefix := ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime)
-	argv := execArgv(prefix, sp.AgentID, inner)
-	return runExecStream(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl")
+	if err := ctx.Err(); err != nil {
+		return 1, err
+	}
+	process, err := newExecProcess()
+	if err != nil {
+		return 1, err
+	}
+	wrapped, err := process.wrapArgv(inner)
+	if err != nil {
+		return 1, err
+	}
+	prefix := execPrefixWithStdin(ExecPrefixNonInteractiveFor(m.cfg.ContainerRuntime))
+	argv := execArgv(prefix, sp.AgentID, wrapped)
+	return runExecStreamCancelable(ctx, argv, stdout, stderr, len(prefix) > 0 && prefix[0] == "crictl", process)
 }
 
 // runExecStream runs argv to completion, streaming its stdout/stderr to the given writers, and returns
@@ -856,6 +867,10 @@ func (m *Manager) SpawnGeneration(id string) (uint64, bool) {
 		return 0, false
 	}
 	return sp.Generation, true
+}
+
+func (m *Manager) SpawnOwnerGeneration(id string) (string, uint64, bool) {
+	return m.store.OwnerGeneration(id)
 }
 
 // RunningInventory returns the spawns this node currently manages (id + generation), for the CP
@@ -1008,10 +1023,53 @@ func (m *Manager) Create(ctx context.Context, id, appPath, model, name, appID st
 }
 
 // CreateWithSelection is Create plus an explicit agent selection (image + runnable id + mode).
-// For any selected runnable the container command is set to [sel.RunnableID]; the image's
+// For any selected runnable the image-entrypoint argument vector is set to [sel.RunnableID]; the image's
 // dispatcher entrypoint (entrypoint.sh) resolves the actual launch (serve+adapter, tmux-wrapped
 // TUI, etc.) — the node just names the runnable. No selection leaves Cmd nil (image default).
 func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, sel AgentSelection) (*Spawn, error) {
+	return m.createWithSelection(ctx, id, appPath, model, name, appID, generation, "", sel)
+}
+
+func (m *Manager) CreateAuthorizedWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
+	reservation, err := m.ReserveAuthorizedSpawn(id, ownerID, generation)
+	if err != nil {
+		return nil, err
+	}
+	defer m.ReleaseAuthorizedSpawn(reservation)
+	return m.CreateReservedWithSelection(ctx, reservation, appPath, model, name, appID, sel)
+}
+
+func (m *Manager) ReserveAuthorizedSpawn(id, ownerID string, generation uint64) (*OwnerReservation, error) {
+	if ownerID == "" {
+		return nil, fmt.Errorf("authorized spawn owner is empty")
+	}
+	reservation, ok := m.store.ReserveOwner(id, ownerID, generation)
+	if !ok {
+		return nil, fmt.Errorf("spawn %q is already reserved or live", id)
+	}
+	return reservation, nil
+}
+
+func (m *Manager) ReleaseAuthorizedSpawn(reservation *OwnerReservation) {
+	m.store.ReleaseOwner(reservation)
+}
+
+func (m *Manager) OwnsAuthorizedSpawn(reservation *OwnerReservation) bool {
+	return m.store.OwnsReservation(reservation)
+}
+
+func (m *Manager) CreateReservedWithSelection(ctx context.Context, reservation *OwnerReservation, appPath, model, name, appID string, sel AgentSelection) (*Spawn, error) {
+	if !m.store.OwnsReservation(reservation) {
+		return nil, fmt.Errorf("authorized spawn reservation is not current")
+	}
+	return m.createWithReservation(ctx, reservation.id, appPath, model, name, appID, reservation.generation, reservation.owner, reservation, sel)
+}
+
+func (m *Manager) createWithSelection(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, sel AgentSelection) (*Spawn, error) {
+	return m.createWithReservation(ctx, id, appPath, model, name, appID, generation, ownerID, nil, sel)
+}
+
+func (m *Manager) createWithReservation(ctx context.Context, id, appPath, model, name, appID string, generation uint64, ownerID string, reservation *OwnerReservation, sel AgentSelection) (*Spawn, error) {
 	agentImage := m.cfg.AgentImage
 	if sel.Image != "" {
 		agentImage = sel.Image
@@ -1022,7 +1080,8 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 			return nil, fmt.Errorf("unknown runnable %q", sel.RunnableID)
 		}
 		// The image's dispatcher entrypoint owns the actual launch (serve+adapter / tmux-wrapped TUI);
-		// the node just names the runnable. (Replaces the old spawn-tmux + agentcaps.Launch prepend.)
+		// the node passes only the runnable ID as its argument. (Replaces the old spawn-tmux +
+		// agentcaps.Launch prepend.)
 		agentCmd = []string{sel.RunnableID}
 	}
 
@@ -1616,7 +1675,7 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 	}
 
 	sp := &Spawn{
-		ID: id, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
+		ID: id, OwnerID: ownerID, Generation: generation, SidecarID: h.SidecarID, AgentID: h.AgentID,
 		MountDirs: mountDirs, MountBindings: append([]MountBinding(nil), sel.Mounts...), MountFinalizers: mountFinalizers, JournalMounts: journalMounts, MountTargets: mountTargetsOf(mounts), journalWatchers: watchers,
 		FloorIP: floorIP, PodIP: h.PodIP, NetnsPath: h.NetnsPath, SandboxID: h.SandboxID,
 		Status: "ready", Mode: sel.Mode, ControlToken: controlToken, ControlURL: controlURL,
@@ -1625,7 +1684,17 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		DeltaDepth:      deltaDepth,
 		RootfsArtifacts: cloneRootfsArtifacts(rootfsArtifacts),
 	}
-	m.store.Put(sp)
+	if ownerID != "" {
+		if !m.store.CommitOwner(reservation, sp) {
+			for _, watcher := range watchers {
+				watcher.Stop()
+			}
+			cleanupPreStoreFailure(h, floorIP)
+			return nil, fmt.Errorf("spawn %q ownership reservation was lost", id)
+		}
+	} else {
+		m.store.Put(sp)
+	}
 	return sp, nil
 }
 

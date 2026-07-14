@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
+	"golang.org/x/net/http2"
+
+	"spawnery/internal/mtls"
 	"spawnery/internal/pki"
 )
 
@@ -23,6 +28,39 @@ type enrollReq struct {
 type enrollResp struct {
 	CertPEM  string `json:"cert_pem"`
 	ChainPEM string `json:"chain_pem"`
+}
+
+type enrollmentTokenReq struct {
+	Class       string `json:"class"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+type enrollmentTokenResp struct {
+	Token string `json:"token"`
+}
+
+func (s *Service) enrollmentTokenHandler(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := s.enrollmentAccountFromReq(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req enrollmentTokenReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	token, err := s.IssueBoundEnrollmentToken(accountID, req.Class, req.Fingerprint)
+	if err != nil {
+		if errors.Is(err, ErrUnsignableClass) || req.Fingerprint == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "token issuance failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(enrollmentTokenResp{Token: token})
 }
 
 // enrollHandler redeems a node's enrollment token + CSR and returns the issued cert + chain.
@@ -60,17 +98,11 @@ type EnrollResult struct {
 	KeyPEM   []byte
 }
 
-// RunEnroll performs node-side enrollment against an AS, generating a FRESH keypair + CSR locally (the
-// key never leaves), redeeming the token at asURL/enroll, and returning the issued cert/chain plus the
-// key. Because the key is generated here, RunEnroll only works with LEGACY UNBOUND tokens — a
-// fingerprint-bound token must be redeemed with the SAME key whose fingerprint was pinned at issuance, so
-// the node must generate that key first (and announce its fingerprint) then call RunEnrollWithKey.
-func RunEnroll(ctx context.Context, asURL, token, nodeID string) (*EnrollResult, error) {
-	key, err := pki.NewNodeKey()
-	if err != nil {
-		return nil, err
-	}
-	return RunEnrollWithKey(ctx, asURL, token, nodeID, key)
+type EnrollTransport struct {
+	Root        *x509.Certificate
+	TrustDomain string
+	ServerName  string
+	IsRevoked   pki.CertificateRevocationChecker
 }
 
 // RunEnrollWithKey redeems an enrollment token using a PRE-EXISTING node key — the fingerprint-bound
@@ -78,7 +110,15 @@ func RunEnroll(ctx context.Context, asURL, token, nodeID string) (*EnrollResult,
 // owner (who mints a token bound to it via IssueBoundEnrollmentToken over the pinned AS connection), then
 // redeems here with that exact key so the AS's CSR-fingerprint check passes. The private key never
 // leaves the node; only the CSR (proving possession) is sent.
-func RunEnrollWithKey(ctx context.Context, asURL, token, nodeID string, key *ecdsa.PrivateKey) (*EnrollResult, error) {
+func RunEnrollWithKey(ctx context.Context, asURL, token, nodeID string, key *ecdsa.PrivateKey, transport EnrollTransport) (*EnrollResult, error) {
+	tlsConfig, err := mtls.ClientConfig(mtls.ClientOptions{
+		Root: transport.Root, TrustDomain: transport.TrustDomain, ServerName: transport.ServerName,
+		ExpectedServiceRole: pki.RoleAuthService, CurrentTime: time.Now, IsRevoked: transport.IsRevoked,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("enroll: authenticate auth service: %w", err)
+	}
+	client := &http.Client{Transport: &http2.Transport{TLSClientConfig: tlsConfig}}
 	csrDER, err := pki.NodeCSRForKey(key)
 	if err != nil {
 		return nil, err
@@ -93,7 +133,7 @@ func RunEnrollWithKey(ctx context.Context, asURL, token, nodeID string, key *ecd
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

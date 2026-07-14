@@ -244,7 +244,8 @@ func newForkTestManager(t *testing.T, rec *forkOpRecorder, j *recordingForkJourn
 	t.Helper()
 	fb := &recordingForkBackend{Backend: fakeBackend(t), rec: rec}
 	m := NewManagerWithBackend(fb, &fakeApplier{}, ManagerConfig{
-		NodeID: "node-1", AgentImage: "agent:base", SidecarImage: "sidecar:base",
+		CertificateRevocations: allowNoCertificateRevocations,
+		NodeID:                 "node-1", AgentImage: "agent:base", SidecarImage: "sidecar:base",
 		DataRoot: t.TempDir(), DeltaCapture: true,
 	})
 	m.SetJournal(j, t.TempDir())

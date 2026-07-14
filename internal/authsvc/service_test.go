@@ -8,6 +8,37 @@ import (
 	"spawnery/internal/pki"
 )
 
+func TestIssueSelfHostedNodeUsesConfiguredTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, "prod.spawnery.internal")
+	service := authsvc.New(root.Cert, intermediate, authsvc.WithTrustDomain("prod.spawnery.internal"))
+	leaf, err := service.IssueSelfHostedNode("n", "a", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := leaf.Cert.URIs[0].String(); got != "spiffe://prod.spawnery.internal/node/self-hosted/a/n" {
+		t.Fatalf("URI SAN = %q", got)
+	}
+}
+
+func TestServiceValidateRejectsInvalidTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, pki.DefaultTrustDomain)
+	service := authsvc.New(root.Cert, intermediate, authsvc.WithTrustDomain("INVALID domain"))
+	if err := service.Validate(); err == nil {
+		t.Fatal("invalid trust domain accepted")
+	}
+}
+
+func TestServiceValidateRequiresCertificateRevocations(t *testing.T) {
+	root, _ := pki.NewRootCA("root")
+	intermediate, _ := root.NewIntermediate(pki.IssuerSelfHostedNode, pki.DefaultTrustDomain)
+	service := authsvc.New(root.Cert, intermediate)
+	if err := service.Validate(); err == nil {
+		t.Fatal("service accepted missing certificate revocation state")
+	}
+}
+
 // The AS holds the self-hosted intermediate and issues node certs that verify against the root it
 // publishes for pinning — and they are always class=self-hosted, bound to the given account.
 func TestServiceIssuesVerifiableSelfHostedCert(t *testing.T) {
@@ -24,7 +55,7 @@ func TestServiceIssuesVerifiableSelfHostedCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RootCAPEM/parse: %v", err)
 	}
-	id, err := pki.Verify(node.Cert, node.Chain, rootCert, time.Now())
+	id, err := pki.Verify(node.Cert, node.Chain, rootCert, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("issued cert failed to verify against the published root: %v", err)
 	}
@@ -40,7 +71,7 @@ func TestServiceLoadFromPEM(t *testing.T) {
 	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
 	interKeyPEM, _ := pki.MarshalKeyPEM(inter.Key)
 
-	s, err := authsvc.Load(pki.MarshalCertPEM(root.Cert), pki.MarshalCertPEM(inter.Cert), interKeyPEM)
+	s, err := authsvc.Load(pki.MarshalCertPEM(root.Cert), pki.MarshalCertPEM(inter.Cert), interKeyPEM, pki.DefaultTrustDomain, allowNoCertificateRevocations)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -49,7 +80,16 @@ func TestServiceLoadFromPEM(t *testing.T) {
 		t.Fatalf("IssueSelfHostedNode: %v", err)
 	}
 	rootCert, _ := pki.ParseCertPEM(s.RootCAPEM())
-	if _, err := pki.Verify(node.Cert, node.Chain, rootCert, time.Now()); err != nil {
+	if _, err := pki.Verify(node.Cert, node.Chain, rootCert, pki.DefaultTrustDomain, time.Now(), allowNoCertificateRevocations); err != nil {
 		t.Fatalf("loaded-service cert failed verify: %v", err)
+	}
+}
+
+func TestServiceLoadRejectsInvalidTrustDomain(t *testing.T) {
+	root, _ := pki.NewRootCA("Test Root")
+	inter, _ := root.NewIntermediate(pki.ClassSelfHosted)
+	interKeyPEM, _ := pki.MarshalKeyPEM(inter.Key)
+	if _, err := authsvc.Load(pki.MarshalCertPEM(root.Cert), pki.MarshalCertPEM(inter.Cert), interKeyPEM, "INVALID domain", allowNoCertificateRevocations); err == nil {
+		t.Fatal("Load accepted invalid trust domain")
 	}
 }

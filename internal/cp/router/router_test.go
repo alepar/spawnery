@@ -2,15 +2,168 @@ package router
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	authv1 "spawnery/gen/auth/v1"
 	nodev1 "spawnery/gen/node/v1"
 	"spawnery/internal/metrics"
 )
 
+type blockedFirstOpenNode struct {
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+	calls        atomic.Int32
+	mu           sync.Mutex
+	sent         []*nodev1.CPMessage
+}
+
+func (n *blockedFirstOpenNode) Send(msg *nodev1.CPMessage) error {
+	if msg.GetOpen() != nil && n.calls.Add(1) == 1 {
+		close(n.firstEntered)
+		<-n.releaseFirst
+	}
+	n.mu.Lock()
+	n.sent = append(n.sent, msg)
+	n.mu.Unlock()
+	return nil
+}
+
+func TestReplacementOpenCompletesBeforeBlockedOlderPublication(t *testing.T) {
+	r := New()
+	node := &blockedFirstOpenNode{firstEntered: make(chan struct{}), releaseFirst: make(chan struct{})}
+	r.Bind("sp1", "node-1", node)
+	oldResult := make(chan AttachmentLease, 1)
+	go func() {
+		_, lease, _ := r.AttachClient("sp1", "0", "same", "alice", nil, &mcClient{}, 0, 7)
+		oldResult <- lease
+	}()
+	<-node.firstEntered
+
+	_, replacement, err := r.AttachClient("sp1", "0", "same", "alice", nil, &mcClient{}, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(node.releaseFirst)
+	old := <-oldResult
+
+	node.mu.Lock()
+	opens := make([]*nodev1.SessionOpen, 0, 2)
+	for _, msg := range node.sent {
+		if open := msg.GetOpen(); open != nil {
+			opens = append(opens, open)
+		}
+	}
+	node.mu.Unlock()
+	if len(opens) != 2 || opens[0].GetAttachmentId() != replacement.id || opens[1].GetAttachmentId() != old.id ||
+		opens[0].GetAttachmentSequence() <= opens[1].GetAttachmentSequence() {
+		t.Fatalf("published opens = %+v", opens)
+	}
+	if err := r.ReauthenticateClient("sp1", "0", "same", replacement, 7, "alice", &authv1.AuthEnvelope{}); err != nil {
+		t.Fatalf("replacement reauth: %v", err)
+	}
+}
+
 type mcNode struct {
 	mu   sync.Mutex
 	sent []*nodev1.CPMessage
+}
+
+func TestDelayedSupersededDetachPreservesReplacementAttachment(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	oldClient, replacement := &mcClient{}, &mcClient{}
+	oldDone, oldLease, err := r.AttachClient("sp1", "0", "same", "alice", nil, oldClient, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newDone, newLease, err := r.AttachClient("sp1", "0", "same", "alice", nil, replacement, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SessionAuthClosed("sp1", "0", "same", "node-1", 7, oldLease.id)
+	select {
+	case <-newDone:
+		t.Fatal("old node attachment incarnation closed replacement")
+	default:
+	}
+	select {
+	case <-oldDone:
+	default:
+		t.Fatal("replacement did not end superseded handler")
+	}
+	if err := r.ReauthenticateClient("sp1", "0", "same", oldLease, 7, "alice", &authv1.AuthEnvelope{AccessToken: "old"}); err == nil {
+		t.Fatal("superseded handler reauthenticated replacement")
+	}
+	if node.sent[len(node.sent)-1].GetSessionReauth() != nil {
+		t.Fatal("superseded reauth reached node")
+	}
+
+	r.DetachClient("sp1", "0", "same", oldLease)
+	r.FromNode("sp1", "0", "same", []byte("new"))
+	if replacement.count() != 1 || node.closes() != 0 {
+		t.Fatalf("old cleanup disturbed replacement: frames=%d closes=%d", replacement.count(), node.closes())
+	}
+	select {
+	case <-newDone:
+		t.Fatal("old cleanup closed replacement done channel")
+	default:
+	}
+
+	r.DetachClient("sp1", "0", "same", newLease)
+	if node.closes() != 1 {
+		t.Fatalf("current cleanup closes=%d, want 1", node.closes())
+	}
+	r.FromNode("sp1", "0", "same", []byte("dropped"))
+	if replacement.count() != 1 {
+		t.Fatal("current cleanup left replacement sender installed")
+	}
+}
+
+func TestNodeReauthRelayAndAddressedClose(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	aDone, aLease, err := r.AttachClient("sp1", "0", "a", "alice", nil, &mcClient{}, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDone, _, err := r.AttachClient("sp1", "0", "b", "alice", nil, &mcClient{}, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &authv1.AuthEnvelope{AccessToken: "opaque", Intent: &authv1.SignedIntent{Body: []byte("exact")}}
+	if err := r.ReauthenticateClient("sp1", "0", "a", aLease, 7, "alice", env); err != nil {
+		t.Fatal(err)
+	}
+	got := node.sent[len(node.sent)-1].GetSessionReauth()
+	if got == nil || got.GetAuth() != env || got.GetGeneration() != 7 || got.GetAssertedOwner() != "alice" {
+		t.Fatalf("reauth relay = %+v", got)
+	}
+	r.SessionAuthClosed("sp1", "0", "a", "foreign-node", 7, aLease.id)
+	select {
+	case <-aDone:
+		t.Fatal("foreign node closed attachment")
+	default:
+	}
+	r.SessionAuthClosed("sp1", "0", "a", "node-1", 6, aLease.id)
+	select {
+	case <-aDone:
+		t.Fatal("old generation closed newer attachment")
+	default:
+	}
+	r.SessionAuthClosed("sp1", "0", "a", "node-1", 7, aLease.id)
+	select {
+	case <-aDone:
+	default:
+		t.Fatal("addressed client not closed")
+	}
+	select {
+	case <-bDone:
+		t.Fatal("sibling client closed")
+	default:
+	}
 }
 
 func (n *mcNode) Send(m *nodev1.CPMessage) error {
@@ -65,10 +218,11 @@ func TestMultiClientFanoutAndPerClientRouting(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	a, b := &mcClient{}, &mcClient{}
-	if _, err := r.AttachClient("sp1", "0", "ca", "", nil, a, 0); err != nil {
+	_, leaseA, err := r.AttachClient("sp1", "0", "ca", "", nil, a, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.AttachClient("sp1", "0", "cb", "", nil, b, 7); err != nil {
+	if _, _, err := r.AttachClient("sp1", "0", "cb", "", nil, b, 7); err != nil {
 		t.Fatal(err)
 	}
 	opens := node.opens()
@@ -86,8 +240,8 @@ func TestMultiClientFanoutAndPerClientRouting(t *testing.T) {
 	if a.count() != 1 || b.count() != 1 {
 		t.Fatalf("routing: a=%d b=%d", a.count(), b.count())
 	}
-	r.DetachClient("sp1", "0", "ca")
-	r.DetachClient("sp1", "0", "ca") // stale detach: no-op
+	r.DetachClient("sp1", "0", "ca", leaseA)
+	r.DetachClient("sp1", "0", "ca", leaseA) // stale detach: no-op
 	if node.closes() != 1 {
 		t.Fatalf("stale detach should send exactly 1 Close, got %d", node.closes())
 	}
@@ -138,7 +292,7 @@ func TestRouteBothWays(t *testing.T) {
 	r.Bind("sp1", "n1", node)
 
 	cl := &fakeClient{}
-	done, err := r.AttachClient("sp1", "0", "c1", "", nil, cl, 0)
+	done, _, err := r.AttachClient("sp1", "0", "c1", "", nil, cl, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,10 +432,11 @@ func TestPerSessionClientRouting(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	s0, s1 := &mcClient{}, &mcClient{}
-	if _, err := r.AttachClient("sp1", "0", "shared", "", nil, s0, 0); err != nil {
+	if _, _, err := r.AttachClient("sp1", "0", "shared", "", nil, s0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.AttachClient("sp1", "1", "shared", "", nil, s1, 0); err != nil {
+	_, lease1, err := r.AttachClient("sp1", "1", "shared", "", nil, s1, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
 	r.FromNode("sp1", "0", "shared", []byte("for-0"))
@@ -293,10 +448,37 @@ func TestPerSessionClientRouting(t *testing.T) {
 		t.Fatalf("session #1 client must receive its own frame, got %d", s1.count())
 	}
 	// Detaching session #1 must not drop session #0's same-clientID sender.
-	r.DetachClient("sp1", "1", "shared")
+	r.DetachClient("sp1", "1", "shared", lease1)
 	r.FromNode("sp1", "0", "shared", []byte("still-0"))
 	if s0.count() != 2 {
 		t.Fatalf("session #0 must survive session #1 detach, got %d", s0.count())
+	}
+}
+
+func TestAttachExecClientRelaysImmutableRequestOnExplicitSession(t *testing.T) {
+	r := New()
+	node := &mcNode{}
+	r.Bind("sp1", "node-1", node)
+	req := &authv1.ExecRequest{Argv: []string{"printf", "original"}}
+	_, _, err := r.AttachExecClient("sp1", "exec-123", "client-1", "alice", &authv1.AuthEnvelope{}, req, &mcClient{}, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Argv[1] = "mutated"
+	opens := node.opens()
+	if len(opens) != 1 {
+		t.Fatalf("opens = %d, want 1", len(opens))
+	}
+	open := opens[0]
+	if open.GetSessionId() != "exec-123" || open.GetExecRequest().GetArgv()[1] != "original" {
+		t.Fatalf("exec SessionOpen changed: %+v", open)
+	}
+	if err := r.FromClient("sp1", "exec-123", "client-1", []byte("opaque")); err != nil {
+		t.Fatal(err)
+	}
+	last := node.sent[len(node.sent)-1].GetFrame()
+	if last.GetSessionId() != "exec-123" || string(last.GetData()) != "opaque" {
+		t.Fatalf("exec data escaped selected session: %+v", last)
 	}
 }
 
@@ -358,7 +540,10 @@ func TestFromNodeRelayMetrics(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp-n", "n1", node)
 	c := &mcClient{}
-	r.AttachClient("sp-n", "0", "c1", "", nil, c, 0)
+	_, lease, err := r.AttachClient("sp-n", "0", "c1", "", nil, c, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	payload := []byte("from-node-data")
 	beforeBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_node")
@@ -378,7 +563,7 @@ func TestFromNodeRelayMetrics(t *testing.T) {
 	}
 
 	// Detached client: frame dropped, counters must NOT increment.
-	r.DetachClient("sp-n", "0", "c1")
+	r.DetachClient("sp-n", "0", "c1", lease)
 	beforeDetachedBytes := gatherCounterValue(t, "spawnery_cp_relay_bytes_total", "direction", "from_node")
 	beforeDetachedFrames := gatherCounterValue(t, "spawnery_cp_relay_frames_total", "direction", "from_node")
 
@@ -417,7 +602,7 @@ func TestFromNodeEmptySessionRoutesToZero(t *testing.T) {
 	node := &mcNode{}
 	r.Bind("sp1", "node-1", node)
 	c := &mcClient{}
-	if _, err := r.AttachClient("sp1", "0", "shared", "", nil, c, 0); err != nil {
+	if _, _, err := r.AttachClient("sp1", "0", "shared", "", nil, c, 0); err != nil {
 		t.Fatal(err)
 	}
 	// FromNode with an EMPTY sessionID must reach the "0" client.

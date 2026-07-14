@@ -175,7 +175,7 @@ func TestForkCrossNodeOwnerSealedE2E(t *testing.T) {
 		subKeys: targetIdentity.subKeys,
 		rootPEM: targetIdentity.root,
 	})
-	fx.server.nodeKeys.put(targetID, targetIdentity.signedSubKey, targetIdentity.certChain)
+	fx.server.nodeKeys.put(targetID, 0, "cloud", "system", targetIdentity.signedSubKey, targetIdentity.certChain)
 
 	forkPoint := "cross-fork-point:" + spawnID
 	forkWriteFile(t, fx.mountPathOnNode(sourceID, spawnID, "fork-point.txt"), forkPoint)
@@ -445,7 +445,7 @@ func (fx *forkE2EStack) startNode(t *testing.T, rt runtime.ContainerRuntime, spe
 	t.Cleanup(stopNode)
 	go node.Run(nodeCtx, mgr, forkH2CClient(), node.Config{
 		NodeID: spec.id, CPURL: fx.cpURL, MaxSpawns: 4, AgentImage: "spawnery/stubagent:dev",
-		NodeClass: spec.class, NodeOwner: spec.owner, SubKeys: spec.subKeys, NodeRootPEM: spec.rootPEM,
+		NodeClass: spec.class, NodeOwner: spec.owner, SubKeys: spec.subKeys, NodeRootPEM: spec.rootPEM, NodeTrustDomain: pki.DefaultTrustDomain,
 	})
 
 	deadline := time.Now().Add(10 * time.Second)

@@ -1,15 +1,16 @@
 package node
 
 // intentverify_test.go covers the A4 node-side verification chain [AC1][AM12].
-// All tests are hermetic (in-memory key set, fake clock, no network).
+// All tests are hermetic (in-memory certified signer/root, fake clock, no network).
 
 import (
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -31,27 +32,18 @@ func genECDSA(t *testing.T) *ecdsa.PrivateKey {
 	return k
 }
 
-func genASKey(t *testing.T) (ed25519.PrivateKey, token.KeySet) {
+type testArtifactSigner struct{ *token.SigningCredential }
+
+func genASKey(t *testing.T) (testArtifactSigner, *token.Verifier) {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ks, err := token.NewKeySet(priv.Public().(ed25519.PublicKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return priv, ks
+	fixture := newArtifactFixture(t, time.Unix(1_770_000_000, 0), "prod")
+	return testArtifactSigner{fixture.credential}, fixture.verifier
 }
 
 // mintNodeToken mints an aud=node token for the given session key and account.
-func mintNodeToken(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySet, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time) string {
+func mintNodeToken(t *testing.T, asPriv testArtifactSigner, _ *token.Verifier, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time) string {
 	t.Helper()
 	spki, err := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyID, err := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,16 +54,25 @@ func mintNodeToken(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySet, ses
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spki),
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
-	wire, err := token.Mint(body, asPriv)
+	return mintSessionBody(t, asPriv, body)
+}
+
+func mintSessionBody(t *testing.T, signer testArtifactSigner, body *authv1.SessionTokenBody) string {
+	t.Helper()
+	payload, err := proto.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := signer.Sign(token.ArtifactTypeSession, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return wire
 }
 
-func buildIntentEnvelope(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySet, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time, body *authv1.IntentBody, op intent.Op) *authv1.AuthEnvelope {
+func buildIntentEnvelope(t *testing.T, asPriv testArtifactSigner, ks *token.Verifier, sessionKey *ecdsa.PrivateKey, accountID string, now time.Time, body *authv1.IntentBody, op intent.Op) *authv1.AuthEnvelope {
 	t.Helper()
 	nodeToken := mintNodeToken(t, asPriv, ks, sessionKey, accountID, now)
 	si, err := intent.Build(op, body, sessionKey)
@@ -81,13 +82,14 @@ func buildIntentEnvelope(t *testing.T, asPriv ed25519.PrivateKey, ks token.KeySe
 	return &authv1.AuthEnvelope{AccessToken: nodeToken, Intent: si}
 }
 
-func makeVerifier(t *testing.T, ks token.KeySet, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
+func makeVerifier(t *testing.T, ks *token.Verifier, nodeOwner, nodeID string, selfHosted bool, now func() time.Time) *IntentVerifier {
 	t.Helper()
-	return NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, AuthModeEnforced, now)
+	return NewIntentVerifier(ks, nodeOwner, nodeID, selfHosted, now)
 }
 
 func goodStartFields(spawnID, nodeID string, gen uint64) StartFields {
 	return StartFields{
+		Op:            intent.OpCreateSpawn,
 		SpawnID:       spawnID,
 		Generation:    gen,
 		AppRef:        "app/ref@sha256:abc",
@@ -111,6 +113,60 @@ func goodStartBody(spawnID, nodeID string, gen uint64, now time.Time) *authv1.In
 	}
 }
 
+func TestVerifyExecBindsExactRequestAndSession(t *testing.T) {
+	now := time.Unix(1_770_000_000, 0)
+	asPriv, artifacts := genASKey(t)
+	sessionKey := genECDSA(t)
+	baseReq := &authv1.ExecRequest{Argv: []string{"sh", "-lc", "printf exact"}}
+	baseFields := ExecFields{
+		SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: baseReq,
+	}
+	makeEnv := func(jti string, mutate func(*authv1.IntentBody)) *authv1.AuthEnvelope {
+		body := &authv1.IntentBody{
+			Jti: jti, IssuedAt: now.Unix(), SpawnId: "sp-exec", Generation: 7,
+			TargetNodeId: "node-1", SessionId: "exec-1", Op: string(intent.OpExecOpen),
+			ExecRequest: proto.Clone(baseReq).(*authv1.ExecRequest),
+		}
+		if mutate != nil {
+			mutate(body)
+		}
+		return buildIntentEnvelope(t, asPriv, artifacts, sessionKey, "alice", now, body, intent.OpExecOpen)
+	}
+
+	t.Run("valid then replay", func(t *testing.T) {
+		v := makeVerifier(t, artifacts, "", "node-1", false, func() time.Time { return now })
+		env := makeEnv("exec-valid", nil)
+		if _, nack, detail := v.VerifyExec(env, baseFields); nack != "" {
+			t.Fatalf("valid exec rejected: %s: %s", nack, detail)
+		}
+		if _, nack, _ := v.VerifyExec(env, baseFields); nack != NACKReplay {
+			t.Fatalf("replay nack = %s, want %s", nack, NACKReplay)
+		}
+	})
+
+	tests := []struct {
+		name   string
+		fields ExecFields
+		mutate func(*authv1.IntentBody)
+		want   NACKCode
+	}{
+		{name: "missing request", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice"}, want: NACKCorrespondence},
+		{name: "missing signed request", fields: baseFields, mutate: func(b *authv1.IntentBody) { b.ExecRequest = nil }, want: NACKCorrespondence},
+		{name: "argv substituted", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: &authv1.ExecRequest{Argv: []string{"sh", "-lc", "printf evil"}}}, want: NACKCorrespondence},
+		{name: "argv reordered", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "alice", Request: &authv1.ExecRequest{Argv: []string{"-lc", "sh", "printf exact"}}}, want: NACKCorrespondence},
+		{name: "generation mismatch", fields: ExecFields{SpawnID: "sp-exec", Generation: 8, SessionID: "exec-1", AssertedOwner: "alice", Request: baseReq}, want: NACKCorrespondence},
+		{name: "owner mismatch", fields: ExecFields{SpawnID: "sp-exec", Generation: 7, SessionID: "exec-1", AssertedOwner: "mallory", Request: baseReq}, want: NACKOwnerMismatch},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := makeVerifier(t, artifacts, "", "node-1", false, func() time.Time { return now })
+			if _, nack, _ := v.VerifyExec(makeEnv(fmt.Sprintf("exec-bad-%d", i), tt.mutate), tt.fields); nack != tt.want {
+				t.Fatalf("nack = %s, want %s", nack, tt.want)
+			}
+		})
+	}
+}
+
 // ---- tests -------------------------------------------------------------------
 
 func TestVerifyStartHappyPath(t *testing.T) {
@@ -126,7 +182,7 @@ func TestVerifyStartHappyPath(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AssertedOwner = "alice"
 
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != "" {
 		t.Fatalf("expected success, got nack=%s detail=%s", nack, detail)
 	}
@@ -149,9 +205,24 @@ func TestCorrespondenceSubstitutedImageRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.Image = "malicious@sha256:evil" // CP substituted image
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("substituted image: want NACKCorrespondence, got %q", nack)
+	}
+}
+
+func TestCorrespondenceSubstitutedAttachedSecretSetRefused(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	body.AttachedSecretIds = []string{"manifest-secret", "selected-secret"}
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
+	fields := goodStartFields("sp-1", "node-1", 1)
+	fields.AttachedSecretIDs = []string{"manifest-secret", "substituted-secret"}
+	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
+	if _, nack, _ := v.VerifyStart(env, fields); nack != NACKCorrespondence {
+		t.Fatalf("substituted attached secrets: got %q, want %q", nack, NACKCorrespondence)
 	}
 }
 
@@ -168,7 +239,7 @@ func TestCorrespondenceSubstitutedTargetRefused(t *testing.T) {
 	v := makeVerifier(t, ks, "alice", "node-different", false, clock) // but verifier is on node-different
 	fields := goodStartFields("sp-1", "node-different", 1)
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("substituted target: want NACKCorrespondence, got %q", nack)
 	}
@@ -188,7 +259,7 @@ func TestCorrespondenceSubstitutedGenerationRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.Generation = 2 // CP claims a different generation
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("substituted generation: want NACKCorrespondence, got %q", nack)
 	}
@@ -213,17 +284,16 @@ func TestCrossRestartJTIRefused(t *testing.T) {
 
 	// Build verifier with jtiCache seeded at processStart (cross-restart test).
 	v := &IntentVerifier{
-		keySet:     ks,
+		artifacts:  ks,
 		nodeOwner:  "alice",
 		nodeID:     "node-1",
 		selfHosted: false,
-		mode:       AuthModeEnforced,
 		now:        clock,
 		jtiCache:   intent.NewJTICache(func() time.Time { return processStart }),
 	}
 
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != NACKReplay && nack != NACKStale {
 		// Either REPLAY (jti predates process start) or STALE (too old) is acceptable —
 		// the freshness check (step 7) runs before jticache (step 8) when the age is large.
@@ -246,12 +316,12 @@ func TestDuplicateJTIRefused(t *testing.T) {
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 
 	// First admission must succeed.
-	if nack, detail := v.VerifyStart(env, fields); nack != "" {
+	if _, nack, detail := v.VerifyStart(env, fields); nack != "" {
 		t.Fatalf("first: want success, got %s: %s", nack, detail)
 	}
 
 	// Second admission of same jti must be refused.
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKReplay {
 		t.Fatalf("duplicate jti: want NACKReplay, got %q", nack)
 	}
@@ -272,7 +342,7 @@ func TestSkewRejectionReturnsNodeTime(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != NACKSkew {
 		t.Fatalf("future intent beyond SkewBudget: want NACKSkew, got %q", nack)
 	}
@@ -299,7 +369,7 @@ func TestFutureIntentWithinSkewBudgetAccepted(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != "" {
 		t.Fatalf("future intent within SkewBudget: want success, got nack=%s detail=%s", nack, detail)
 	}
@@ -321,7 +391,7 @@ func TestFutureIntentBeyondSkewBudgetRejected(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKSkew {
 		t.Fatalf("future intent beyond SkewBudget: want NACKSkew, got %q", nack)
 	}
@@ -342,7 +412,7 @@ func TestEnforcedCloudModeRejectsEmptyAssertedOwner(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AssertedOwner = "" // no asserted owner from CP
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKOwnerMismatch {
 		t.Fatalf("empty asserted_owner in enforced cloud mode: want NACKOwnerMismatch, got %q", nack)
 	}
@@ -363,32 +433,9 @@ func TestSelfHostedToleratesEmptyAssertedOwner(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.AssertedOwner = "" // intentionally empty
 
-	nack, detail := v.VerifyStart(env, fields)
+	_, nack, detail := v.VerifyStart(env, fields)
 	if nack != "" {
 		t.Fatalf("empty asserted_owner in self-hosted mode: want success, got nack=%s detail=%s", nack, detail)
-	}
-}
-
-// Insecure (verify-and-log) mode must log the failure but NOT enforce it [AM12].
-func TestInsecureModeLogsNotEnforces(t *testing.T) {
-	asPriv, ks := genASKey(t)
-	sessionKey := genECDSA(t)
-	now := time.Unix(1_770_000_000, 0)
-	clock := func() time.Time { return now }
-
-	// Use a WRONG image in correspondence so verification would fail in enforced mode.
-	body := goodStartBody("sp-1", "node-1", 1, now)
-	body.Image = "img@sha256:signed"
-	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpCreateSpawn)
-
-	v := NewIntentVerifier(ks, "alice", "node-1", false, AuthModeVerifyLog, clock)
-	fields := goodStartFields("sp-1", "node-1", 1)
-	fields.Image = "img@sha256:SUBSTITUTED" // correspondence mismatch
-
-	// In verify-and-log mode: no NACK returned even though correspondence fails.
-	nack, _ := v.VerifyStart(env, fields)
-	if nack != "" {
-		t.Fatalf("verify-and-log mode must not return NACK, got %q", nack)
 	}
 }
 
@@ -402,7 +449,6 @@ func TestCNFMismatch(t *testing.T) {
 
 	// Token's cnf is bound to sessionKey, but intent will use differentKey's SPKI.
 	spki, _ := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	keyID, _ := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	cnfHash := sha256.Sum256(spki)
 	tokenBody := &authv1.SessionTokenBody{
 		AccountId:      "alice",
@@ -411,9 +457,9 @@ func TestCNFMismatch(t *testing.T) {
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: cnfHash[:],
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
-	nodeTok, _ := token.Mint(tokenBody, asPriv)
+	nodeTok := mintSessionBody(t, asPriv, tokenBody)
 
 	// Sign the intent with differentKey (SPKI won't match token's cnf).
 	body := goodStartBody("sp-1", "node-1", 1, now)
@@ -422,7 +468,7 @@ func TestCNFMismatch(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCNFMismatch {
 		t.Fatalf("CNF mismatch: want NACKCNFMismatch, got %q", nack)
 	}
@@ -437,7 +483,6 @@ func TestWrongAudienceRefused(t *testing.T) {
 
 	// Mint a token with aud=cp (not aud=node).
 	spki, _ := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	keyID, _ := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	tokenBody := &authv1.SessionTokenBody{
 		AccountId:      "alice",
 		TokenId:        "tok-cp",
@@ -445,9 +490,9 @@ func TestWrongAudienceRefused(t *testing.T) {
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spki),
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
-	cpTok, _ := token.Mint(tokenBody, asPriv)
+	cpTok := mintSessionBody(t, asPriv, tokenBody)
 
 	body := goodStartBody("sp-1", "node-1", 1, now)
 	si, _ := intent.Build(intent.OpCreateSpawn, body, sessionKey)
@@ -455,7 +500,7 @@ func TestWrongAudienceRefused(t *testing.T) {
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKWrongAudience {
 		t.Fatalf("wrong aud: want NACKWrongAudience, got %q", nack)
 	}
@@ -475,13 +520,13 @@ func TestSelfHostedOwnerEnforcement(t *testing.T) {
 	// Self-hosted verifier also owned by alice -> should pass.
 	v := makeVerifier(t, ks, "alice", "node-1", true, clock)
 	fields := goodStartFields("sp-1", "node-1", 1)
-	if nack, _ := v.VerifyStart(env, fields); nack != "" {
+	if _, nack, _ := v.VerifyStart(env, fields); nack != "" {
 		t.Fatalf("self-hosted same-owner: want success, got %q", nack)
 	}
 
 	// Self-hosted verifier owned by bob but token says alice -> should fail.
 	v2 := makeVerifier(t, ks, "bob", "node-1", true, clock)
-	nack, _ := v2.VerifyStart(env, fields)
+	_, nack, _ := v2.VerifyStart(env, fields)
 	if nack != NACKOwnerMismatch {
 		t.Fatalf("self-hosted different-owner: want NACKOwnerMismatch, got %q", nack)
 	}
@@ -504,7 +549,7 @@ func TestCorrespondenceSignedNonEmptyExecEmptyRefused(t *testing.T) {
 	fields := goodStartFields("sp-1", "node-1", 1)
 	fields.Image = "" // CP sends empty — previously would skip the check, now must fail
 
-	nack, _ := v.VerifyStart(env, fields)
+	_, nack, _ := v.VerifyStart(env, fields)
 	if nack != NACKCorrespondence {
 		t.Fatalf("signed non-empty vs exec empty: want NACKCorrespondence, got %q", nack)
 	}
@@ -515,7 +560,7 @@ func TestNilEnvelopeEnforcedMode(t *testing.T) {
 	_, ks := genASKey(t)
 	clock := func() time.Time { return time.Unix(1_770_000_000, 0) }
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
-	nack, _ := v.VerifyStart(nil, goodStartFields("sp-1", "node-1", 1))
+	_, nack, _ := v.VerifyStart(nil, goodStartFields("sp-1", "node-1", 1))
 	if nack != NACKMissingIntent {
 		t.Fatalf("nil envelope enforced: want NACKMissingIntent, got %q", nack)
 	}
@@ -538,7 +583,6 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 		SessionId:    "sess-a",
 	}
 	spki, _ := x509.MarshalPKIXPublicKey(&sessionKey.PublicKey)
-	keyID, _ := token.KeyID(asPriv.Public().(ed25519.PublicKey))
 	tokenBody := &authv1.SessionTokenBody{
 		AccountId:      "alice",
 		TokenId:        "tok-open",
@@ -546,17 +590,134 @@ func TestVerifyOpenHappyPath(t *testing.T) {
 		IssuedAt:       now.Unix(),
 		ExpiresAt:      now.Add(15 * time.Minute).Unix(),
 		SessionKeyHash: token.SessionKeyHash(spki),
-		KeyId:          keyID,
+		KeyId:          hex.EncodeToString(asPriv.KeyID[:]),
 	}
-	nodeTok, _ := token.Mint(tokenBody, asPriv)
+	nodeTok := mintSessionBody(t, asPriv, tokenBody)
 	si, _ := intent.Build(intent.OpSessionOpen, body, sessionKey)
 	env := &authv1.AuthEnvelope{AccessToken: nodeTok, Intent: si}
 
 	v := makeVerifier(t, ks, "alice", "node-1", false, clock)
 	fields := OpenFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"}
-	nack, detail := v.VerifyOpen(env, fields)
+	auth, nack, detail := v.VerifyOpen(env, fields)
 	if nack != "" {
 		t.Fatalf("open happy path: want success, got nack=%s detail=%s", nack, detail)
+	}
+	if auth.AccountID != "alice" || auth.TokenID != "tok-open" || auth.IssuedAt != now.Unix() || !auth.ExpiresAt.Equal(now.Add(15*time.Minute)) || len(auth.SessionKeyHash) != sha256.Size {
+		t.Fatalf("authorization = %+v", auth)
+	}
+}
+
+type cutoffUserRevocationLookup struct {
+	explicitToken string
+	accountID     string
+	cutoff        int64
+}
+
+func (r cutoffUserRevocationLookup) IsRevoked(tokenID, accountID string, issuedAt int64) bool {
+	return tokenID == r.explicitToken || (accountID == r.accountID && issuedAt < r.cutoff)
+}
+
+func TestIntentVerifierEnforcesExplicitTokensAndExclusiveAccountCutoffForEveryOperation(t *testing.T) {
+	now := time.Unix(1_770_000_000, 0)
+	operations := []struct {
+		name string
+		op   intent.Op
+	}{{"start", intent.OpCreateSpawn}, {"open", intent.OpSessionOpen}, {"reauth", intent.OpSessionReauth}}
+	cases := []struct {
+		name          string
+		issuedAt      time.Time
+		explicitToken string
+		wantRejected  bool
+	}{
+		{name: "explicit", issuedAt: now.Add(time.Second), explicitToken: "tok-test", wantRejected: true},
+		{name: "before cutoff", issuedAt: now.Add(-time.Second), wantRejected: true},
+		{name: "at cutoff", issuedAt: now},
+		{name: "after cutoff", issuedAt: now.Add(time.Second)},
+	}
+	for _, operation := range operations {
+		for _, test := range cases {
+			t.Run(operation.name+"/"+test.name, func(t *testing.T) {
+				signer, artifacts := genASKey(t)
+				sessionKey := genECDSA(t)
+				var body *authv1.IntentBody
+				switch operation.op {
+				case intent.OpCreateSpawn:
+					body = goodStartBody("sp-1", "node-1", 1, now)
+				case intent.OpSessionOpen:
+					body = &authv1.IntentBody{Jti: "jti-open", IssuedAt: now.Unix(), Op: string(operation.op), SpawnId: "sp-1", Generation: 1, SessionId: "sess-a", TargetNodeId: "node-1"}
+				case intent.OpSessionReauth:
+					body = &authv1.IntentBody{Jti: "jti-reauth", IssuedAt: now.Unix(), Op: string(operation.op), SpawnId: "sp-1", Generation: 1, SessionId: "sess-a", TargetNodeId: "node-1", NewTokenId: "tok-test"}
+				}
+				env := buildIntentEnvelope(t, signer, artifacts, sessionKey, "alice", test.issuedAt, body, operation.op)
+				lookup := cutoffUserRevocationLookup{explicitToken: test.explicitToken, accountID: "alice", cutoff: now.Unix()}
+				verifier := NewIntentVerifier(artifacts, "alice", "node-1", false, func() time.Time { return now }, lookup)
+				var nack NACKCode
+				switch operation.op {
+				case intent.OpCreateSpawn:
+					_, nack, _ = verifier.VerifyStart(env, goodStartFields("sp-1", "node-1", 1))
+				case intent.OpSessionOpen:
+					_, nack, _ = verifier.VerifyOpen(env, OpenFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"})
+				case intent.OpSessionReauth:
+					_, nack, _ = verifier.VerifyReauth(env, ReauthFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"})
+				}
+				if gotRejected := nack == NACKTokenInvalid; gotRejected != test.wantRejected {
+					t.Fatalf("nack=%q rejected=%v want=%v", nack, gotRejected, test.wantRejected)
+				}
+			})
+		}
+	}
+}
+
+func TestVerifyReauthRequiresReplacementTokenID(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	body := &authv1.IntentBody{
+		Jti: "jti-reauth", IssuedAt: now.Unix(), SpawnId: "sp-1", Generation: 1,
+		TargetNodeId: "node-1", Op: string(intent.OpSessionReauth), SessionId: "sess-a",
+		NewTokenId: "wrong-token",
+	}
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpSessionReauth)
+	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
+	_, nack, _ := v.VerifyReauth(env, ReauthFields{SpawnID: "sp-1", Generation: 1, SessionID: "sess-a", AssertedOwner: "alice"})
+	if nack != NACKCorrespondence {
+		t.Fatalf("replacement token mismatch = %q", nack)
+	}
+}
+
+func TestVerifyStartRejectsWrongOperationDomain(t *testing.T) {
+	asPriv, ks := genASKey(t)
+	sessionKey := genECDSA(t)
+	now := time.Unix(1_770_000_000, 0)
+	body := goodStartBody("sp-1", "node-1", 1, now)
+	body.Op = string(intent.OpResumeSpawn)
+	env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, intent.OpResumeSpawn)
+	v := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now })
+	_, nack, _ := v.VerifyStart(env, goodStartFields("sp-1", "node-1", 1))
+	if nack != NACKCorrespondence {
+		t.Fatalf("wrong operation = %q", nack)
+	}
+}
+
+func TestVerifyStartAcceptsExactLifecycleOperation(t *testing.T) {
+	for _, op := range []intent.Op{
+		intent.OpCreateSpawn, intent.OpResumeSpawn, intent.OpRecreateSpawn,
+		intent.OpMigrateSpawn, intent.OpForkSpawn,
+	} {
+		t.Run(string(op), func(t *testing.T) {
+			asPriv, ks := genASKey(t)
+			sessionKey := genECDSA(t)
+			now := time.Unix(1_770_000_000, 0)
+			body := goodStartBody("sp-1", "node-1", 1, now)
+			body.Op = string(op)
+			env := buildIntentEnvelope(t, asPriv, ks, sessionKey, "alice", now, body, op)
+			fields := goodStartFields("sp-1", "node-1", 1)
+			fields.Op = op
+			auth, nack, detail := makeVerifier(t, ks, "alice", "node-1", false, func() time.Time { return now }).VerifyStart(env, fields)
+			if nack != "" || auth.AccountID != "alice" {
+				t.Fatalf("authorization=%+v nack=%s detail=%s", auth, nack, detail)
+			}
+		})
 	}
 }
 

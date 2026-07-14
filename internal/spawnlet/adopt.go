@@ -110,6 +110,7 @@ func (m *Manager) ReapPod(ctx context.Context, mp runtime.ManagedPod) error {
 // owner-sealed ciphertext it cannot open).
 type AdoptSpec struct {
 	AppRef     string
+	OwnerID    string
 	Model      string
 	Name       string
 	AppID      string
@@ -281,7 +282,7 @@ func (m *Manager) Adopt(ctx context.Context, mp runtime.ManagedPod, spec AdoptSp
 	}
 
 	sp = &Spawn{
-		ID: id, Generation: mp.Generation,
+		ID: id, OwnerID: spec.OwnerID, Generation: mp.Generation,
 		SidecarID: mp.SidecarID, AgentID: mp.AgentID, SandboxID: mp.SandboxID,
 		MountDirs:       mt.mountDirs,
 		MountBindings:   append([]MountBinding(nil), spec.Mounts...),

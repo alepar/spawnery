@@ -1,10 +1,9 @@
 /**
  * Session access-token wire format (auth-identity design §3 [MC1]).
  *
- * Wire: base64url(body_bytes) "." base64url(sig_bytes) — RawURLEncoding (no padding).
- * Body = proto3 SessionTokenBody, decoded with protobuf-es (via @spawnery/client's generated
- * gen/auth/v1/auth_pb). The SPA only READS the body; the AS signs it (Ed25519).
- * The SPA does NOT verify the Ed25519 sig — the CP verifies on every RPC (MC2).
+ * Wire: one unpadded base64url SignedAuthArtifact protobuf envelope. The SPA decodes envelope
+ * metadata and the exact SessionTokenBody payload. It does not verify certificates or signatures;
+ * the CP performs root-anchored verification on every RPC.
  *
  * Fields read by the SPA:
  *   f1 account_id (string)
@@ -15,26 +14,44 @@
 
 import { fromBinary } from "@bufbuild/protobuf";
 import { authv1, toBase64Url, fromBase64Url } from "@spawnery/client";
+import { bytesEqual } from "@/keys/encoding";
 
 export { toBase64Url, fromBase64Url };
 
 // ── Wire parsing ──────────────────────────────────────────────────────────────
 
 export interface TokenParts {
-  bodyBytes: Uint8Array;
-  sigBytes: Uint8Array;
+  artifactType: string;
+  payloadBytes: Uint8Array;
+  signatureBytes: Uint8Array;
+  signerChain: Uint8Array[];
+  keyId: Uint8Array;
 }
 
 /**
- * parseTokenWire splits the wire token "base64url(body).base64url(sig)".
- * Does NOT verify the sig — that is the CP's job (MC2).
+ * parseTokenWire decodes the self-describing envelope without treating its metadata as trusted.
  */
 export function parseTokenWire(wire: string): TokenParts {
-  const dot = wire.indexOf(".");
-  if (dot < 0) throw new Error("token: malformed wire (no dot)");
+  if (wire.length === 0 || wire.includes(".")) throw new Error("token: malformed envelope");
+  let artifact;
+  try {
+    artifact = fromBinary(authv1.SignedAuthArtifactSchema, fromBase64Url(wire));
+  } catch {
+    throw new Error("token: malformed envelope");
+  }
+  if (artifact.artifactType !== "session-token") {
+    throw new Error(`token: unexpected artifact type ${JSON.stringify(artifact.artifactType)}`);
+  }
+  if (artifact.payload.length === 0 || artifact.signature.length !== 64 ||
+      artifact.signerChain.length === 0 || artifact.keyId.length !== 32) {
+    throw new Error("token: malformed envelope");
+  }
   return {
-    bodyBytes: fromBase64Url(wire.slice(0, dot)),
-    sigBytes: fromBase64Url(wire.slice(dot + 1)),
+    artifactType: artifact.artifactType,
+    payloadBytes: artifact.payload,
+    signatureBytes: artifact.signature,
+    signerChain: artifact.signerChain,
+    keyId: artifact.keyId,
   };
 }
 
@@ -43,6 +60,9 @@ export function parseTokenWire(wire: string): TokenParts {
 export interface SessionTokenBodyDecoded {
   accountId: string;
   handle: string;
+  tokenId: string;
+  audience: string;
+  familyId: string;
   expiresAt: bigint; // unix seconds as BigInt (WM10: avoid float precision loss)
   sessionKeyHash: Uint8Array; // 32-byte SHA-256 of DER SPKI
 }
@@ -56,13 +76,56 @@ export function decodeSessionTokenBody(bodyBytes: Uint8Array): SessionTokenBodyD
   return {
     accountId: body.accountId,
     handle: body.handle,
+    tokenId: body.tokenId,
+    audience: body.audience,
+    familyId: body.familyId,
     expiresAt: body.expiresAt,
     sessionKeyHash: body.sessionKeyHash,
   };
 }
 
-/** parseAccessToken is a convenience wrapper over parseTokenWire + decodeSessionTokenBody. */
+/** parseAccessToken decodes the session body from the envelope's exact payload bytes. */
 export function parseAccessToken(wire: string): SessionTokenBodyDecoded & { bodyBytes: Uint8Array } {
-  const { bodyBytes } = parseTokenWire(wire);
-  return { ...decodeSessionTokenBody(bodyBytes), bodyBytes };
+  const { payloadBytes } = parseTokenWire(wire);
+  return { ...decodeSessionTokenBody(payloadBytes), bodyBytes: payloadBytes };
+}
+
+export interface AccessTokenPair {
+  cpAccessToken: string;
+  nodeAccessToken: string;
+}
+
+export interface ValidatedAccessTokenPair {
+  pair: AccessTokenPair;
+  cp: SessionTokenBodyDecoded;
+  node: SessionTokenBodyDecoded;
+  accountId: string;
+  expiresAt: bigint;
+}
+
+/** Validate the paired credentials before either credential enters application state. */
+export function validateAccessTokenPair(
+  pair: AccessTokenPair,
+  localSpkiHash?: Uint8Array,
+): ValidatedAccessTokenPair {
+  if (!pair.cpAccessToken || !pair.nodeAccessToken) throw new Error("token pair: incomplete");
+  const cp = parseAccessToken(pair.cpAccessToken);
+  const node = parseAccessToken(pair.nodeAccessToken);
+  if (cp.audience !== "cp" || node.audience !== "node") {
+    throw new Error("token pair: invalid audiences");
+  }
+  if (!cp.accountId || cp.accountId !== node.accountId) throw new Error("token pair: account mismatch");
+  if (!cp.familyId || cp.familyId !== node.familyId) throw new Error("token pair: family mismatch");
+  if (!cp.tokenId || !node.tokenId || cp.tokenId === node.tokenId) {
+    throw new Error("token pair: invalid token IDs");
+  }
+  if (cp.expiresAt <= 0n || cp.expiresAt !== node.expiresAt) throw new Error("token pair: expiry mismatch");
+  if (cp.sessionKeyHash.length !== 32 || node.sessionKeyHash.length !== 32 ||
+      !bytesEqual(cp.sessionKeyHash, node.sessionKeyHash)) {
+    throw new Error("token pair: session key mismatch");
+  }
+  if (localSpkiHash && (localSpkiHash.length !== 32 || !bytesEqual(cp.sessionKeyHash, localSpkiHash))) {
+    throw new Error("token pair: local session key mismatch");
+  }
+  return { pair, cp, node, accountId: cp.accountId, expiresAt: cp.expiresAt };
 }

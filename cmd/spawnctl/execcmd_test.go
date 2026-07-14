@@ -2,70 +2,56 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"spawnery/internal/execstream"
+	"spawnery/internal/client"
 )
 
-func TestRunExecDemuxesAndReturnsExitCode(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/exec" {
-			t.Errorf("path = %q, want /exec", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("spawn"); got != "sp-123" {
-			t.Errorf("spawn = %q, want sp-123", got)
-		}
-		var body struct {
-			Cmd []string `json:"cmd"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode body: %v", err)
-		}
-		if len(body.Cmd) != 2 || body.Cmd[0] != "echo" {
-			t.Errorf("cmd = %v, want [echo hi]", body.Cmd)
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = execstream.WriteFrame(w, execstream.Stdout, []byte("hello\n"))
-		_ = execstream.WriteFrame(w, execstream.Stderr, []byte("warn\n"))
-		_ = execstream.WriteExit(w, 3)
-	}))
-	defer srv.Close()
+type fakeAuthenticatedExecClient struct {
+	spawn string
+	argv  []string
+	code  int
+	err   error
+}
 
-	var out, errb bytes.Buffer
-	code, err := runExec(srv.URL, "sp-123", []string{"echo", "hi"}, &out, &errb)
+func (f *fakeAuthenticatedExecClient) Exec(_ context.Context, spawn string, argv []string, stdout, stderr io.Writer) (int, error) {
+	f.spawn = spawn
+	f.argv = append([]string(nil), argv...)
+	_, _ = io.WriteString(stdout, "hello\n")
+	_, _ = io.WriteString(stderr, "warn\n")
+	return f.code, f.err
+}
+
+func TestRunExecUsesAuthenticatedClientAndPreservesExit(t *testing.T) {
+	fake := &fakeAuthenticatedExecClient{code: 37}
+	var stdout, stderr bytes.Buffer
+	code, err := runExec(context.Background(), fake, "sp-123", []string{"echo", "hi"}, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("runExec: %v", err)
+		t.Fatal(err)
 	}
-	if code != 3 {
-		t.Fatalf("exit code = %d, want 3", code)
+	if code != 37 || fake.spawn != "sp-123" || strings.Join(fake.argv, " ") != "echo hi" {
+		t.Fatalf("exec = code %d spawn %q argv %v", code, fake.spawn, fake.argv)
 	}
-	if out.String() != "hello\n" {
-		t.Fatalf("stdout = %q, want %q", out.String(), "hello\n")
-	}
-	if errb.String() != "warn\n" {
-		t.Fatalf("stderr = %q, want %q", errb.String(), "warn\n")
+	if stdout.String() != "hello\n" || stderr.String() != "warn\n" {
+		t.Fatalf("output = %q / %q", stdout.String(), stderr.String())
 	}
 }
 
-func TestRunExecNon200IsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "spawn not found: sp-x", http.StatusNotFound)
-	}))
-	defer srv.Close()
+func TestExecCommandHasNoDirectNodeAddress(t *testing.T) {
+	cmd := execCmd()
+	for _, flag := range cmd.Flags {
+		if flag.Names()[0] == "addr" {
+			t.Fatal("production exec still exposes direct node -addr")
+		}
+	}
+}
 
-	code, err := runExec(srv.URL, "sp-x", []string{"true"}, io.Discard, io.Discard)
-	if err == nil {
-		t.Fatalf("runExec returned nil error for a non-200 response")
-	}
-	if code == 0 {
-		t.Fatalf("exit code = 0 for a non-200 response, want non-zero")
-	}
-	if !strings.Contains(err.Error(), "spawn not found") {
-		t.Fatalf("error = %v, want it to contain the node's message", err)
+func TestExecClientFactoryRequiresNodeAuthorization(t *testing.T) {
+	_, err := buildAuthenticatedExecClient("http://cp.invalid", &cpTokenSource{staticToken: "cp-only"}, client.TargetTrust{})
+	if err == nil || !strings.Contains(err.Error(), "node authorization") {
+		t.Fatalf("CP-only client error = %v", err)
 	}
 }

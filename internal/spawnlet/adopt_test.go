@@ -68,7 +68,7 @@ func TestAdoptRebuildsSpawnWithoutRepreparingMounts(t *testing.T) {
 	}
 
 	got, err := m2.Adopt(ctx, pods[0], AdoptSpec{
-		AppRef: "../../examples/secret-app", Model: "model", Name: "friendly", AppID: "app1",
+		AppRef: "../../examples/secret-app", OwnerID: "alice", Model: "model", Name: "friendly", AppID: "app1",
 	})
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
@@ -76,6 +76,9 @@ func TestAdoptRebuildsSpawnWithoutRepreparingMounts(t *testing.T) {
 
 	if got.ID != "sp1" || got.Generation != 3 {
 		t.Fatalf("adopted spawn = %s gen %d, want sp1 gen 3", got.ID, got.Generation)
+	}
+	if owner, generation, ok := m2.SpawnOwnerGeneration("sp1"); !ok || owner != "alice" || generation != 3 {
+		t.Fatalf("adopted owner snapshot = %q/%d/%v, want alice/3/true", owner, generation, ok)
 	}
 	if got.AgentID != pods[0].AgentID || got.SidecarID != pods[0].SidecarID || got.PodIP != pods[0].PodIP {
 		t.Fatalf("adopted ids/IP = %+v, want %+v", got, pods[0])

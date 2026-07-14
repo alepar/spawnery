@@ -12,24 +12,30 @@ export { ConnectError, Code } from "@connectrpc/connect";
 export { SpawnClient, type SpawnClientOptions, type ForkOptions } from "./client.js";
 export { createTransport, type AuthProvider, type TransportOptions } from "./transport.js";
 export type { KeyStore, SessionKeyPair } from "./keystore.js";
+export { WebCryptoSessionSigner, type SessionSigner } from "./signing/sessionSigner.js";
 
 export {
   domainForOp,
   buildIntentBodyBytes,
   buildSignedIntent,
   buildSessionOpenSignedIntentB64,
+  buildSessionReauthSignedIntentB64,
   pollAndSign,
   registerPendedOp,
   clearPendedOp,
   type IntentFields,
   type PendedOp,
   type PollAndSignDeps,
+  type ResolvedTarget,
+  type ResolvedTargetVerifier,
+  type SessionReauthFields,
   DOMAIN_CREATE_SPAWN,
   DOMAIN_RESUME_SPAWN,
   DOMAIN_RECREATE_SPAWN,
   DOMAIN_MIGRATE_SPAWN,
   DOMAIN_FORK_SPAWN,
   DOMAIN_SESSION_OPEN,
+  DOMAIN_SESSION_REAUTH,
 } from "./signing/intent.js";
 
 export { buildPoP, POP_DOMAIN, type PoPHeaders } from "./signing/pop.js";

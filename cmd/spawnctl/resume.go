@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	"spawnery/internal/client"
 
@@ -25,6 +27,11 @@ func resumeCmd() *cli.Command {
 			configDirFlag(),
 			&cli.StringFlag{Name: "cp", Value: "http://127.0.0.1:8080", Usage: "control-plane address"},
 			&cli.StringFlag{Name: "token", Value: "dev-token", Usage: "dev auth token (CP); superseded by stored login credentials"},
+			&cli.StringFlag{Name: "root-ca", Usage: "path to the pinned Root CA PEM"},
+			&cli.StringFlag{Name: "trust-domain", Usage: "expected SPIFFE trust domain"},
+			&cli.StringFlag{Name: "crl-state", Usage: "persistent certificate revocation checkpoint"},
+			&cli.StringSliceFlag{Name: "crl-issuer", Usage: "trusted issuing-intermediate PEM (repeatable)"},
+			&cli.StringSliceFlag{Name: "crl", Usage: "current signed CRL PEM (repeatable)"},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 1 {
@@ -36,7 +43,18 @@ func resumeCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			src := buildTokenSource(dir, c.String("token"), connectClient())
-			sdk := client.New(c.String("cp"), src, nil, client.WithWarnHandler(func(err error) {
+			opts, err := loadMoveOptions(dir, c.String("token"), strings.TrimSpace(c.String("root-ca")), strings.TrimSpace(c.String("trust-domain")), strings.TrimSpace(c.String("crl-state")), c.StringSlice("crl-issuer"), c.StringSlice("crl"), time.Now)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if opts.CloseCertificateRevocations != nil {
+				defer func() { _ = opts.CloseCertificateRevocations() }()
+			}
+			trust, err := targetTrustFromMoveOptions(opts)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			sdk := client.New(c.String("cp"), src, nil, client.WithNodeAuthorization(src, trust), client.WithWarnHandler(func(err error) {
 				log.Printf("%v", err)
 			}))
 			// ResumeSpawn blocks at the CP awaiting the signed intent; Resume drives pollAndSign
