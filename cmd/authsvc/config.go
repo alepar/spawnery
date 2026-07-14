@@ -71,6 +71,9 @@ type AS struct {
 
 	RegistrationEnabled bool `koanf:"registration_enabled"`
 	MaxFamilies         int  `koanf:"max_families" validate:"min=1"`
+	RateLimits          struct {
+		DevicePerMin int `koanf:"device_per_min" validate:"min=1"`
+	} `koanf:"rate_limits"`
 
 	CP struct {
 		URL        string `koanf:"url"`
@@ -282,6 +285,7 @@ var asEnvAliases = map[string]string{
 	"AS_VERIFICATION_URI":                     "verification_uri",
 	"REGISTRATION_ENABLED":                    "registration_enabled",
 	"AS_MAX_FAMILIES":                         "max_families",
+	"AS_DEVICE_PER_MIN":                       "rate_limits.device_per_min",
 	"AS_CP_URL":                               "cp.url",
 	"AS_CP_SERVER_NAME":                       "cp.server_name",
 }
