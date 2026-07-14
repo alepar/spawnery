@@ -58,8 +58,9 @@ vm_ssh "$IP" 'sudo install -m0755 ~/incoming/bin/spawnery-ca /usr/local/bin/spaw
   && sudo cp -f ~/incoming/provision/env/common.env /etc/spawnery/env.d/common.env.tmpl \
   && sudo cp -f ~/incoming/provision/env/profile.*.env /etc/spawnery/env.d/ \
   && sudo sh -c '\''for f in /etc/spawnery/env.d/profile.*.env; do mv -f "$f" "$f.tmpl"; done'\'' \
-  && sudo install -d -m0755 /etc/systemd/system/spawnery-node.service.d \
-  && printf '\''%s\n'\'' '\''[Service]'\'' '\''UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN'\'' | sudo tee /etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf >/dev/null \
+  && sudo install -d -m0755 /etc/systemd/system/spawnery-cp.service.d /etc/systemd/system/spawnery-node.service.d \
+  && printf '\''%s\n'\'' '\''[Service]'\'' '\''InaccessiblePaths=-/etc/spawnery/env.d/gitea.env'\'' | sudo tee /etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf >/dev/null \
+  && printf '\''%s\n'\'' '\''[Service]'\'' '\''UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN'\'' '\''InaccessiblePaths=-/etc/spawnery/env.d/gitea.env'\'' | sudo tee /etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf >/dev/null \
   && sudo systemctl daemon-reload \
   && sudo systemctl restart spawnery-render-env'
 

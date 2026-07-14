@@ -392,12 +392,13 @@ if rg -n '^[[:space:]]*(GITHUB_API_BASE_URL|GITHUB_HOST|GITHUB_STATIC_TOKEN|GITH
 fi
 
 authsvc_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-authsvc.service/,/^EOF$/p' "$provision")"
+cp_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-cp.service/,/^EOF$/p' "$provision")"
 node_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-node.service/,/^EOF$/p' "$provision")"
 [[ "$(printf '%s\n' "$authsvc_unit" | rg -c '^EnvironmentFile=-/etc/spawnery/env.d/gitea.env$')" == 1 ]] || {
   echo "fresh authsvc unit does not consume the private Gitea environment exactly once" >&2
   exit 1
 }
-if printf '%s\n' "$node_unit" | rg -q 'gitea.env'; then
+if printf '%s\n' "$node_unit" | rg -q '^EnvironmentFile=.*gitea.env$'; then
   echo "fresh spawnlet unit still consumes the private Gitea environment" >&2
   exit 1
 fi
@@ -405,6 +406,24 @@ printf '%s\n' "$node_unit" | rg -q '^UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB
   echo "fresh spawnlet unit lacks the GitHub secret environment fence" >&2
   exit 1
 }
+if printf '%s\n' "$authsvc_unit" | rg -q '^InaccessiblePaths=.* -?/etc/spawnery/env.d/gitea.env(?: |$)'; then
+  echo "fresh authsvc unit cannot read its private fake-provider token" >&2
+  exit 1
+fi
+for private_unit in cp node; do
+  case "$private_unit" in
+    cp) unit_text="$cp_unit" ;;
+    node) unit_text="$node_unit" ;;
+  esac
+  printf '%s\n' "$unit_text" | rg -q '^InaccessiblePaths=.*(?:^| )-?/etc/spawnery/env.d/gitea.env(?: |$)' || {
+    echo "fresh ${private_unit} unit can read authsvc's private Gitea environment" >&2
+    exit 1
+  }
+  printf '%s\n' "$unit_text" | rg -q '^CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE$' || {
+    echo "fresh ${private_unit} unit lost the CAP_SYS_ADMIN denial required by the file sandbox" >&2
+    exit 1
+  }
+done
 
 roll="$REPO/scripts/e2e-vm/roll.sh"
 rg -Fq '/etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf' "$roll" || {
@@ -415,12 +434,30 @@ rg -Fq 'UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GI
   echo "roll.sh drop-in does not clear every legacy broad Gitea credential" >&2
   exit 1
 }
+rg -Fq '/etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf' "$roll" || {
+  echo "roll.sh does not install the CP Gitea custody fence drop-in" >&2
+  exit 1
+}
+[[ "$(rg -Foc 'InaccessiblePaths=-/etc/spawnery/env.d/gitea.env' "$roll")" == 2 ]] || {
+  echo "roll.sh must hide the Gitea environment from both CP and spawnlet" >&2
+  exit 1
+}
 daemon_reload_line="$(rg -n 'systemctl daemon-reload' "$roll" | head -n1 | cut -d: -f1)"
 restart_line="$(rg -n 'systemctl restart spawnery-authsvc spawnery-cp spawnery-node caddy' "$roll" | head -n1 | cut -d: -f1)"
 [[ -n "$daemon_reload_line" && -n "$restart_line" && "$daemon_reload_line" -lt "$restart_line" ]] || {
   echo "roll.sh does not daemon-reload the node fence before restarting spawnlet" >&2
   exit 1
 }
+for custody_dropin in \
+  '/etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf' \
+  '/etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf'
+do
+  dropin_line="$(rg -n -F "$custody_dropin" "$roll" | head -n1 | cut -d: -f1)"
+  [[ -n "$dropin_line" && "$dropin_line" -lt "$daemon_reload_line" ]] || {
+    echo "roll.sh installs ${custody_dropin} too late for the effective service merge" >&2
+    exit 1
+  }
+done
 for expected in \
   AS_AUTH_SIGNING_CURRENT_KEY_PEM \
   AS_AUTH_SIGNING_CURRENT_CHAIN_PEM \
