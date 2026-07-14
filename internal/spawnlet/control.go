@@ -1,15 +1,5 @@
 package spawnlet
 
-// SidecarControlMountPath is the container path where the GetToken UDS directory is bind-mounted
-// into the SIDECAR (not the agent) in the userns-remap lane (sp-n7iy.3 §2.4). The sidecar
-// dials gettoken.sock within this dir to pull real GitHub tokens from the node's credential server.
-const SidecarControlMountPath = "/run/spawnery/control"
-
-// SidecarControlSocketName is the filename of the GetToken unix-domain socket within
-// SidecarControlMountPath (and the host-side control dir). Full sidecar path:
-// SidecarControlMountPath + "/" + SidecarControlSocketName.
-const SidecarControlSocketName = "gettoken.sock"
-
 // SidecarControlTokenEnv is the sidecar env var carrying the per-pod bearer for the sidecar's
 // /control/model endpoint (the runtime model-switch control plane, sp-bp9w). The sidecar container
 // never stops across a spawnlet restart, so re-adoption reads this back out of the still-running
@@ -17,22 +7,9 @@ const SidecarControlSocketName = "gettoken.sock"
 // fresh token here would not match what the sidecar is actually enforcing.
 const SidecarControlTokenEnv = "SIDECAR_CONTROL_TOKEN"
 
-// SidecarGetTokenUDSEnv is the sidecar env var (userns-remap lane) pointing at the GetToken UDS
-// socket path inside the sidecar container.
-const SidecarGetTokenUDSEnv = "SIDECAR_GETTOKEN_UDS"
-
-// SidecarGetTokenAddrEnv is the sidecar env var (TCP lane) for the node's GetToken TCP listener
-// address ("host:port").
-const SidecarGetTokenAddrEnv = "SIDECAR_GETTOKEN_ADDR"
-
-// SidecarGetTokenBearerEnv is the sidecar env var (TCP lane) for the per-spawn bearer token.
-const SidecarGetTokenBearerEnv = "SIDECAR_GETTOKEN_BEARER"
-
-// SidecarSpawnIDEnv is the sidecar env var carrying THIS spawn's id, which the sidecar puts in its
-// GetSpawnCA/GetToken requests to the node credential server (internal/sidecar reads
-// getenv("SIDECAR_SPAWN_ID")). Unset → the sidecar requests spawn id "", so the node mints a CA/token
-// for the WRONG (empty) spawn — the CA the proxy presents won't match the agent's trusted git-env CA
-// ("certificate signer not trusted") and token resolution fails. MUST be injected for github spawns.
+// SidecarSpawnIDEnv is the sidecar env var carrying THIS spawn's id. The sidecar tags its own
+// telemetry/log lines with it and uses it to sanity-check the credentials the node PUSHES to
+// /control/github (sp-2tx8.9). Injected for every spawn with a github control server configured.
 const SidecarSpawnIDEnv = "SIDECAR_SPAWN_ID"
 
 // SidecarCABundleMountPath is the container DIRECTORY where a node-provided merged CA bundle (system
