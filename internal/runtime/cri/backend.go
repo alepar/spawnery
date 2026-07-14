@@ -110,6 +110,7 @@ func (b *CRIPodBackend) StartPod(ctx context.Context, spec runtime.PodSpec) (*ru
 		Metadata: &runtimeapi.ContainerMetadata{Name: "sidecar"},
 		Image:    &runtimeapi.ImageSpec{Image: spec.SidecarImage},
 		Envs:     toKeyValues(spec.SidecarEnv),
+		Mounts:   toCRIMounts(spec.SidecarMounts),
 		Labels:   runtime.WithRole(spec.Labels, runtime.RoleSidecar),
 		Linux:    linuxContainer(spec.Resources, runtime.CapDefaultSet),
 	})
