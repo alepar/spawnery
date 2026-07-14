@@ -205,14 +205,23 @@ distrobox enter --root dev-spawnery -- bash -lc 'cd <repo-or-worktree> && <cmd>'
   wires runsc — the only runsc path is the `test-cri-delta` (`cri_delta_e2e`) recipe.
 - Prefer installing a proper tool in the distrobox over a host-side workaround (`distrobox enter --root
   dev-spawnery -- <install>`); don't shell out to a one-off binary in `/tmp`.
-- **NEVER `rpm-ostree install` on the host right now.** The workstation is booted into a
-  **transient-unlock** deployment whose origin has *lost* its `requested=` layer list, so an install
-  does not ADD to the layer set — it **REPLACES** it. A `sudo rpm-ostree install make` staged a pending
-  deployment containing *only* `make` ("Diff: 50 removed, 1 added"), which on the next reboot would have
-  wiped all nine layered packages (`btop duf ghostty htop just mosh neovim nvtop tmux`). Reverted with
-  `sudo rpm-ostree cleanup -p`. Host packages are queued in **`sp-sc50`** and installed **after** a
-  reboot, in one command. If you ever do run it, verify the pending deployment still lists *every*
-  package before rebooting: `rpm-ostree status` → both deployments must show the full `LayeredPackages`.
+- **Host packages: `rpm-ostree install` is fine — but ONLY when the booted deployment is not unlocked.**
+  Check first, every time:
+  ```bash
+  rpm-ostree status   # the booted (●) deployment must NOT say "Unlocked:" and must show the
+                      # ostree-image-signed:docker://ghcr.io/ublue-os/... image ref
+  ```
+  **Why it matters:** the box has (as of 2026-07-14) been booting into a **transient-unlock** deployment
+  whose origin is a bare commit refspec — it has *lost* both the image reference and the `requested=`
+  layer list. `rpm-ostree install` computes the new package set from `requested=`, not from the commit,
+  so on that deployment it does not ADD a package — it **REPLACES** the whole layer set. `sudo rpm-ostree
+  install make` staged a deployment containing *only* `make` ("Diff: 50 removed, 1 added"), which on the
+  next reboot would have wiped all nine layered packages (`btop duf ghostty htop just mosh neovim nvtop
+  tmux`). Caught pre-reboot and reverted with `sudo rpm-ostree cleanup -p`. (This has now happened three
+  times — see **`sp-sc50`**, which also carries the recovery: `rpm-ostree rollback` → reboot →
+  `cleanup -r` puts the machine back on the managed deployment, after which installs behave normally.)
+  **If you do stage an install, verify before rebooting** that the pending deployment lists *every*
+  package, not just the new one.
 
 ## Configuration posture — the config system, not `os.Getenv`
 
