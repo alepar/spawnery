@@ -85,6 +85,29 @@ func loadASTest(t *testing.T, env string, getenv map[string]string) (*AS, error)
 	})
 }
 
+func TestASConfig_DeviceRateLimitDefault(t *testing.T) {
+	cfg, err := loadASTest(t, "dev", map[string]string{"AS_DEV": "1"})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.RateLimits.DevicePerMin != 10 {
+		t.Fatalf("RateLimits.DevicePerMin = %d, want 10", cfg.RateLimits.DevicePerMin)
+	}
+}
+
+func TestASConfig_DeviceRateLimitEnvOverride(t *testing.T) {
+	cfg, err := loadASTest(t, "dev", map[string]string{
+		"AS_DEV":            "1",
+		"AS_DEVICE_PER_MIN": "100",
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.RateLimits.DevicePerMin != 100 {
+		t.Fatalf("RateLimits.DevicePerMin = %d, want 100", cfg.RateLimits.DevicePerMin)
+	}
+}
+
 func TestASConfig_FakeGitHubEnvAliases(t *testing.T) {
 	cfg, err := loadASTest(t, "dev", map[string]string{
 		"AS_DEV":                  "1",

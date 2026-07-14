@@ -120,6 +120,15 @@ rg -q 'ACC_TEST_MODEL' "$REPO/acceptance/tests/customization/injection.spec.ts" 
 }
 
 common="$HERE/env/common.env"
+fake_profile="$HERE/env/profile.fake.env"
+rg -q '^AS_DEVICE_PER_MIN=100$' "$fake_profile" || {
+  echo "fake VM profile does not raise the disposable device-flow capacity to 100/minute" >&2
+  exit 1
+}
+if rg -n '^AS_DEVICE_PER_MIN=' "$common"; then
+  echo "VM common.env weakens the production device-flow rate-limit default" >&2
+  exit 1
+fi
 if rg -n '^NODE_TERMINAL_ADDR=' "$common"; then
   echo "enforced VM node exposes a direct terminal listener" >&2
   exit 1

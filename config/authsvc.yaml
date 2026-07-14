@@ -61,6 +61,8 @@ verification_uri: ""  # device-grant user confirmation URL (SPA's /device/verify
 
 registration_enabled: true  # allow new user registration
 max_families: 20            # concurrent refresh-family cap per account
+rate_limits:
+  device_per_min: 10        # device-grant creation and confirmation attempts per IP per minute
 
 cp:
   url: ""          # CP internal URL for GitHub mint authorization/fanout
