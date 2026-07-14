@@ -36,11 +36,11 @@ describe("bootstrapFakeGitHubLinks", () => {
         expect(headers.get("Authorization")).toBe(`Bearer bearer-${login}`);
         expect(JSON.parse(String(init?.body))).toEqual({ client_kind: "device", port: 0, host: "github.com" });
         return new Response(JSON.stringify({
-          authorize_url: `http://fake-idp.example/login/oauth/authorize?flow=${login}`,
+          authorize_url: `http://as.example:9099/login/oauth/authorize?flow=${login}`,
           flow_id: `flow-${login}`,
         }));
       }
-      if (url.hostname === "fake-idp.example") {
+      if (url.port === "9099") {
         const login = url.searchParams.get("flow") ?? "";
         events.push(`${login}:authorize`);
         expect(init?.redirect).toBe("manual");
@@ -91,8 +91,11 @@ describe("bootstrapFakeGitHubLinks", () => {
     let call = 0;
     const fetchImpl = vi.fn(async (): Promise<Response> => {
       call += 1;
-      if (call === 1) return new Response(JSON.stringify({ authorize_url: "https://fake.example/auth", flow_id: "flow" }));
-      if (call === 2) return redirect("https://as.example/github/link/callback");
+      if (call === 1) return new Response(JSON.stringify({
+        authorize_url: "http://as.example:9099/login/oauth/authorize",
+        flow_id: "flow",
+      }));
+      if (call === 2) return redirect("https://as.example/github/link/callback?code=code");
       if (call === 3) return new Response(null, { status: 200 });
       return new Response(JSON.stringify(metadata));
     }) as unknown as typeof fetch;
@@ -116,7 +119,7 @@ describe("bootstrapFakeGitHubLinks", () => {
     const fetchImpl = vi.fn(async (): Promise<Response> => {
       call += 1;
       if (call === 1) return new Response(JSON.stringify({
-        authorize_url: `https://fake.example/auth?state=${callbackState}`,
+        authorize_url: `http://as.example:9099/login/oauth/authorize?state=${callbackState}`,
         flow_id: "flow",
       }));
       if (stage === "authorize") {
@@ -125,7 +128,7 @@ describe("bootstrapFakeGitHubLinks", () => {
       if (stage === "authorize Location") {
         return new Response(`${body}:${callbackState}:${secret}${"x".repeat(70 * 1024)}`, { status });
       }
-      if (call === 2) return redirect("https://as.example/github/link/callback");
+      if (call === 2) return redirect("https://as.example/github/link/callback?code=code");
       if (stage === "callback") return new Response(`${body}${"x".repeat(70 * 1024)}${secret}`, { status });
       if (call === 3) return new Response(null, { status: 200 });
       return new Response(`${body}${"x".repeat(70 * 1024)}${secret}`, { status });
@@ -146,5 +149,73 @@ describe("bootstrapFakeGitHubLinks", () => {
     expect(error.message.length).toBeLessThan(66 * 1024);
     expect(error.message).not.toContain(secret);
     expect(error.message).not.toContain(callbackState);
+  });
+
+  it.each([
+    ["off-origin", "http://evil.example:9099/login/oauth/authorize"],
+    ["wrong path", "http://as.example:9099/not-the-authorize-endpoint"],
+  ])("rejects an %s authorize URL before fetching it", async (_case, authorizeUrl) => {
+    const fetchImpl = vi.fn(async (): Promise<Response> => new Response(JSON.stringify({
+      authorize_url: authorizeUrl,
+      flow_id: "flow",
+    }))) as unknown as typeof fetch;
+
+    await expect(bootstrapFakeGitHubLinks({
+      asOrigin: "https://as.example",
+      identities: [identities[0]],
+      auth: fakeAuth(),
+      fetchImpl,
+    })).rejects.toThrow(/authorize URL/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["off-origin", "https://evil.example/github/link/callback?code=live-code"],
+    ["wrong path", "https://as.example/not-the-link-callback?code=live-code"],
+  ])("rejects an %s provider callback before fetching it", async (_case, callbackLocation) => {
+    let call = 0;
+    const fetchImpl = vi.fn(async (): Promise<Response> => {
+      call += 1;
+      if (call === 1) return new Response(JSON.stringify({
+        authorize_url: "http://as.example:9099/login/oauth/authorize",
+        flow_id: "flow",
+      }));
+      return redirect(callbackLocation);
+    }) as unknown as typeof fetch;
+
+    await expect(bootstrapFakeGitHubLinks({
+      asOrigin: "https://as.example",
+      identities: [identities[0]],
+      auth: fakeAuth(),
+      fetchImpl,
+    })).rejects.toThrow(/callback URL/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("redacts the live callback code from callback failure diagnostics", async () => {
+    const liveCode = "live-provider-code-4917";
+    let call = 0;
+    const fetchImpl = vi.fn(async (): Promise<Response> => {
+      call += 1;
+      if (call === 1) return new Response(JSON.stringify({
+        authorize_url: "http://as.example:9099/login/oauth/authorize",
+        flow_id: "flow",
+      }));
+      if (call === 2) {
+        return redirect(`https://as.example/github/link/callback?code=${liveCode}&state=callback-state`);
+      }
+      return new Response(`callback rejected with ${liveCode}`, { status: 503 });
+    }) as unknown as typeof fetch;
+
+    const error = await bootstrapFakeGitHubLinks({
+      asOrigin: "https://as.example",
+      identities: [identities[0]],
+      auth: fakeAuth(),
+      fetchImpl,
+    }).catch((caught: unknown) => caught as Error);
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error("expected bootstrap to fail");
+    expect(error.message).toContain("callback rejected");
+    expect(error.message).not.toContain(liveCode);
   });
 });

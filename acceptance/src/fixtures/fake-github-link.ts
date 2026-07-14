@@ -2,6 +2,9 @@ import type { AuthStrategy } from "../auth/types";
 import type { Identity } from "./identity-pool";
 
 const MAX_DIAGNOSTIC_BODY_BYTES = 64 * 1024;
+const FAKE_PROVIDER_PORT = "9099";
+const FAKE_PROVIDER_AUTHORIZE_PATH = "/login/oauth/authorize";
+const LINK_CALLBACK_PATH = "/github/link/callback";
 
 export interface FakeGitHubLinkBootstrapConfig {
   asOrigin: string;
@@ -50,6 +53,53 @@ async function requireStatus(
   throw new Error(`${stage} returned ${response.status}, expected ${expected}: ${body}`);
 }
 
+function fakeProviderAuthorizeUrl(raw: string, asOrigin: string): URL {
+  let url: URL;
+  let asUrl: URL;
+  try {
+    url = new URL(raw);
+    asUrl = new URL(asOrigin);
+  } catch {
+    throw new Error("GitHub link start returned an invalid authorize URL");
+  }
+  // This helper is explicitly for the VM fake lane: its provider is served on the AS hostname at
+  // port 9099. Keep the allowlist structural so an AS response cannot turn bootstrap into a fetch
+  // primitive against another host or local service.
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.hostname !== asUrl.hostname ||
+    url.port !== FAKE_PROVIDER_PORT ||
+    url.pathname !== FAKE_PROVIDER_AUTHORIZE_PATH ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error("GitHub link start returned an unexpected authorize URL");
+  }
+  return url;
+}
+
+function linkCallbackUrl(raw: string, asOrigin: string): URL {
+  let url: URL;
+  let asUrl: URL;
+  try {
+    url = new URL(raw);
+    asUrl = new URL(asOrigin);
+  } catch {
+    throw new Error("GitHub link authorize returned an invalid callback URL");
+  }
+  if (
+    url.origin !== asUrl.origin ||
+    url.pathname !== LINK_CALLBACK_PATH ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error("GitHub link authorize returned an unexpected callback URL");
+  }
+  return url;
+}
+
 export async function bootstrapFakeGitHubLinks(
   cfg: FakeGitHubLinkBootstrapConfig,
 ): Promise<void> {
@@ -75,7 +125,7 @@ export async function bootstrapFakeGitHubLinks(
     }
     secrets.push(start.flow_id);
 
-    const authorizeUrl = new URL(start.authorize_url);
+    const authorizeUrl = fakeProviderAuthorizeUrl(start.authorize_url, cfg.asOrigin);
     const authorizeState = authorizeUrl.searchParams.get("state");
     if (authorizeState) secrets.push(authorizeState);
     authorizeUrl.searchParams.set("login_hint", identity.token);
@@ -86,9 +136,11 @@ export async function bootstrapFakeGitHubLinks(
       const body = await boundedBody(authorizeResponse, secrets);
       throw new Error(`GitHub link authorize returned 302 without callback Location: ${body}`);
     }
-    const callbackUrl = new URL(callbackLocation, authorizeUrl);
+    const callbackUrl = linkCallbackUrl(callbackLocation, cfg.asOrigin);
     const callbackState = callbackUrl.searchParams.get("state");
     if (callbackState) secrets.push(callbackState);
+    const callbackCode = callbackUrl.searchParams.get("code");
+    if (callbackCode) secrets.push(callbackCode);
 
     const callbackResponse = await fetchImpl(callbackUrl, { redirect: "manual" });
     await requireStatus("GitHub link callback", callbackResponse, 200, secrets);
