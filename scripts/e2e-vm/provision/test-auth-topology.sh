@@ -406,7 +406,7 @@ printf '%s\n' "$node_unit" | rg -q '^UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB
   echo "fresh spawnlet unit lacks the GitHub secret environment fence" >&2
   exit 1
 }
-if printf '%s\n' "$authsvc_unit" | rg -q '^InaccessiblePaths=.* -?/etc/spawnery/env.d/gitea.env(?: |$)'; then
+if printf '%s\n' "$authsvc_unit" | rg -q '^InaccessiblePaths=.*(?:^| )-?/etc/spawnery/env.d(?:/gitea\.env)?(?: |$)'; then
   echo "fresh authsvc unit cannot read its private fake-provider token" >&2
   exit 1
 fi
@@ -415,10 +415,14 @@ for private_unit in cp node; do
     cp) unit_text="$cp_unit" ;;
     node) unit_text="$node_unit" ;;
   esac
-  printf '%s\n' "$unit_text" | rg -q '^InaccessiblePaths=.*(?:^| )-?/etc/spawnery/env.d/gitea.env(?: |$)' || {
-    echo "fresh ${private_unit} unit can read authsvc's private Gitea environment" >&2
+  printf '%s\n' "$unit_text" | rg -q '^InaccessiblePaths=.*(?:^| )/etc/spawnery/env.d(?: |$)' || {
+    echo "fresh ${private_unit} unit lacks the stable authsvc environment-directory fence" >&2
     exit 1
   }
+  if printf '%s\n' "$unit_text" | rg -q '(?:^| )-/etc/spawnery/env.d(?: |$)|(?:^| )-?/etc/spawnery/env.d/gitea\.env(?: |$)'; then
+    echo "fresh ${private_unit} unit uses an optional or exact-file custody fence" >&2
+    exit 1
+  fi
   printf '%s\n' "$unit_text" | rg -q '^CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE$' || {
     echo "fresh ${private_unit} unit lost the CAP_SYS_ADMIN denial required by the file sandbox" >&2
     exit 1
@@ -438,10 +442,14 @@ rg -Fq '/etc/systemd/system/spawnery-cp.service.d/90-gitea-custody-fence.conf' "
   echo "roll.sh does not install the CP Gitea custody fence drop-in" >&2
   exit 1
 }
-[[ "$(rg -Foc 'InaccessiblePaths=-/etc/spawnery/env.d/gitea.env' "$roll")" == 2 ]] || {
-  echo "roll.sh must hide the Gitea environment from both CP and spawnlet" >&2
+[[ "$(rg -Foc 'InaccessiblePaths=/etc/spawnery/env.d' "$roll")" == 2 ]] || {
+  echo "roll.sh must hide the stable environment directory from both CP and spawnlet" >&2
   exit 1
 }
+if rg -q 'InaccessiblePaths=-/etc/spawnery/env.d|InaccessiblePaths=-?/etc/spawnery/env.d/gitea\.env' "$roll"; then
+  echo "roll.sh uses a fail-open optional or exact-file custody fence" >&2
+  exit 1
+fi
 daemon_reload_line="$(rg -n 'systemctl daemon-reload' "$roll" | head -n1 | cut -d: -f1)"
 restart_line="$(rg -n 'systemctl restart spawnery-authsvc spawnery-cp spawnery-node caddy' "$roll" | head -n1 | cut -d: -f1)"
 [[ -n "$daemon_reload_line" && -n "$restart_line" && "$daemon_reload_line" -lt "$restart_line" ]] || {

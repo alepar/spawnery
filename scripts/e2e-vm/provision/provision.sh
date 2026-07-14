@@ -552,7 +552,8 @@ Requires=spawnery-render-env.service
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 WorkingDirectory=/opt/spawnery
-InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/node /etc/spawnery/pki -/etc/spawnery/env.d/gitea.env
+# systemd reads EnvironmentFile entries before applying this execution sandbox.
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/node /etc/spawnery/pki /etc/spawnery/env.d
 ReadOnlyPaths=/etc/spawnery/cp
 NoNewPrivileges=yes
 CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
@@ -576,7 +577,8 @@ EnvironmentFile=-/etc/spawnery/env.d/journal.env
 EnvironmentFile=-/etc/spawnery/env.d/podnet.env
 UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN
 WorkingDirectory=/opt/spawnery
-InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki -/etc/spawnery/env.d/gitea.env
+# systemd reads EnvironmentFile entries before applying this execution sandbox.
+InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki /etc/spawnery/env.d
 ReadOnlyPaths=/etc/spawnery/node
 NoNewPrivileges=yes
 CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
