@@ -31,6 +31,43 @@ WILDCARD_DOMAIN="${WILDCARD_DOMAIN:-e2e.test}" # cert covers *.e2e.test
 PAYLOAD="${PAYLOAD:-/home/build/payload}"      # scp'd by build-base.sh: bin/ images.tar config/ examples/ env/ web-dist/ spawnery-ca
 log(){ printf '\033[36m[provision]\033[0m %s\n' "$*"; }
 
+# BEGIN POD_DNS_RECONCILIATION
+reconcile_pod_dns_template() {
+  local template="$1" gateway="$2" assignments
+  assignments="$(sudo grep -c '^POD_DNS=' "$template" || true)"
+  [[ "$assignments" == 1 ]] || {
+    echo "expected exactly one POD_DNS assignment in $template, found ${assignments:-0}" >&2
+    return 1
+  }
+  sudo sed -i "s#^POD_DNS=.*#POD_DNS=${gateway}#" "$template"
+  [[ "$(sudo grep -Fxc "POD_DNS=${gateway}" "$template" || true)" == 1 ]] || {
+    echo "failed to publish exactly POD_DNS=${gateway} in $template" >&2
+    return 1
+  }
+}
+# END POD_DNS_RECONCILIATION
+
+# BEGIN IPV4_NETWORK_GATEWAY
+ipv4_network_gateway() {
+  local cidr="$1" address prefix o1 o2 o3 o4 address_int mask gateway_int
+  [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || return 1
+  address="${cidr%/*}"
+  prefix="${cidr#*/}"
+  IFS=. read -r o1 o2 o3 o4 <<<"$address"
+  for octet in "$o1" "$o2" "$o3" "$o4"; do
+    [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || return 1
+  done
+  (( 10#$prefix >= 1 && 10#$prefix <= 30 )) || return 1
+  o1=$((10#$o1)); o2=$((10#$o2)); o3=$((10#$o3)); o4=$((10#$o4)); prefix=$((10#$prefix))
+  address_int=$(( (o1 << 24) | (o2 << 16) | (o3 << 8) | o4 ))
+  mask=$(( (0xffffffff << (32 - prefix)) & 0xffffffff ))
+  gateway_int=$(( (address_int & mask) + 1 ))
+  printf '%d.%d.%d.%d\n' \
+    "$(( (gateway_int >> 24) & 255 ))" "$(( (gateway_int >> 16) & 255 ))" \
+    "$(( (gateway_int >> 8) & 255 ))" "$(( gateway_int & 255 ))"
+}
+# END IPV4_NETWORK_GATEWAY
+
 log "installing base packages…"
 sudo dnf -y install curl tar iptables-legacy postgresql-server postgresql caddy chrony \
   qemu-guest-agent cloud-init rsync jq openssl containernetworking-plugins git dnsmasq || true
@@ -458,7 +495,10 @@ for p in "$PAYLOAD"/env/profile.*.env; do [ -f "$p" ] && sudo cp -f "$p" "/etc/s
 # "gateway" is set: network address + 1) — e.g. 10.234.0.1 for the default 10.234.0.0/16. That address
 # is on THIS host (the VM), reachable from every pod via its default route, and is what Caddy's :443
 # already listens on (Caddy binds all interfaces) — so it doubles as "the VM's IP" for in-pod DNS.
-GITHUB_DNS_ADDR="$(printf '%s' "$POD_CIDR" | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')"
+GITHUB_DNS_ADDR="$(ipv4_network_gateway "$POD_CIDR")" || {
+  echo "invalid or unsupported POD_CIDR: $POD_CIDR" >&2
+  exit 1
+}
 
 # (The node's per-spawn GetToken/CA listener used to be bound on this same bridge address. It is gone:
 # sp-2tx8.9 inverted the channel — the node now PUSHES the CA + token into the sidecar's own control
@@ -480,14 +520,16 @@ host-record=github.com,${GITHUB_DNS_ADDR}
 host-record=codeload.github.com,${GITHUB_DNS_ADDR}
 $(printf '%s' "$POD_DNS" | tr ',' '\n' | sed 's/^/server=/')
 EOF
-sudo systemctl enable dnsmasq
+sudo dnsmasq --test
+sudo systemctl enable --now dnsmasq
+sudo systemctl is-active --quiet dnsmasq
 
 # Point the node's PodSpec.DNSServers (internal/runtime/cri/backend.go) at dnsmasq instead of the
 # public resolvers directly, so github.com/codeload.github.com resolve in-pod without touching
 # anything else's resolution (dnsmasq forwards everything else to the SAME POD_DNS servers). The
 # template was just installed above (common.env.tmpl), so patch it in place; the per-boot render
 # (spawnery-render-env.sh) copies this value through verbatim like every other non-@@…@@ line.
-sudo sed -i "s#^POD_DNS=.*#POD_DNS=${GITHUB_DNS_ADDR}#" /etc/spawnery/env.d/common.env.tmpl
+reconcile_pod_dns_template /etc/spawnery/env.d/common.env.tmpl "$GITHUB_DNS_ADDR"
 
 sudo tee /usr/local/bin/spawnery-render-env.sh >/dev/null <<'RENDER_EOF'
 #!/usr/bin/env bash
@@ -515,6 +557,13 @@ ExecStart=/usr/local/bin/spawnery-render-env.sh
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Keep the node's host-loopback GitHub facade private to spawnlet's mount namespace. containerd
+# must read the unmodified VM-global /etc/hosts when it builds sandbox hosts files; otherwise its
+# copy shadows the pod's dnsmasq configuration and sends sidecar traffic to pod loopback.
+NODE_HOSTS=/etc/spawnery/node-hosts
+sudo install -o root -g root -m0644 /etc/hosts "$NODE_HOSTS"
+printf '127.0.0.1 github.com codeload.github.com\n' | sudo tee -a "$NODE_HOSTS" >/dev/null
 
 # ---- spawnery systemd units (authsvc/cp/node) — no separate spawnery-web: Caddy already serves the
 #      web root and reverse-proxies the CP/AS routes (see Caddyfile above) ----
@@ -579,7 +628,8 @@ UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOK
 WorkingDirectory=/opt/spawnery
 # systemd reads EnvironmentFile entries before applying this execution sandbox.
 InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki /etc/spawnery/env.d
-ReadOnlyPaths=/etc/spawnery/node
+ReadOnlyPaths=/etc/spawnery/node /etc/spawnery/node-hosts
+BindReadOnlyPaths=/etc/spawnery/node-hosts:/etc/hosts
 NoNewPrivileges=yes
 CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE
 ExecStart=/usr/local/bin/spawnlet
@@ -590,16 +640,6 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable garage spawnery-garage-bootstrap gitea spawnery-gitea-bootstrap spawnery-render-env spawnery-authsvc spawnery-cp spawnery-node caddy
-
-# ---- github.com -> this VM, for the NODE process (sp-wwtc.1) ----
-# MUST BE LAST. The pod's dnsmasq (above) serves the POD netns only; the node runs as a plain host
-# process on this VM and does its own clone-in, so it needs github.com to resolve here too.
-#
-# THIS IS DELIBERATELY THE FINAL STEP: provisioning itself downloads containerd, runc, the CNI plugins
-# and crictl FROM github.com (see the top of this script). Move this line any earlier and those fetches
-# resolve to 127.0.0.1 and the build dies. Anything added after this point must not fetch from github.com.
-log "pointing github.com/codeload.github.com at this VM for the node process (MUST be the last step)…"
-printf '127.0.0.1 github.com codeload.github.com\n' | sudo tee -a /etc/hosts >/dev/null
 
 # ---- self-check (best-effort) + clean shutdown handled by build-base.sh ----
 log "provision complete. runsc: $(runsc --version | head -1). containerd: $(/usr/local/bin/containerd --version)"
