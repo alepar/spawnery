@@ -161,6 +161,30 @@ if (
 fi
 
 common="$HERE/env/common.env"
+fake_profile="$HERE/env/profile.fake.env"
+for public_github_setting in \
+  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
+  'GITHUB_HOST=github.com'
+do
+  [[ "$(rg -n "^${public_github_setting}$" "$fake_profile" | wc -l)" == 1 ]] || {
+    echo "fake profile must contain exactly ${public_github_setting}" >&2
+    exit 1
+  }
+done
+if rg -n '^(GITHUB_STATIC_TOKEN|GITHUB_STATIC_TOKEN_FILE|GITHUB_ALLOW_INSECURE_HOST|CP_GITHUB_LINK_PREFLIGHT_DISABLED)=' "$fake_profile"; then
+  echo "fake profile still selects the static GitHub lane or disables CP preflight" >&2
+  exit 1
+fi
+
+fake_bootstrap_branch="$(sed -n '/^if \[\[ "\$PROFILE" == fake \]\]; then$/,/^fi$/p' "$runner")"
+[[ "$(printf '%s\n' "$fake_bootstrap_branch" | rg -c '^  export ACC_BOOTSTRAP_FAKE_GITHUB_LINKS=1$')" == 1 ]] || {
+  echo "run.sh does not enable fake GitHub link bootstrap only in the fake profile branch" >&2
+  exit 1
+}
+printf '%s\n' "$fake_bootstrap_branch" | rg -q '^  unset ACC_BOOTSTRAP_FAKE_GITHUB_LINKS$' || {
+  echo "run.sh does not clear fake GitHub link bootstrap for non-fake profiles" >&2
+  exit 1
+}
 if rg -n '^NODE_TERMINAL_ADDR=' "$common"; then
   echo "enforced VM node exposes a direct terminal listener" >&2
   exit 1
@@ -211,7 +235,12 @@ case "$*" in
   *) exit 1 ;;
 esac
 EOF
+cat >"$tmp/bin/chown" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$RECONCILE_CHOWN_LOG"
+EOF
 chmod +x "$tmp/bin/curl"
+chmod +x "$tmp/bin/chown"
 chmod +x "$tmp/bin/systemctl"
 cat >"$tmp/app.ini" <<'EOF'
 APP_NAME = Stale Golden Gitea
@@ -237,7 +266,8 @@ GITHUB_ALLOW_INSECURE_HOST=0
 GITHUB_STATIC_TOKEN=pre-restart-token
 AS_FAKE_GITHUB_TOKEN=pre-restart-token
 EOF
-GITEA_ENV_FILE="$tmp/gitea.env" SYSTEMCTL_LOG="$tmp/systemctl.log" PATH="$tmp/bin:$PATH" \
+GITEA_ENV_FILE="$tmp/gitea.env" SYSTEMCTL_LOG="$tmp/systemctl.log" \
+RECONCILE_CHOWN_LOG="$tmp/reconcile-chown.log" PATH="$tmp/bin:$PATH" \
   "$gitea_reconcile" "$tmp/gitea.env" "$tmp/app.ini"
 expected_app_ini="$tmp/expected-app.ini"
 cat >"$expected_app_ini" <<'EOF'
@@ -274,17 +304,18 @@ cmp -s "$tmp/expected-systemctl.log" "$tmp/systemctl.log" || {
 }
 expected_gitea_env="$tmp/expected-gitea.env"
 cat >"$expected_gitea_env" <<'EOF'
-GITHUB_API_BASE_URL=https://github.com/api/v1
-GITHUB_HOST=github.com
-GITHUB_STATIC_TOKEN=fresh-minted-token
 AS_FAKE_GITHUB_TOKEN=fresh-minted-token
 EOF
 cmp -s "$expected_gitea_env" "$tmp/gitea.env" || {
-  echo "Gitea environment reconciler did not publish the secure facade topology" >&2
+  echo "Gitea environment reconciler did not publish the AS-only token" >&2
   exit 1
 }
 [[ "$(stat -c %a "$tmp/gitea.env")" == 600 ]] || {
-  echo "Gitea environment reconciler did not keep the static token private" >&2
+  echo "Gitea environment reconciler did not keep the AS token private" >&2
+  exit 1
+}
+[[ "$(tail -n1 "$tmp/reconcile-chown.log")" == 'root:root '* ]] || {
+  echo "Gitea environment reconciler did not assign root ownership" >&2
   exit 1
 }
 provision="$HERE/provision.sh"
@@ -334,7 +365,7 @@ cmp -s "$expected_gitea_env" "$bootstrap_env" || {
   exit 1
 }
 [[ "$(stat -c %a "$bootstrap_env")" == 600 ]] || {
-  echo "fresh Gitea bootstrap did not keep the static token private" >&2
+  echo "fresh Gitea bootstrap did not keep the AS token private" >&2
   exit 1
 }
 [[ "$(cat "$tmp/bootstrap-chown.log")" == 'root:root '* ]] || {
@@ -348,9 +379,6 @@ cmp -s "$expected_gitea_env" "$bootstrap_env" || {
 for secure_gitea_binding in \
   'DOMAIN = github.com' \
   'ROOT_URL = https://github.com/' \
-  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
-  'GITHUB_HOST=github.com' \
-  'GITHUB_STATIC_TOKEN=\$TOKEN' \
   'AS_FAKE_GITHUB_TOKEN=\$TOKEN'
 do
   rg -Fq "$secure_gitea_binding" "$provision" || {
@@ -358,10 +386,41 @@ do
     exit 1
   }
 done
-if rg -n '^[[:space:]]*GITHUB_ALLOW_INSECURE_HOST=' "$provision"; then
-  echo "fresh provisioning emits the insecure Gitea host override" >&2
+if rg -n '^[[:space:]]*(GITHUB_API_BASE_URL|GITHUB_HOST|GITHUB_STATIC_TOKEN|GITHUB_STATIC_TOKEN_FILE|GITHUB_ALLOW_INSECURE_HOST)=' "$provision"; then
+  echo "fresh Gitea publication emits node GitHub settings or a static credential" >&2
   exit 1
 fi
+
+authsvc_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-authsvc.service/,/^EOF$/p' "$provision")"
+node_unit="$(sed -n '/tee \/etc\/systemd\/system\/spawnery-node.service/,/^EOF$/p' "$provision")"
+[[ "$(printf '%s\n' "$authsvc_unit" | rg -c '^EnvironmentFile=-/etc/spawnery/env.d/gitea.env$')" == 1 ]] || {
+  echo "fresh authsvc unit does not consume the private Gitea environment exactly once" >&2
+  exit 1
+}
+if printf '%s\n' "$node_unit" | rg -q 'gitea.env'; then
+  echo "fresh spawnlet unit still consumes the private Gitea environment" >&2
+  exit 1
+fi
+printf '%s\n' "$node_unit" | rg -q '^UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN$' || {
+  echo "fresh spawnlet unit lacks the GitHub secret environment fence" >&2
+  exit 1
+}
+
+roll="$REPO/scripts/e2e-vm/roll.sh"
+rg -Fq '/etc/systemd/system/spawnery-node.service.d/90-github-secret-fence.conf' "$roll" || {
+  echo "roll.sh does not install the spawnlet GitHub secret fence drop-in" >&2
+  exit 1
+}
+rg -Fq 'UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN' "$roll" || {
+  echo "roll.sh drop-in does not clear every legacy broad Gitea credential" >&2
+  exit 1
+}
+daemon_reload_line="$(rg -n 'systemctl daemon-reload' "$roll" | head -n1 | cut -d: -f1)"
+restart_line="$(rg -n 'systemctl restart spawnery-authsvc spawnery-cp spawnery-node caddy' "$roll" | head -n1 | cut -d: -f1)"
+[[ -n "$daemon_reload_line" && -n "$restart_line" && "$daemon_reload_line" -lt "$restart_line" ]] || {
+  echo "roll.sh does not daemon-reload the node fence before restarting spawnlet" >&2
+  exit 1
+}
 for expected in \
   AS_AUTH_SIGNING_CURRENT_KEY_PEM \
   AS_AUTH_SIGNING_CURRENT_CHAIN_PEM \

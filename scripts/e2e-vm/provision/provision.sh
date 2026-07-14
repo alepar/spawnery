@@ -226,7 +226,7 @@ EOF
 # ---- Gitea (local GitHub-compatible git host) — backs the github: storage-mount lane behind the
 # VM's TLS github.com facade so acceptance exercises the production clone/API trust path.
 # Native single-node binary + sqlite; a per-boot oneshot creates an admin + access token + seed repo
-# and writes the node github-override env into /etc/spawnery/env.d/gitea.env (mirrors the garage
+# and writes authsvc's fake-provider token into /etc/spawnery/env.d/gitea.env (mirrors the garage
 # bootstrap). Gitea itself remains reachable only over host-loopback HTTP behind Caddy. ----
 GITEA_VER="${GITEA_VER:-1.22.6}"
 GITEA_PORT="${GITEA_PORT:-3000}"
@@ -287,11 +287,8 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-# per-boot bootstrap: create the admin (idempotent), mint a fresh access token + seed repo, and write
-# the node github-override env fragment. The token name is unique per boot to avoid a name clash on
-# reboot; the fragment is what wires GITHUB_STATIC_TOKEN etc. into the node unit below.
-#
-# sp-wwtc.4: the SAME token is ALSO published as AS_FAKE_GITHUB_TOKEN, consumed by authsvc (below).
+# per-boot bootstrap: create the admin (idempotent), mint a fresh access token + seed repo, and
+# publish it only as AS_FAKE_GITHUB_TOKEN. The token name is unique per boot to avoid a name clash.
 # The sidecar's GitHub MITM proxy injects `Authorization: Basic base64("x-access-token:"+token)` at
 # github.com using whatever token the AS's fake-GitHub OAuth flow hands out — a real, non-optional
 # production code path, not a stub to bypass — so for Gitea to actually ACCEPT that injected
@@ -312,24 +309,14 @@ TOKEN="\$(G admin user generate-access-token -u "\$U" --scopes 'write:repository
 curl -fsS -X POST -H "Authorization: token \$TOKEN" -H 'Content-Type: application/json' \
   "http://127.0.0.1:\$PORT/api/v1/user/repos" -d '{"name":"seed","auto_init":true,"private":true}' >/dev/null 2>&1 || true
 mkdir -p /etc/spawnery/env.d
-# sp-wwtc: Gitea now sits behind Caddy as a TLS github.com, so the node runs the PRODUCTION-shaped
-# config — https + a real github.com host, and NO GITHUB_ALLOW_INSECURE_HOST. That relaxation existed
-# only to let the node clone over plain http from 127.0.0.1; dropping it means the e2e lane now
-# exercises the same secure path production does (validateGitHubCloneURL enforces https + host match),
-# instead of the insecure branch. The node reaches github.com via /etc/hosts and verifies Caddy's cert
-# against the golden CA in the VM's trust store (both installed above).
-# The API goes through the same TLS front (Gitea serves its API at /api/v1 on that host).
-# Gitea's own ROOT_URL is https://github.com/, so the clone_url it returns matches GITHUB_HOST.
+# The public GitHub facade settings live in profile.fake.env. This root-only file contains only the
+# provider output authsvc must return after the fake OAuth exchange; spawnlet never consumes it.
 # BEGIN GITEA_ENV_PUBLICATION
 ENV_FILE="\${GITEA_ENV_FILE:-/etc/spawnery/env.d/gitea.env}"
 umask 077
 ENV_TMP="\$(mktemp "\${ENV_FILE}.tmp.XXXXXX")"
 trap 'rm -f "\$ENV_TMP"' EXIT
-printf '%s\n' \
-  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
-  'GITHUB_HOST=github.com' \
-  "GITHUB_STATIC_TOKEN=\$TOKEN" \
-  "AS_FAKE_GITHUB_TOKEN=\$TOKEN" >"\$ENV_TMP"
+printf '%s\n' "AS_FAKE_GITHUB_TOKEN=\$TOKEN" >"\$ENV_TMP"
 chmod 0600 "\$ENV_TMP"
 chown root:root "\$ENV_TMP"
 mv -f "\$ENV_TMP" "\$ENV_FILE"
@@ -580,16 +567,14 @@ sudo tee /etc/systemd/system/spawnery-node.service >/dev/null <<'EOF'
 Description=spawnery node (spawnlet)
 After=spawnery-render-env.service spawnery-cp.service containerd.service spawnery-garage-bootstrap.service spawnery-gitea-bootstrap.service
 Requires=spawnery-render-env.service spawnery-garage-bootstrap.service
-# Gitea is a test-only git host: order after its bootstrap and consume its env fragment (optional
-# EnvironmentFile below), but Wants= not Requires= so a Gitea failure only breaks git-mount tests,
-# not the whole node (suspend/fork/etc. must stay up).
+# Gitea is a test-only git host. Keep the ordering, but never give spawnlet the provider PAT.
 Wants=spawnery-gitea-bootstrap.service
 [Service]
 EnvironmentFile=/etc/spawnery/env.d/common.env
 EnvironmentFile=-/etc/spawnery/env.d/profile.env
 EnvironmentFile=-/etc/spawnery/env.d/journal.env
-EnvironmentFile=-/etc/spawnery/env.d/gitea.env
 EnvironmentFile=-/etc/spawnery/env.d/podnet.env
+UnsetEnvironment=GITHUB_STATIC_TOKEN GITHUB_STATIC_TOKEN_FILE AS_FAKE_GITHUB_TOKEN
 WorkingDirectory=/opt/spawnery
 InaccessiblePaths=/var/lib/spawnery-offline /etc/spawnery/authsvc /etc/spawnery/caddy /etc/spawnery/cp /etc/spawnery/pki
 ReadOnlyPaths=/etc/spawnery/node
