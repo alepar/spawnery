@@ -127,7 +127,7 @@ type PodBackend interface {
 
 	// ContainerEnv returns the named container's environment as K=V strings, exactly as it was
 	// started with. Both lanes; contract-pinned by podbackendtest. Used by re-adoption to read the
-	// per-pod secrets (SIDECAR_CONTROL_TOKEN, SIDECAR_GETTOKEN_*) back from a sidecar the current
+	// per-pod secret (SIDECAR_CONTROL_TOKEN) back from a sidecar the current
 	// process did not start. The slice may carry the model API key — callers must extract the keys
 	// they need and MUST NOT log or forward it.
 	ContainerEnv(ctx context.Context, id string) ([]string, error)
