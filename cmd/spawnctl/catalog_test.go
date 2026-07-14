@@ -14,17 +14,22 @@ import (
 
 // fakeCatalogClient is a canned catalogClient that records each request.
 type fakeCatalogClient struct {
-	createResp *cpv1.CreateCatalogEntryResponse
-	getResp    *cpv1.GetCatalogEntryResponse
-	listResp   *cpv1.ListCatalogEntriesResponse
-	ingestResp *cpv1.IngestSkillFromURLResponse
-	ingestErr  error
+	createResp  *cpv1.CreateCatalogEntryResponse
+	getResp     *cpv1.GetCatalogEntryResponse
+	listResp    *cpv1.ListCatalogEntriesResponse
+	ingestResp  *cpv1.IngestSkillFromURLResponse
+	ingestErr   error
+	denyErr     error
+	allowErr    error
+	denialsResp *cpv1.ListSkillObjectDenialsResponse
 
 	gotCreate  *cpv1.CreateCatalogEntryRequest
 	gotUpdate  *cpv1.UpdateCatalogEntryRequest
 	gotDelete  *cpv1.DeleteCatalogEntryRequest
 	gotListing *cpv1.SetCatalogListingRequest
 	gotIngest  *cpv1.IngestSkillFromURLRequest
+	gotDeny    *cpv1.DenySkillObjectRequest
+	gotAllow   *cpv1.AllowSkillObjectRequest
 }
 
 func (f *fakeCatalogClient) CreateCatalogEntry(_ context.Context, r *connect.Request[cpv1.CreateCatalogEntryRequest]) (*connect.Response[cpv1.CreateCatalogEntryResponse], error) {
@@ -63,6 +68,26 @@ func (f *fakeCatalogClient) IngestSkillFromURL(_ context.Context, r *connect.Req
 	return connect.NewResponse(f.ingestResp), nil
 }
 
+func (f *fakeCatalogClient) DenySkillObject(_ context.Context, r *connect.Request[cpv1.DenySkillObjectRequest]) (*connect.Response[cpv1.DenySkillObjectResponse], error) {
+	f.gotDeny = r.Msg
+	if f.denyErr != nil {
+		return nil, f.denyErr
+	}
+	return connect.NewResponse(&cpv1.DenySkillObjectResponse{}), nil
+}
+
+func (f *fakeCatalogClient) AllowSkillObject(_ context.Context, r *connect.Request[cpv1.AllowSkillObjectRequest]) (*connect.Response[cpv1.AllowSkillObjectResponse], error) {
+	f.gotAllow = r.Msg
+	if f.allowErr != nil {
+		return nil, f.allowErr
+	}
+	return connect.NewResponse(&cpv1.AllowSkillObjectResponse{}), nil
+}
+
+func (f *fakeCatalogClient) ListSkillObjectDenials(_ context.Context, _ *connect.Request[cpv1.ListSkillObjectDenialsRequest]) (*connect.Response[cpv1.ListSkillObjectDenialsResponse], error) {
+	return connect.NewResponse(f.denialsResp), nil
+}
+
 // ---- create ----
 
 func TestRunCatalogCreate(t *testing.T) {
@@ -77,6 +102,15 @@ func TestRunCatalogCreate(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "cat-1") {
 		t.Fatalf("output missing id: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "unlisted") || !strings.Contains(out.String(), "admin") {
+		t.Fatalf("output missing unlisted-default/admin-publish hint: %q", out.String())
+	}
+}
+
+func TestCatalogCreateHelpMentionsUnlistedDefault(t *testing.T) {
+	if !strings.Contains(catalogCreateCmd().Usage, "unlisted") {
+		t.Fatalf("catalog create Usage missing unlisted default: %q", catalogCreateCmd().Usage)
 	}
 }
 
@@ -287,6 +321,9 @@ func TestRunCatalogIngest(t *testing.T) {
 	if !strings.Contains(out.String(), "cat-9") {
 		t.Fatalf("output missing id: %q", out.String())
 	}
+	if !strings.Contains(out.String(), "unlisted") || !strings.Contains(out.String(), "admin") {
+		t.Fatalf("output missing unlisted-default/admin-publish hint: %q", out.String())
+	}
 }
 
 func TestRunCatalogIngest_ErrorPropagates(t *testing.T) {
@@ -296,6 +333,137 @@ func TestRunCatalogIngest_ErrorPropagates(t *testing.T) {
 	err := runCatalogIngest(context.Background(), f, &out, p)
 	if err == nil {
 		t.Fatal("expected error to propagate")
+	}
+}
+
+func TestRunCatalogIngest_Bundle(t *testing.T) {
+	f := &fakeCatalogClient{ingestResp: &cpv1.IngestSkillFromURLResponse{
+		CatalogId:        "cat-9",
+		BundleId:         "bun-1",
+		VersionId:        "ver-1",
+		MemberCatalogIds: []string{"cat-9", "cat-10", "cat-11"},
+		Warnings:         []string{"nested skill skipped at skills/d/nested"},
+		SkippedEntries:   []string{"skills/e/broken-symlink"},
+		Changed:          true,
+	}}
+	var out bytes.Buffer
+	p := catalogIngestParams{URL: "owner/repo"}
+	if err := runCatalogIngest(context.Background(), f, &out, p); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	for _, want := range []string{
+		"cat-9", "bun-1", "3",
+		"nested skill skipped at skills/d/nested",
+		"skills/e/broken-symlink",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("ingest output missing %q; got:\n%s", want, s)
+		}
+	}
+}
+
+func TestRunCatalogIngest_Unchanged(t *testing.T) {
+	f := &fakeCatalogClient{ingestResp: &cpv1.IngestSkillFromURLResponse{
+		CatalogId: "cat-9",
+		Changed:   false,
+	}}
+	var out bytes.Buffer
+	p := catalogIngestParams{URL: "owner/repo"}
+	if err := runCatalogIngest(context.Background(), f, &out, p); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "already ingested; no new version") {
+		t.Fatalf("expected unchanged note, got %q", out.String())
+	}
+}
+
+// ---- deny / allow / denials ----
+
+func TestRunCatalogDeny(t *testing.T) {
+	f := &fakeCatalogClient{}
+	var out bytes.Buffer
+	sha := strings.Repeat("a", 64)
+	if err := runCatalogDeny(context.Background(), f, &out, sha, "known-malicious"); err != nil {
+		t.Fatal(err)
+	}
+	if f.gotDeny.GetSha256() != sha || f.gotDeny.GetReason() != "known-malicious" {
+		t.Fatalf("deny req = %+v", f.gotDeny)
+	}
+	if !strings.Contains(out.String(), sha) {
+		t.Fatalf("output missing sha: %q", out.String())
+	}
+}
+
+func TestRunCatalogDeny_RequiresReason(t *testing.T) {
+	f := &fakeCatalogClient{}
+	var out bytes.Buffer
+	err := runCatalogDeny(context.Background(), f, &out, strings.Repeat("a", 64), "  ")
+	if err == nil {
+		t.Fatal("expected error for empty reason")
+	}
+	if f.gotDeny != nil {
+		t.Fatalf("expected no RPC to be issued, got %+v", f.gotDeny)
+	}
+}
+
+func TestRunCatalogDeny_ErrorPropagates(t *testing.T) {
+	f := &fakeCatalogClient{denyErr: connect.NewError(connect.CodePermissionDenied, errors.New("not an admin"))}
+	var out bytes.Buffer
+	err := runCatalogDeny(context.Background(), f, &out, strings.Repeat("a", 64), "reason")
+	if err == nil {
+		t.Fatal("expected error to propagate")
+	}
+}
+
+func TestRunCatalogAllow(t *testing.T) {
+	f := &fakeCatalogClient{}
+	var out bytes.Buffer
+	sha := strings.Repeat("b", 64)
+	if err := runCatalogAllow(context.Background(), f, &out, sha); err != nil {
+		t.Fatal(err)
+	}
+	if f.gotAllow.GetSha256() != sha {
+		t.Fatalf("allow req = %+v", f.gotAllow)
+	}
+	if !strings.Contains(out.String(), sha) {
+		t.Fatalf("output missing sha: %q", out.String())
+	}
+}
+
+func TestRunCatalogDenials(t *testing.T) {
+	sha1 := strings.Repeat("c", 64)
+	sha2 := strings.Repeat("d", 64)
+	f := &fakeCatalogClient{denialsResp: &cpv1.ListSkillObjectDenialsResponse{
+		Denials: []*cpv1.SkillObjectDenial{
+			{Sha256: sha1, Reason: "malware", DeniedBy: "admin@example.com", CreatedAt: 1700000000},
+			{Sha256: sha2, Reason: "license", DeniedBy: "admin2@example.com", CreatedAt: 1600000000},
+		},
+	}}
+	var out bytes.Buffer
+	if err := runCatalogDenials(context.Background(), f, &out); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "SHA256") || !strings.Contains(s, "DENIED BY") || !strings.Contains(s, "DENIED AT") || !strings.Contains(s, "REASON") {
+		t.Fatalf("denials header = %q", s)
+	}
+	if !strings.Contains(s, sha1) || !strings.Contains(s, sha2) {
+		t.Fatalf("denials output must contain full (copy-pasteable) shas: %q", s)
+	}
+	if !strings.Contains(s, "malware") || !strings.Contains(s, "admin@example.com") {
+		t.Fatalf("denials output = %q", s)
+	}
+}
+
+func TestRunCatalogDenials_Empty(t *testing.T) {
+	f := &fakeCatalogClient{denialsResp: &cpv1.ListSkillObjectDenialsResponse{}}
+	var out bytes.Buffer
+	if err := runCatalogDenials(context.Background(), f, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "no denied skill objects") {
+		t.Fatalf("expected empty-state message, got %q", out.String())
 	}
 }
 

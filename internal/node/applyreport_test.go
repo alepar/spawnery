@@ -70,6 +70,12 @@ func TestStartSpawn_MissingReportWithBundle_FailsSpawn(t *testing.T) {
 	if report == nil {
 		t.Fatal("no SkillInstallReport sent")
 	}
+	if report.Outcome != nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR {
+		t.Errorf("outcome: got %v, want ERROR (a bundle-install timeout must never leave the CP with UNSPECIFIED)", report.Outcome)
+	}
+	if len(report.Entries) != 1 || report.Entries[0].Bundle != "b1" || report.Entries[0].Status != nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN || report.Entries[0].Reason == "" {
+		t.Errorf("entries: %+v, want one UNKNOWN entry for bundle b1 with a non-empty reason", report.Entries)
+	}
 	reportIdx, errIdx := -1, -1
 	fs.mu.Lock()
 	for i, m := range fs.sent {
@@ -114,6 +120,9 @@ func TestStartSpawn_MissingReportNoBundle_WarnsAndReachesActive(t *testing.T) {
 	report := lastSkillInstallReport(fs, "sp1")
 	if report == nil {
 		t.Fatal("no SkillInstallReport sent")
+	}
+	if report.Outcome != nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN {
+		t.Errorf("outcome: got %v, want WARN (a tolerated no-bundle missing report must never leave the CP with UNSPECIFIED)", report.Outcome)
 	}
 	if len(report.Entries) != 1 || report.Entries[0].Status != nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN {
 		t.Errorf("entries: %+v", report.Entries)
@@ -270,6 +279,84 @@ func TestStartSpawn_AgentGone_FatalEvenWithNoBundle(t *testing.T) {
 	}
 	if len(report.Entries) != 1 || report.Entries[0].Status != nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN {
 		t.Errorf("entries: %+v", report.Entries)
+	}
+}
+
+// TestStartSpawn_CtxCancelledDuringWait_ReportsErrorNotUnspecified is sp-mwco.2.13: when the
+// caller's ctx is cancelled WHILE the wait is in progress (neither a plain timeout nor an
+// agent-gone/report-unreadable terminal condition), the generic `awaitErr != nil` branch must
+// still ship an explicit outcome=ERROR envelope with synthetic per-skill entries — never
+// UNSPECIFIED with zero entries.
+func TestStartSpawn_CtxCancelledDuringWait_ReportsErrorNotUnspecified(t *testing.T) {
+	be := fakeBackend(t, fakepod.WithAttachScript(scriptGoose))
+	fs := &fakeCPStream{}
+	a := newAttacher(newGooseManager(t, be), fs)
+	a.applyReportTimeout = 60 * time.Second // large budget: proves the exit is the cancellation, not the budget
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// AwaitApplyReport probes liveness on every 4th 250ms report-poll tick (~1s in), so cancelling
+	// from inside the probe fires deterministically INSIDE the wait; returning alive=true means
+	// ErrAgentGone can never race it.
+	a.agentAliveFn = func(context.Context, string) (bool, error) {
+		cancel()
+		return true, nil
+	}
+
+	manifest := `{"artifacts":[{"kind":"skill","name":"s1","targets":["claude"]}]}` // non-bundle: proves this isn't just the bundle policy
+	st := startSpawnWithManifest(t, "sp1", []byte(manifest))
+	a.startSpawn(ctx, st)
+
+	if got := lastPhase(fs.phasesFor("sp1")); got != nodev1.SpawnPhase_ERROR {
+		t.Fatalf("terminal phase = %v, want ERROR", got)
+	}
+	if !podWasStopped(be) {
+		t.Error("pod backend Stop was not called after ctx cancellation during the install-skills wait")
+	}
+
+	report := lastSkillInstallReport(fs, "sp1")
+	if report == nil {
+		t.Fatal("no SkillInstallReport sent")
+	}
+	if report.Outcome != nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR {
+		t.Errorf("outcome: got %v, want ERROR (must never leave the CP with UNSPECIFIED)", report.Outcome)
+	}
+	if len(report.Entries) != 1 || report.Entries[0].Status != nodev1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN || report.Entries[0].Reason == "" {
+		t.Errorf("entries: %+v, want one UNKNOWN entry with a non-empty reason", report.Entries)
+	}
+}
+
+// TestSkillInstallOutcomeProto_NeverUnspecified is sp-mwco.2.13 hole (D): a recognized
+// spec.Outcome string maps to its matching wire enum, and any unrecognized/empty outcome string
+// maps to WARN (never UNSPECIFIED) — the envelope verdict must always be explicit even for a
+// foreign or missing outcome value.
+func TestSkillInstallOutcomeProto_NeverUnspecified(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome spec.Outcome
+		want    nodev1.SkillInstallOutcome
+	}{
+		{"ok", spec.OutcomeOK, nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK},
+		{"warn", spec.OutcomeWarn, nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN},
+		{"bundle_failed", spec.OutcomeBundleFailed, nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED},
+		{"error", spec.OutcomeError, nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR},
+		{"empty", spec.Outcome(""), nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN},
+		{"foreign", spec.Outcome("some_future_verdict"), nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := &spec.ApplyReport{Schema: 1, Outcome: tc.outcome}
+			if got := skillInstallOutcomeProto(env); got != tc.want {
+				t.Errorf("skillInstallOutcomeProto(outcome=%q) = %v, want %v", tc.outcome, got, tc.want)
+			}
+		})
+	}
+
+	// The nil envelope is the ABSENCE of a signal, and absence is never a state the CP may see. This
+	// case is what makes the invariant structural rather than conventional: if the mapper returned
+	// UNSPECIFIED here, the guarantee would rest on every present and future send site remembering to
+	// normalize first, and the one that forgets would reopen the hole silently.
+	if got := skillInstallOutcomeProto(nil); got != nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN {
+		t.Errorf("skillInstallOutcomeProto(nil) = %v, want WARN (we know install was attempted; we do NOT know it succeeded)", got)
 	}
 }
 

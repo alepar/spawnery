@@ -17,12 +17,11 @@ import (
 // DeleteCatalogEntry (customization_catalog.go), and the DeleteBundle/DeleteBundleVersion
 // handlers with their own reference check + kill-switch resolution.
 //
-// Bundle attach does not exist on the wire yet (proto ProfileEntrySource has no BUNDLE_REF —
-// sp-mwco.1's follow-on slice), so the bundle-side kill-switch cannot reuse
-// customization_catalog.go's resolveAffectedSpawns (catalog_ref-only, and OWNED by sp-mwco.1.6's
-// bundle-aware rewrite — not touched here). resolveAffectedSpawnsByBundle/ByVersion below are a
-// LOCAL, bundle_ref-only equivalent for this task only; when sp-mwco.1.6 lands its bundle-aware
-// resolveAffectedSpawns, collapse these into it (tracked as a follow-up).
+// DeleteBundle/DeleteBundleVersion key off bundle_id/version_id, not catalog_id, so they cannot
+// reuse customization_catalog.go's resolveAffectedSpawns as-is (it resolves by catalog_id — see
+// sp-mwco.1.6 §4.5 for its bundle-aware catalog-entry-revoke leg). resolveAffectedSpawnsByBundle/
+// ByVersion below are a LOCAL, bundle_ref-only equivalent for this task's bundle/version-delete
+// paths; collapsing them into a single shared resolver is tracked as a follow-up, not required here.
 
 // refusedByProfileRefs builds the counts-only FailedPrecondition error shared by
 // DeleteCatalogEntry, DeleteBundle, and DeleteBundleVersion. subject identifies what's being

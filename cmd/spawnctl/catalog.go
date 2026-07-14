@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -25,6 +26,9 @@ type catalogClient interface {
 	DeleteCatalogEntry(context.Context, *connect.Request[cpv1.DeleteCatalogEntryRequest]) (*connect.Response[cpv1.DeleteCatalogEntryResponse], error)
 	SetCatalogListing(context.Context, *connect.Request[cpv1.SetCatalogListingRequest]) (*connect.Response[cpv1.SetCatalogListingResponse], error)
 	IngestSkillFromURL(context.Context, *connect.Request[cpv1.IngestSkillFromURLRequest]) (*connect.Response[cpv1.IngestSkillFromURLResponse], error)
+	DenySkillObject(context.Context, *connect.Request[cpv1.DenySkillObjectRequest]) (*connect.Response[cpv1.DenySkillObjectResponse], error)
+	AllowSkillObject(context.Context, *connect.Request[cpv1.AllowSkillObjectRequest]) (*connect.Response[cpv1.AllowSkillObjectResponse], error)
+	ListSkillObjectDenials(context.Context, *connect.Request[cpv1.ListSkillObjectDenialsRequest]) (*connect.Response[cpv1.ListSkillObjectDenialsResponse], error)
 }
 
 // Ensure the concrete generated client satisfies the interface.
@@ -73,6 +77,7 @@ func runCatalogCreate(ctx context.Context, c catalogClient, out io.Writer, p cat
 		return fmt.Errorf("create catalog entry: %w", err)
 	}
 	fmt.Fprintf(out, "created catalog entry %s\n", resp.Msg.GetCatalogId())
+	fmt.Fprintln(out, "entry is unlisted (visible only to you); publishing to the global catalog is admin-only")
 	return nil
 }
 
@@ -190,7 +195,66 @@ func runCatalogIngest(ctx context.Context, c catalogClient, out io.Writer, p cat
 		return fmt.Errorf("ingest catalog entry: %w", err)
 	}
 	fmt.Fprintf(out, "ingested catalog entry %s\n", resp.Msg.GetCatalogId())
+	if members := resp.Msg.GetMemberCatalogIds(); len(members) > 1 {
+		fmt.Fprintf(out, "bundle %s, version %s (%d members)\n",
+			resp.Msg.GetBundleId(), resp.Msg.GetVersionId(), len(members))
+	}
+	for _, w := range resp.Msg.GetWarnings() {
+		fmt.Fprintf(out, "warning: %s\n", w)
+	}
+	for _, s := range resp.Msg.GetSkippedEntries() {
+		fmt.Fprintf(out, "skipped: %s\n", s)
+	}
+	if !resp.Msg.GetChanged() {
+		fmt.Fprintln(out, "already ingested; no new version")
+	}
+	fmt.Fprintln(out, "entry is unlisted (visible only to you); publishing to the global catalog is admin-only")
 	return nil
+}
+
+func runCatalogDeny(ctx context.Context, c catalogClient, out io.Writer, sha, reason string) error {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("--reason is required: an unexplained kill switch is unauditable")
+	}
+	_, err := c.DenySkillObject(ctx, connect.NewRequest(&cpv1.DenySkillObjectRequest{
+		Sha256: sha,
+		Reason: reason,
+	}))
+	if err != nil {
+		return fmt.Errorf("deny skill object: %w", err)
+	}
+	fmt.Fprintf(out, "denied skill object %s\n", sha)
+	return nil
+}
+
+func runCatalogAllow(ctx context.Context, c catalogClient, out io.Writer, sha string) error {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	_, err := c.AllowSkillObject(ctx, connect.NewRequest(&cpv1.AllowSkillObjectRequest{Sha256: sha}))
+	if err != nil {
+		return fmt.Errorf("allow skill object: %w", err)
+	}
+	fmt.Fprintf(out, "allowed skill object %s\n", sha)
+	return nil
+}
+
+func runCatalogDenials(ctx context.Context, c catalogClient, out io.Writer) error {
+	resp, err := c.ListSkillObjectDenials(ctx, connect.NewRequest(&cpv1.ListSkillObjectDenialsRequest{}))
+	if err != nil {
+		return fmt.Errorf("list skill object denials: %w", err)
+	}
+	denials := resp.Msg.GetDenials()
+	if len(denials) == 0 {
+		fmt.Fprintln(out, "no denied skill objects")
+		return nil
+	}
+	w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "SHA256\tDENIED BY\tDENIED AT\tREASON")
+	for _, d := range denials {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			d.GetSha256(), d.GetDeniedBy(), time.Unix(d.GetCreatedAt(), 0).Format(time.RFC3339), d.GetReason())
+	}
+	return w.Flush()
 }
 
 // ---- CLI wiring ----
@@ -207,6 +271,9 @@ func catalogCmd() *cli.Command {
 			catalogUpdateCmd(),
 			catalogDeleteCmd(),
 			catalogSetListingCmd(),
+			catalogDenyCmd(),
+			catalogAllowCmd(),
+			catalogDenialsCmd(),
 		},
 	}
 }
@@ -214,7 +281,7 @@ func catalogCmd() *cli.Command {
 func catalogCreateCmd() *cli.Command {
 	return &cli.Command{
 		Name:      "create",
-		Usage:     "create a new catalog entry",
+		Usage:     "create a new catalog entry (unlisted by default; publishing is admin-only)",
 		ArgsUsage: "<name>",
 		Flags: append(cpGroupFlags(),
 			&cli.StringFlag{Name: "kind", Required: true, Usage: "entry kind: skill|mcp|config|plugin"},
@@ -355,7 +422,7 @@ func catalogDeleteCmd() *cli.Command {
 func catalogIngestCmd() *cli.Command {
 	return &cli.Command{
 		Name:      "ingest",
-		Usage:     "ingest a skill from a GitHub repo URL",
+		Usage:     "ingest a skill from a GitHub repo URL (unlisted by default; publishing is admin-only)",
 		ArgsUsage: "<url>",
 		Flags: append(cpGroupFlags(),
 			&cli.StringFlag{Name: "ref", Usage: "branch/tag/commit (default: repo default branch)"},
@@ -389,10 +456,10 @@ func catalogIngestCmd() *cli.Command {
 func catalogSetListingCmd() *cli.Command {
 	return &cli.Command{
 		Name:      "set-listing",
-		Usage:     "set the public listing flag for a catalog entry",
+		Usage:     "set the public listing flag for a catalog entry (--listed requires admin)",
 		ArgsUsage: "<catalog-id>",
 		Flags: append(cpGroupFlags(),
-			&cli.BoolFlag{Name: "listed", Usage: "whether the entry should be publicly listed"},
+			&cli.BoolFlag{Name: "listed", Usage: "publish the entry to the global catalog (admin-only); omit to unlist"},
 		),
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if c.Args().Len() != 1 {
@@ -403,6 +470,70 @@ func catalogSetListingCmd() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 			if err := runCatalogSetListing(ctx, client, c.Writer, c.Args().Get(0), c.Bool("listed")); err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			return nil
+		},
+	}
+}
+
+func catalogDenyCmd() *cli.Command {
+	return &cli.Command{
+		Name:      "deny",
+		Usage:     "deny a skill object by content sha256, blocking it at every start path (admin)",
+		ArgsUsage: "<sha256>",
+		Flags: append(cpGroupFlags(),
+			&cli.StringFlag{Name: "reason", Required: true, Usage: "why this sha is being denied (required, recorded in the audit trail)"},
+		),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			if c.Args().Len() != 1 {
+				return cli.Exit("usage: spawnctl catalog deny <sha256> --reason <text>", 2)
+			}
+			client, err := newCPClient(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if err := runCatalogDeny(ctx, client, c.Writer, c.Args().Get(0), c.String("reason")); err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			return nil
+		},
+	}
+}
+
+func catalogAllowCmd() *cli.Command {
+	return &cli.Command{
+		Name:      "allow",
+		Usage:     "un-deny a previously denied skill object sha256 (admin)",
+		ArgsUsage: "<sha256>",
+		Flags:     cpGroupFlags(),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			if c.Args().Len() != 1 {
+				return cli.Exit("usage: spawnctl catalog allow <sha256>", 2)
+			}
+			client, err := newCPClient(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if err := runCatalogAllow(ctx, client, c.Writer, c.Args().Get(0)); err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			return nil
+		},
+	}
+}
+
+func catalogDenialsCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "denials",
+		Usage: "list every denied skill object sha256 with its reason and audit metadata (admin)",
+		Flags: cpGroupFlags(),
+		Action: func(ctx context.Context, c *cli.Command) error {
+			client, err := newCPClient(c)
+			if err != nil {
+				return cli.Exit(err.Error(), 1)
+			}
+			if err := runCatalogDenials(ctx, client, c.Writer); err != nil {
 				return cli.Exit(err.Error(), 1)
 			}
 			return nil

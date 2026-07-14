@@ -16,6 +16,10 @@ package cp_test
 //	EVERY member's SKILL.md present at the agentinstall-canonical path (+ claude's native path)
 //	  inside the agent container, with NO extra/missing directories (anti-merge fence).
 //
+// This is also the sp-mwco.1.14 whole-journey acceptance: the only e2e that drives
+// ingest-RPC -> BUNDLE_REF attach-RPC -> spawn in a single test, with zero store-level shortcuts
+// anywhere on the path.
+//
 // This is deliberately a NEW file, not an edit to skill_ingest_e2e_test.go: §5 requires the
 // sp-mwco.1 and sp-mwco.2 epics' e2e edits to be sequenced to avoid a collision, and sp-mwco.2.9
 // already solved this by keeping its tests + shared helpers in their own files

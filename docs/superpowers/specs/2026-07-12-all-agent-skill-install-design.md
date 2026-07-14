@@ -252,6 +252,14 @@ this task:
    full budget to produce one. (Replacing the CP's own fixed 60s wall-clock start deadline with a
    progress-driven stall window is `sp-mwco.4.8`, out of scope here.)
 
+**Amendment (`sp-mwco.2.13`, 2026-07-14) — closing the remaining UNSPECIFIED holes.** The node now
+normalizes **every** report-less send to an explicit envelope, not just the agent-gone/unreadable
+leg above: ctx cancellation during the wait and a plain timeout (with or without a bundle) are all
+forced to outcome=`ERROR` (fatal) or outcome=`WARN` (tolerated, no-bundle) before the
+`SkillInstallReport` is sent, and an envelope with an unrecognized or empty outcome string is
+mapped to `WARN` rather than `UNSPECIFIED`. `SKILL_INSTALL_OUTCOME_UNSPECIFIED` is therefore
+unreachable on the node→CP wire.
+
 **Budget, derived not invented.** The old `applyReportTimeout` (2 minutes, bundle) /
 `applyReportNoBundleTimeout` (20s, no-bundle) split is **retracted**, including its "sized for a
 cold-start N-member bundle install" rationale — a 2026-07-13 measurement of the real
