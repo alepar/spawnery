@@ -20,13 +20,75 @@
  */
 
 import { test, expect } from "../../src/harness/test";
-import { execOrThrow, execInSpawn } from "../../src/scenarios/exec";
+import { execOrThrow, execInSpawn, type ExecConfig } from "../../src/scenarios/exec";
 import { nodeAdminFromEnv, restartNode } from "../../src/scenarios/nodeadmin";
 import { waitForStatus } from "../../src/scenarios/wait";
+import type { Identity } from "../../src/fixtures/identity-pool";
 
 const appId = process.env.ACC_GITHUB_APP_ID ?? "spawnery/github-app";
 const owner = process.env.ACC_GITHUB_OWNER ?? "spawnery";
 const mountPath = "/app/repo";
+const probeCmdline = "sleep 900 ";
+
+interface PaneProcessIdentity {
+  pid: string;
+  startTime: string;
+  cmdline: string;
+}
+
+async function waitForPaneProcess(
+  cfg: ExecConfig,
+  identity: Identity,
+  spawnId: string,
+  paneId: string,
+  timeoutMs = 10_000,
+): Promise<PaneProcessIdentity> {
+  const deadline = Date.now() + timeoutMs;
+  let lastPid = "unknown";
+  let lastCmdline = "unreadable";
+  let lastError = "none";
+
+  for (;;) {
+    const pane = await execInSpawn(cfg, identity, spawnId, [
+      "tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}",
+    ]);
+    const pid = pane.stdout.trim();
+    if (pane.code === 0 && /^\d+$/.test(pid)) {
+      lastPid = pid;
+      const cmdline = await execInSpawn(cfg, identity, spawnId, [
+        "sh", "-c", `tr '\\0' ' ' < /proc/${pid}/cmdline`,
+      ]);
+      lastCmdline = cmdline.stdout;
+      lastError = cmdline.code === 0 ? "none" : cmdline.stderr.trim() || `cmdline exited ${cmdline.code}`;
+
+      if (cmdline.code === 0 && cmdline.stdout === probeCmdline) {
+        const startTime = await execInSpawn(cfg, identity, spawnId, [
+          "sh", "-c", `awk '{print $22}' /proc/${pid}/stat`,
+        ]);
+        const confirmedPane = await execInSpawn(cfg, identity, spawnId, [
+          "tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}",
+        ]);
+        if (
+          startTime.code === 0 && /^\d+$/.test(startTime.stdout.trim()) &&
+          confirmedPane.code === 0 && confirmedPane.stdout.trim() === pid
+        ) {
+          return { pid, startTime: startTime.stdout.trim(), cmdline: cmdline.stdout };
+        }
+        lastError = startTime.stderr.trim() || confirmedPane.stderr.trim() || "pane PID changed during observation";
+      }
+    } else {
+      lastError = pane.stderr.trim() || `tmux display-message exited ${pane.code}`;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `tmux pane ${paneId} did not exec ${JSON.stringify(probeCmdline)} within ${timeoutMs}ms ` +
+          `(last pid ${lastPid}, cmdline ${JSON.stringify(lastCmdline)}, error ${JSON.stringify(lastError)})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
 
 function repoName(runId: string): string {
   const rand = Math.random().toString(36).slice(2, 8);
@@ -93,28 +155,14 @@ test.describe("node restart", () => {
       ).stdout.trim();
       expect(paneId, "the tmux probe window must report a pane ID").toMatch(/^%\d+$/);
 
-      const pid = (
-        await execOrThrow(cfg, ctx.identity, id, [
-          "tmux",
-          "display-message",
-          "-p",
-          "-t",
-          paneId,
-          "#{pane_pid}",
-        ])
-      ).stdout.trim();
-      expect(pid, "the tmux pane must report a pid").toMatch(/^\d+$/);
+      const { pid, startTime, cmdline: processCmdline } = await waitForPaneProcess(
+        cfg,
+        ctx.identity,
+        id,
+        paneId,
+      );
       await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${pid}`]);
-
-      const startTime = (
-        await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `awk '{print $22}' /proc/${pid}/stat`])
-      ).stdout.trim();
-      expect(startTime, "the tmux pane must report a /proc start time").toMatch(/^\d+$/);
-
-      const processCmdline = (
-        await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `tr '\\0' ' ' < /proc/${pid}/cmdline`])
-      ).stdout;
-      expect(processCmdline, "the tmux pane must run only the durable probe").toBe("sleep 900 ");
+      expect(processCmdline, "the tmux pane must run only the durable probe").toBe(probeCmdline);
 
       // 3. Baseline: in-agent git-over-HTTPS works (through the node's git proxy, trusting the per-spawn
       //    MITM CA). If THIS fails, the lane's git proxy is broken — not the restart.
