@@ -48,36 +48,46 @@ async function waitForPaneProcess(
   let lastCmdline = "unreadable";
   let lastError = "none";
 
-  for (;;) {
-    const pane = await execInSpawn(cfg, identity, spawnId, [
-      "tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}",
-    ]);
-    const pid = pane.stdout.trim();
-    if (pane.code === 0 && /^\d+$/.test(pid)) {
-      lastPid = pid;
-      const cmdline = await execInSpawn(cfg, identity, spawnId, [
-        "sh", "-c", `tr '\\0' ' ' < /proc/${pid}/cmdline`,
-      ]);
-      lastCmdline = cmdline.stdout;
-      lastError = cmdline.code === 0 ? "none" : cmdline.stderr.trim() || `cmdline exited ${cmdline.code}`;
+  const probeExec = (cmd: string[]) => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error("pane readiness deadline elapsed");
+    return execInSpawn(cfg, identity, spawnId, cmd, { timeoutMs: Math.min(2_000, remainingMs) });
+  };
 
-      if (cmdline.code === 0 && cmdline.stdout === probeCmdline) {
-        const startTime = await execInSpawn(cfg, identity, spawnId, [
-          "sh", "-c", `awk '{print $22}' /proc/${pid}/stat`,
+  for (;;) {
+    try {
+      const pane = await probeExec([
+        "tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}",
+      ]);
+      const pid = pane.stdout.trim();
+      if (pane.code === 0 && /^\d+$/.test(pid)) {
+        lastPid = pid;
+        const cmdline = await probeExec([
+          "sh", "-c", `tr '\\0' ' ' < /proc/${pid}/cmdline`,
         ]);
-        const confirmedPane = await execInSpawn(cfg, identity, spawnId, [
-          "tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}",
-        ]);
-        if (
-          startTime.code === 0 && /^\d+$/.test(startTime.stdout.trim()) &&
-          confirmedPane.code === 0 && confirmedPane.stdout.trim() === pid
-        ) {
-          return { pid, startTime: startTime.stdout.trim(), cmdline: cmdline.stdout };
+        lastCmdline = cmdline.stdout;
+        lastError = cmdline.code === 0 ? "none" : cmdline.stderr.trim() || `cmdline exited ${cmdline.code}`;
+
+        if (cmdline.code === 0 && cmdline.stdout === probeCmdline) {
+          const startTime = await probeExec([
+            "sh", "-c", `awk '{print $22}' /proc/${pid}/stat`,
+          ]);
+          const confirmedPane = await probeExec([
+            "tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}",
+          ]);
+          if (
+            startTime.code === 0 && /^\d+$/.test(startTime.stdout.trim()) &&
+            confirmedPane.code === 0 && confirmedPane.stdout.trim() === pid
+          ) {
+            return { pid, startTime: startTime.stdout.trim(), cmdline: cmdline.stdout };
+          }
+          lastError = startTime.stderr.trim() || confirmedPane.stderr.trim() || "pane PID changed during observation";
         }
-        lastError = startTime.stderr.trim() || confirmedPane.stderr.trim() || "pane PID changed during observation";
+      } else {
+        lastError = pane.stderr.trim() || `tmux display-message exited ${pane.code}`;
       }
-    } else {
-      lastError = pane.stderr.trim() || `tmux display-message exited ${pane.code}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
     }
 
     if (Date.now() >= deadline) {
