@@ -762,9 +762,12 @@ func skillInstallReportProto(spawnID string, gen uint64, env *spec.ApplyReport, 
 
 func skillInstallOutcomeProto(env *spec.ApplyReport) nodev1.SkillInstallOutcome {
 	if env == nil {
-		// Unreachable from startSpawn: forcedApplyReport normalizes env to non-nil before the
-		// send site (see below). Kept defensive for any other caller this function gains.
-		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+		// A nil envelope is the absence of a signal, and absence is never a state the CP may see
+		// (sp-mwco.2.12/.2.13). Returning UNSPECIFIED here would put the guarantee in the caller's
+		// hands — every present and future send site would have to remember to normalize first, and
+		// the one that forgets reintroduces the hole silently. WARN is the honest floor: we know the
+		// install was attempted and we do NOT know it succeeded.
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN
 	}
 	switch env.Outcome {
 	case spec.OutcomeOK:
@@ -786,8 +789,8 @@ func skillInstallOutcomeProto(env *spec.ApplyReport) nodev1.SkillInstallOutcome 
 // forcedApplyReport synthesizes an explicit envelope for every path that reaches the CP with no
 // real apply-report: a terminal failure reports outcome=error with the real reason; a tolerated
 // (no-bundle) missing report reports outcome=warn. Absence of a signal is a bug, not a state
-// (sp-mwco.2.12/.2.13) — skillInstallOutcomeProto(nil) would read UNSPECIFIED, which the CP must
-// never receive.
+// (sp-mwco.2.12/.2.13). This is belt-and-braces: skillInstallOutcomeProto also floors a nil
+// envelope at WARN, so the invariant holds structurally even if a future send site skips this.
 func forcedApplyReport(manifest spec.Manifest, fatalErr error, entries []spawnlet.InstallEntry) (*spec.ApplyReport, []spawnlet.InstallEntry) {
 	outcome, reason := spec.OutcomeWarn, "apply-report.json missing at deadline"
 	if fatalErr != nil {

@@ -350,6 +350,14 @@ func TestSkillInstallOutcomeProto_NeverUnspecified(t *testing.T) {
 			}
 		})
 	}
+
+	// The nil envelope is the ABSENCE of a signal, and absence is never a state the CP may see. This
+	// case is what makes the invariant structural rather than conventional: if the mapper returned
+	// UNSPECIFIED here, the guarantee would rest on every present and future send site remembering to
+	// normalize first, and the one that forgets would reopen the hole silently.
+	if got := skillInstallOutcomeProto(nil); got != nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN {
+		t.Errorf("skillInstallOutcomeProto(nil) = %v, want WARN (we know install was attempted; we do NOT know it succeeded)", got)
+	}
 }
 
 // lastSkillInstallReport returns the most recent SkillInstallReport sent for spawnID, or nil.
