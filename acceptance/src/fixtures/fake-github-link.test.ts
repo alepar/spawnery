@@ -106,17 +106,25 @@ describe("bootstrapFakeGitHubLinks", () => {
 
   it.each([
     ["authorize", 401, "authorize rejected"],
-    ["authorize Location", 302, ""],
+    ["authorize Location", 302, "authorize omitted location"],
     ["callback", 503, "callback rejected"],
     ["redeem", 409, "redeem rejected"],
   ])("reports bounded %s failures without credentials", async (stage, status, body) => {
     const secret = "bearer-alice";
+    const callbackState = "opaque-callback-state-7291";
     let call = 0;
     const fetchImpl = vi.fn(async (): Promise<Response> => {
       call += 1;
-      if (call === 1) return new Response(JSON.stringify({ authorize_url: "https://fake.example/auth", flow_id: "flow" }));
-      if (stage === "authorize") return new Response(`${body}${"x".repeat(70 * 1024)}${secret}`, { status });
-      if (stage === "authorize Location") return redirect();
+      if (call === 1) return new Response(JSON.stringify({
+        authorize_url: `https://fake.example/auth?state=${callbackState}`,
+        flow_id: "flow",
+      }));
+      if (stage === "authorize") {
+        return new Response(`${body}:${callbackState}:${secret}${"x".repeat(70 * 1024)}`, { status });
+      }
+      if (stage === "authorize Location") {
+        return new Response(`${body}:${callbackState}:${secret}${"x".repeat(70 * 1024)}`, { status });
+      }
       if (call === 2) return redirect("https://as.example/github/link/callback");
       if (stage === "callback") return new Response(`${body}${"x".repeat(70 * 1024)}${secret}`, { status });
       if (call === 3) return new Response(null, { status: 200 });
@@ -134,7 +142,9 @@ describe("bootstrapFakeGitHubLinks", () => {
     if (!(error instanceof Error)) throw new Error("expected bootstrap to fail");
     expect(error.message).toContain(stage.split(" ")[0]);
     expect(error.message).toContain(String(status));
+    expect(error.message).toContain(body);
     expect(error.message.length).toBeLessThan(66 * 1024);
     expect(error.message).not.toContain(secret);
+    expect(error.message).not.toContain(callbackState);
   });
 });

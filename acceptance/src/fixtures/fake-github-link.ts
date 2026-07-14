@@ -76,12 +76,15 @@ export async function bootstrapFakeGitHubLinks(
     secrets.push(start.flow_id);
 
     const authorizeUrl = new URL(start.authorize_url);
+    const authorizeState = authorizeUrl.searchParams.get("state");
+    if (authorizeState) secrets.push(authorizeState);
     authorizeUrl.searchParams.set("login_hint", identity.token);
     const authorizeResponse = await fetchImpl(authorizeUrl, { redirect: "manual" });
     await requireStatus("GitHub link authorize", authorizeResponse, 302, secrets);
     const callbackLocation = authorizeResponse.headers.get("Location");
     if (!callbackLocation) {
-      throw new Error("GitHub link authorize returned 302 without callback Location");
+      const body = await boundedBody(authorizeResponse, secrets);
+      throw new Error(`GitHub link authorize returned 302 without callback Location: ${body}`);
     }
     const callbackUrl = new URL(callbackLocation, authorizeUrl);
     const callbackState = callbackUrl.searchParams.get("state");
