@@ -1,5 +1,29 @@
 # AuthService TLS Listener (node mTLS)
 
+> ## SUPERSEDED by the unified-auth epic (sp-dvke.2) — do not implement
+>
+> This spec's **diagnosis** was right and is what unblocked the e2e mint lane: AS authenticates a node by
+> reading `r.TLS.PeerCertificates`, but `cmd/authsvc` only called plain `ListenAndServe`, so the node-mTLS
+> identity path was DEAD in the shipped binary and no CRI lane could ever run the AS mint lane.
+>
+> Its **design** was worse than the one that landed. `sp-dvke.2`
+> ([2026-07-12-unified-service-mtls-design.md](2026-07-12-unified-service-mtls-design.md)) splits AS into a
+> **public** listener (browsers/CLIs, WebPKI, bearer + PoP — and which *never* accepts a service certificate
+> as a substitute for user authorization) and an **internal** listener (services/nodes, Go-terminated TLS,
+> SPIFFE identities), with a router that requires a client certificate on every route except `/enroll`.
+>
+> This spec instead put `VerifyClientCertIfGiven` on a SINGLE listener serving both populations. That forces
+> anonymous tolerance onto *every* route — because browsers exist — so "anonymous must never become
+> authenticated" becomes a property you uphold handler-by-handler, by discipline, forever. I wrote a test for
+> it and called it the one way the change could become a privilege escalation. The split makes it
+> **structurally impossible** instead, and `TestInternalHandlerAnonymousOnlyReachesEnroll` pins it. It also
+> keeps the two trust regimes (WebPKI vs the internal PKI) off the same socket, which a single listener
+> cannot do cleanly in production.
+>
+> The code from this spec has been removed by the merge; `AS_TLS_CERT`/`AS_TLS_KEY`/`AS_CLIENT_CA` no longer
+> exist. What survives is the `AS_URL` wiring that points the node at AS's internal listener — the line that
+> switches the GitHub control server (and hence the sidecar MITM proxy) on at all.
+
 - **Bead:** `sp-astls` — blocks `sp-wwtc.5` (the agent-side MITM assertion) and `sp-2tx8.3.8`
 - **Status:** draft
 - **Mode:** one-shot (Mode B)
