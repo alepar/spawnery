@@ -171,8 +171,8 @@ type Manager struct {
 	// not be SecretInjector.DirFor(spawnID), because that path is bind-mounted into the agent.
 	githubCreds GitHubCredentialStore
 	// ghControl is the optional node-side GitHub credential control server (sp-n7iy.3). When set,
-	// CreateWithSelection wires the sidecar's MITM proxy env (SIDECAR_GITHUB_PROXY_ADDR,
-	// SIDECAR_SPAWN_ID) and the node PUSHES the CA + token into the sidecar after StartPod
+	// CreateWithSelection wires the sidecar's MITM proxy env (SIDECAR_GITHUB_PROXY_ADDR) and the
+	// node PUSHES the CA + token into the sidecar after StartPod
 	// (sp-2tx8.9 §3.1 — PushCredentials; there is no inbound listener any more). Nil = no control
 	// server (dev/insecure lane); the sidecar gets no proxy wiring and the proxy cannot fetch tokens.
 	ghControl GitHubControlServer
@@ -1367,7 +1367,6 @@ func (m *Manager) CreateWithSelection(ctx context.Context, id, appPath, model, n
 		// The sidecar binds the MITM proxy here. Constant offset from SidecarPort (inference=+0,
 		// control=+1, MITM proxy=+3). (+2 was the node's inbound GetToken listener — deleted, sp-2tx8.9.5.)
 		sidecarControlEnv = append(sidecarControlEnv, SidecarProxyAddrEnv+"="+proxyAddr(m.cfg.SidecarPort))
-		sidecarControlEnv = append(sidecarControlEnv, SidecarSpawnIDEnv+"="+id)
 	}
 
 	// Phase 1: sandbox + sidecar (the trusted, key-holding container).

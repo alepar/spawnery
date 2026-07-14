@@ -47,8 +47,9 @@ type PodSpec struct {
 	ID           string // spawn id
 	SidecarImage string
 	SidecarEnv   []string
-	// SidecarMounts are node->sidecar-only bind mounts (e.g. the GetToken UDS dir in the
-	// userns-remap lane). They are NOT surfaced to the agent container.
+	// SidecarMounts are node->sidecar-only bind mounts (e.g. the merged CA-trust bundle, sp-wwtc.3).
+	// They are NOT surfaced to the agent container. (The GetToken UDS dir this used to name is gone:
+	// sp-2tx8.9 deleted the inbound control listener and both of its lanes.)
 	SidecarMounts []Mount
 	Resources     Resources
 	Runtime       string            // OCI runtime; "" = default, e.g. "runsc"

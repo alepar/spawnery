@@ -7,10 +7,6 @@ package spawnlet
 // fresh token here would not match what the sidecar is actually enforcing.
 const SidecarControlTokenEnv = "SIDECAR_CONTROL_TOKEN"
 
-// SidecarSpawnIDEnv is the sidecar env var carrying THIS spawn's id. The sidecar tags its own
-// telemetry/log lines with it and uses it to sanity-check the credentials the node PUSHES to
-// /control/github (sp-2tx8.9). Injected for every spawn with a github control server configured.
-const SidecarSpawnIDEnv = "SIDECAR_SPAWN_ID"
 
 // SidecarCABundleMountPath is the container DIRECTORY where a node-provided merged CA bundle (system
 // roots + an extra trusted CA) is bind-mounted into the SIDECAR, read-only, when

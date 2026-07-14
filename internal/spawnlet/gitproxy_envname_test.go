@@ -15,17 +15,19 @@ func TestSidecarProxyAddrEnvName(t *testing.T) {
 	}
 }
 
-// TestSidecarEnvNamesMatchSidecarReads pins every sidecar control env var NAME the node injects to
-// exactly what internal/sidecar reads. Divergence (or a missing inject) silently breaks the github
-// path: SIDECAR_SPAWN_ID empty → wrong CA/token (signer-not-trusted).
+// TestSidecarEnvNamesMatchSidecarReads pins the sidecar control env var NAMES the node injects.
+//
+// NOTE what this does and does not prove: it compares each constant to a string LITERAL, so it catches a
+// rename of the constant's value — it does NOT prove the sidecar reads it. SIDECAR_SPAWN_ID was pinned
+// here for exactly that reason while the sidecar read it nowhere; the pin gave the illusion of a
+// name-to-consumer contract and kept a dead var alive. If you add a name here, make sure something on the
+// sidecar side actually consumes it.
 func TestSidecarEnvNamesMatchSidecarReads(t *testing.T) {
 	want := map[string]string{
 		"proxy-addr": "SIDECAR_GITHUB_PROXY_ADDR",
-		"spawn-id":   "SIDECAR_SPAWN_ID",
 	}
 	got := map[string]string{
 		"proxy-addr": SidecarProxyAddrEnv,
-		"spawn-id":   SidecarSpawnIDEnv,
 	}
 	for k, w := range want {
 		if got[k] != w {
