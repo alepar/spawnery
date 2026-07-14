@@ -9,7 +9,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"spawnery/internal/runtime"
@@ -300,214 +299,10 @@ func TestAdoptFailsClosedWhenContainerEnvErrors(t *testing.T) {
 	}
 }
 
-// The UDS lane: Adopt reconstructs the transport from the sidecar's own env (SIDECAR_GETTOKEN_UDS),
-// re-Serves on the HOST control-dir path (not the in-container path), and re-renders the agent's
-// git-env trust bundle from the persisted CA — proving the whole re-adoption chain (D2's healing
-// included, since this test's node has no persisted CA before Adopt runs).
-func TestAdoptReservesUDSControlTransportAndRerendersGitEnv(t *testing.T) {
-	ctx := context.Background()
-	be := fakepod.New()
-	t.Cleanup(be.Close)
-	dataRoot := t.TempDir()
-	overrideSidecarReadyProbe(t, nil)
-
-	mock1 := &mockGitHubControlServer{}
-	m1 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
-	})
-	m1.SetGitHubControlServer(mock1)
-	if _, err := m1.Create(ctx, "sp1", "../../examples/secret-app", "model", "", "", 1); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	mock2 := &mockGitHubControlServer{}
-	m2 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
-	})
-	m2.SetGitHubControlServer(mock2)
-	pods, err := m2.UntrackedPods(ctx)
-	if err != nil || len(pods) != 1 {
-		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
-	}
-
-	if _, err := m2.Adopt(ctx, pods[0], AdoptSpec{AppRef: "../../examples/secret-app", Model: "model", Generation: 1}); err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-
-	st, ok := mock2.lastServe()
-	if !ok {
-		t.Fatal("Adopt did not call Serve")
-	}
-	if st.Network != "unix" {
-		t.Fatalf("Serve Network = %q, want unix", st.Network)
-	}
-	wantAddr := filepath.Join(m2.controlDirFor("sp1"), SidecarControlSocketName)
-	if st.Address != wantAddr {
-		t.Fatalf("Serve Address = %q, want %q (the HOST path)", st.Address, wantAddr)
-	}
-	if st.Bearer != "" {
-		t.Fatalf("Serve Bearer = %q, want empty for the UDS lane", st.Bearer)
-	}
-
-	gitEnvDir := filepath.Join(dataRoot, "git-env", "sp1")
-	caCert, err := os.ReadFile(filepath.Join(gitEnvDir, SpawnCACertName))
-	if err != nil {
-		t.Fatalf("read spawn-ca.crt: %v", err)
-	}
-	if string(caCert) != "fake-ca-cert" {
-		t.Fatalf("spawn-ca.crt = %q, want the CA the mock control server returned", caCert)
-	}
-	bundle, err := os.ReadFile(filepath.Join(gitEnvDir, CABundleName))
-	if err != nil {
-		t.Fatalf("read ca-bundle.crt: %v", err)
-	}
-	if !strings.HasSuffix(strings.TrimRight(string(bundle), "\n"), "fake-ca-cert") {
-		t.Fatalf("ca-bundle.crt = %q, want it to end with the spawn CA", bundle)
-	}
-}
-
-// The TCP lane: Adopt reconstructs Address/Bearer/PodIP from the sidecar's own env
-// (SIDECAR_GETTOKEN_ADDR/_BEARER), never re-derived from the CURRENT node config (D3) — a node
-// whose GetTokenListenIP changed across the restart must not "fix" a running pod onto a lane the
-// sidecar was never told about.
-func TestAdoptReservesTCPControlTransportFromSidecarEnv(t *testing.T) {
-	ctx := context.Background()
-	be := fakepod.New()
-	t.Cleanup(be.Close)
-	dataRoot := t.TempDir()
-	overrideSidecarReadyProbe(t, nil)
-
-	mock1 := &mockGitHubControlServer{}
-	m1 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1",
-		UsernsMode: "off", GetTokenListenIP: "127.0.0.1",
-	})
-	m1.SetGitHubControlServer(mock1)
-	if _, err := m1.Create(ctx, "sp1", "../../examples/secret-app", "model", "", "", 1); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	wantAddr := sidecarEnvVal(be.PodSpec("sp1").SidecarEnv, SidecarGetTokenAddrEnv)
-	wantBearer := sidecarEnvVal(be.PodSpec("sp1").SidecarEnv, SidecarGetTokenBearerEnv)
-	if wantAddr == "" || wantBearer == "" {
-		t.Fatal("setup: sidecar env missing TCP GetToken vars")
-	}
-
-	// A DIFFERENT GetTokenListenIP on the "restarted" node must NOT change the transport Adopt
-	// re-serves — it must come from the sidecar's env, not this node's current config.
-	mock2 := &mockGitHubControlServer{}
-	m2 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1",
-		UsernsMode: "off", GetTokenListenIP: "10.9.9.9",
-	})
-	m2.SetGitHubControlServer(mock2)
-	pods, err := m2.UntrackedPods(ctx)
-	if err != nil || len(pods) != 1 {
-		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
-	}
-
-	if _, err := m2.Adopt(ctx, pods[0], AdoptSpec{AppRef: "../../examples/secret-app", Model: "model", Generation: 1}); err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-
-	st, ok := mock2.lastServe()
-	if !ok {
-		t.Fatal("Adopt did not call Serve")
-	}
-	if st.Network != "tcp" {
-		t.Fatalf("Serve Network = %q, want tcp", st.Network)
-	}
-	if st.Address != wantAddr {
-		t.Fatalf("Serve Address = %q, want %q (from the sidecar env, not the current node config)", st.Address, wantAddr)
-	}
-	if st.Bearer != wantBearer {
-		t.Fatalf("Serve Bearer = %q, want %q", st.Bearer, wantBearer)
-	}
-	if st.PodIP != pods[0].PodIP {
-		t.Fatalf("Serve PodIP = %q, want %q", st.PodIP, pods[0].PodIP)
-	}
-}
-
-// A spawn created with no GitHub wiring (no SIDECAR_GETTOKEN_* in its env) has nothing for Adopt to
-// re-serve — Serve must not be called, and Adopt still succeeds.
-func TestAdoptSkipsServeWhenNoTransportInSidecarEnv(t *testing.T) {
-	ctx := context.Background()
-	be := fakepod.New()
-	t.Cleanup(be.Close)
-	dataRoot := t.TempDir()
-	overrideSidecarReadyProbe(t, nil)
-
-	// UsernsMode "off" + no GetTokenListenIP: the TCP lane with nothing to inject (see Create's own
-	// comment: "No GetTokenListenIP: SIDECAR_GETTOKEN_ADDR is not injected").
-	mock1 := &mockGitHubControlServer{}
-	m1 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "off",
-	})
-	m1.SetGitHubControlServer(mock1)
-	if _, err := m1.Create(ctx, "sp1", "../../examples/secret-app", "model", "", "", 1); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if sidecarEnvVal(be.PodSpec("sp1").SidecarEnv, SidecarGetTokenAddrEnv) != "" {
-		t.Fatal("setup: expected no SIDECAR_GETTOKEN_ADDR in sidecar env")
-	}
-
-	mock2 := &mockGitHubControlServer{}
-	m2 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "off",
-	})
-	m2.SetGitHubControlServer(mock2)
-	pods, err := m2.UntrackedPods(ctx)
-	if err != nil || len(pods) != 1 {
-		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
-	}
-
-	if _, err := m2.Adopt(ctx, pods[0], AdoptSpec{AppRef: "../../examples/secret-app", Model: "model", Generation: 1}); err != nil {
-		t.Fatalf("Adopt: %v", err)
-	}
-	if _, ok := mock2.lastServe(); ok {
-		t.Fatal("Adopt called Serve with no transport in the sidecar env")
-	}
-}
-
-// A Serve error on adopt is fail-closed: the spawn is left out of the store entirely (the caller
-// then capture-before-reaps the pod).
-func TestAdoptFailsClosedOnServeError(t *testing.T) {
-	ctx := context.Background()
-	be := fakepod.New()
-	t.Cleanup(be.Close)
-	dataRoot := t.TempDir()
-	overrideSidecarReadyProbe(t, nil)
-
-	mock1 := &mockGitHubControlServer{}
-	m1 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
-	})
-	m1.SetGitHubControlServer(mock1)
-	if _, err := m1.Create(ctx, "sp1", "../../examples/secret-app", "model", "", "", 1); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	mock2 := &mockGitHubControlServer{serveErr: errors.New("bind failed")}
-	m2 := NewManagerWithBackend(be, &recordingApplier{}, ManagerConfig{
-		AgentImage: "a", SidecarImage: "s", DataRoot: dataRoot, NodeID: "n1", UsernsMode: "remap",
-	})
-	m2.SetGitHubControlServer(mock2)
-	pods, err := m2.UntrackedPods(ctx)
-	if err != nil || len(pods) != 1 {
-		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
-	}
-
-	if _, err := m2.Adopt(ctx, pods[0], AdoptSpec{AppRef: "../../examples/secret-app", Model: "model", Generation: 1}); err == nil {
-		t.Fatal("Adopt must fail closed when Serve errors")
-	}
-	if _, ok := m2.Store().Get("sp1"); ok {
-		t.Fatal("a failed Adopt (Serve error) left the spawn in the store")
-	}
-}
-
-// ReapPod is the ONLY cleanup that runs when an ADOPT rebuild fails AFTER Manager.Adopt already
-// re-Served the spawn's GitHub control listener (readopt.go's undo() only detaches the in-memory
-// Spawn — it never touches ghControl). Without ReapPod also calling ghControl.Stop, that listener
-// (and its cache/CA entries) leaks forever on every such failure.
+// ReapPod is the ONLY cleanup that runs when an ADOPT rebuild fails AFTER Manager.Adopt already ran
+// (readopt.go's undo() only detaches the in-memory Spawn — it never touches ghControl). Without
+// ReapPod also calling ghControl.Stop, the spawn's push loop, rejection watch and CA leak forever on
+// every such failure.
 func TestReapPodStopsGitHubControlServerAfterSuccessfulAdopt(t *testing.T) {
 	ctx := context.Background()
 	be := fakepod.New()
@@ -534,13 +329,11 @@ func TestReapPodStopsGitHubControlServerAfterSuccessfulAdopt(t *testing.T) {
 		t.Fatalf("UntrackedPods = %+v, %v", pods, err)
 	}
 
-	// Adopt succeeds and re-Serves the control listener (mirrors readopt.go's adoptPod up to the
-	// point some LATER step — tmux check, ACP re-dial — fails and the caller falls back to reap).
+	// Adopt succeeded (mirrors readopt.go's adoptPod up to the Adopt call). There is no listener to
+	// re-Serve any more (sp-2tx8.9.5) — what must still happen is that ReapPod calls ghControl.Stop, so
+	// the spawn's push loop, rejection watch and CA do not leak.
 	if _, err := m2.Adopt(ctx, pods[0], AdoptSpec{AppRef: "../../examples/secret-app", Model: "model", Generation: 1}); err != nil {
 		t.Fatalf("Adopt: %v", err)
-	}
-	if _, ok := mock2.lastServe(); !ok {
-		t.Fatal("setup: Adopt did not call Serve")
 	}
 	if got := mock2.stopCount(); got != 0 {
 		t.Fatalf("Stop called %d times before any failure/reap", got)
@@ -550,7 +343,7 @@ func TestReapPodStopsGitHubControlServerAfterSuccessfulAdopt(t *testing.T) {
 		t.Fatalf("ReapPod: %v", err)
 	}
 	if got := mock2.stopCount(); got != 1 {
-		t.Fatalf("Stop called %d times after ReapPod, want 1 (the re-Served listener must not leak)", got)
+		t.Fatalf("Stop called %d times after ReapPod, want 1 (the spawn's control resources must not leak)", got)
 	}
 }
 

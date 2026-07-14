@@ -151,15 +151,14 @@ type AdoptSpec struct {
 // Any failure rolls back everything it did and returns an error, and the CALLER then capture-before-reaps
 // the pod (ReapPod). There is no half-adopted state: a spawn is fully rebuilt or it is gone.
 //
-// The sidecar never stopped, so its per-pod secrets (SIDECAR_CONTROL_TOKEN, and — when a GitHub control
-// server is configured — the GetToken transport) are read back from ITS OWN env (m.pod.ContainerEnv),
-// never re-derived from the current node config: a node whose config changed across the restart must not
-// silently move a running pod onto a lane its sidecar was never told about (sp-2tx8.3.5 design D3). A
-// missing control token is fail-closed (no control plane recoverable at all); a missing GetToken transport
-// is not — a spawn created before the control server existed, or a TCP lane with no GETTOKEN_LISTEN_IP,
-// legitimately has no transport to re-serve, and Adopt still succeeds. The per-spawn MITM CA is persisted
-// on the node (internal/node's caStore) precisely so this re-Serve hands the agent's already-cached trust
-// bundle a CA it still recognizes, instead of the old regenerate-on-miss behaviour.
+// The sidecar never stopped, so the per-pod secret a previous node process minted — SIDECAR_CONTROL_TOKEN,
+// the bearer for the sidecar's own control listener — is still in its env. Read it back (fail-closed: no
+// env at all => no control plane, and the caller capture-before-reaps); never re-mint it, because a fresh
+// token would not match what the sidecar is actually enforcing (sp-2tx8.3.5 design D3). There is no
+// GetToken transport to reconstruct any more: sp-2tx8.9 deleted the node's inbound listener, and the node
+// now PUSHES credentials into the running sidecar (readopt.go re-pushes after a successful Adopt). The
+// per-spawn MITM CA is persisted on the node (internal/node's caStore) so that re-push hands the agent's
+// already-cached trust bundle a CA it still recognizes.
 func (m *Manager) Adopt(ctx context.Context, mp runtime.ManagedPod, spec AdoptSpec) (sp *Spawn, err error) {
 	id := mp.SpawnID
 	if spec.Generation != 0 && spec.Generation != mp.Generation {
@@ -249,35 +248,10 @@ func (m *Manager) Adopt(ctx context.Context, mp runtime.ManagedPod, spec AdoptSp
 			return nil, fmt.Errorf("adopt %s: render git proxy: %w", id, rerr)
 		}
 
-		// The GetToken transport is reconstructed from the SIDECAR'S OWN ENV (D3), never re-derived
-		// from this node's current config — see the Adopt doc comment.
-		var transport ControlTransport
-		switch {
-		case em[SidecarGetTokenUDSEnv] != "":
-			transport = ControlTransport{
-				SpawnID: id, Network: "unix",
-				Address: filepath.Join(m.controlDirFor(id), SidecarControlSocketName),
-			}
-		case em[SidecarGetTokenAddrEnv] != "":
-			transport = ControlTransport{
-				SpawnID: id, Network: "tcp",
-				Address: em[SidecarGetTokenAddrEnv],
-				Bearer:  em[SidecarGetTokenBearerEnv],
-				PodIP:   mp.PodIP,
-			}
-		default:
-			// Not a failure: a spawn created before the control server existed, or a TCP lane with no
-			// GETTOKEN_LISTEN_IP configured at create time, legitimately has no transport to re-serve.
-			// Unlike CreateWithSelection (which falls back to a PodIP-derived address), Adopt does not
-			// invent one here: at adopt time, an address the sidecar was never told about is a
-			// listener nobody in the pod can dial.
-			log.Printf("adopt %s: sidecar env has no GetToken transport; skipping github control re-serve", id)
-		}
-		if transport.Network != "" {
-			if serveErr := m.ghControl.Serve(transport); serveErr != nil {
-				return nil, fmt.Errorf("adopt %s: github control server serve: %w", id, serveErr)
-			}
-		}
+		// No listener to re-Serve: sp-2tx8.9 deleted the node's inbound control endpoint. The
+		// still-running sidecar keeps the secrets a previous node process pushed into it; the node
+		// re-pushes on re-adopt (asynchronously, non-fatally) from readopt.go's PushAsync, which covers
+		// a token that ROTATED while this node was down.
 	}
 
 	// Delta chain depth continues from the durable node-local record (it survived the restart).
