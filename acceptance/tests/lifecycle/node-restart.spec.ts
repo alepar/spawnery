@@ -3,9 +3,9 @@
  * node's running spawns (design 2026-07-12-spawnlet-restart-readoption-design.md §6).
  *
  *   create a spawn on the seeded github-slot app → write a marker file into its mount AND start a
- *   long-running process inside the agent → prove in-agent git-over-HTTPS works (baseline) →
+ *   tmux-supervised long-running process inside the agent → prove in-agent git-over-HTTPS works (baseline) →
  *   RESTART THE NODE (ACC_NODE_RESTART_CMD) → the spawn returns to ACTIVE with NO operator action →
- *   the marker file is still there, the long-running process is STILL ALIVE (same pid), and
+ *   the marker file is still there, the same pane PID/start time/cmdline is STILL ALIVE, and
  *   git-over-HTTPS still works (the per-spawn MITM CA survived the restart — sp-2tx8.3.5).
  *
  * TAG @noderestart: restarting the node disturbs every OTHER spawn on the box, so this scenario runs in its
@@ -54,18 +54,47 @@ test.describe("node restart", () => {
       });
       await cli.waitActive(ctx, id);
 
-      // 2. State that MUST survive: a marker file in the mount, and a long-running process in the agent.
+      // 2. State that MUST survive: a marker file in the mount, and a tmux-supervised process in the agent.
       const marker = `restart-${runId}-${Date.now().toString(36)}`;
       await execOrThrow(cfg, ctx.identity, id, [
         "sh",
         "-c",
         `printf %s '${marker}' > ${mountPath}/acc-restart-marker.txt`,
       ]);
+      await execOrThrow(cfg, ctx.identity, id, [
+        "tmux",
+        "new-session",
+        "-d",
+        "-s",
+        "spawn",
+        "--",
+        "sleep",
+        "900",
+      ]);
+      await execOrThrow(cfg, ctx.identity, id, ["tmux", "has-session", "-t", "spawn"]);
+
       const pid = (
-        await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", "nohup sleep 900 >/dev/null 2>&1 & echo $!"])
+        await execOrThrow(cfg, ctx.identity, id, [
+          "tmux",
+          "display-message",
+          "-p",
+          "-t",
+          "spawn:0.0",
+          "#{pane_pid}",
+        ])
       ).stdout.trim();
-      expect(pid, "the long-running process must report a pid").toMatch(/^\d+$/);
-      await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${pid}`]); // it really is running
+      expect(pid, "the tmux pane must report a pid").toMatch(/^\d+$/);
+      await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${pid}`]);
+
+      const startTime = (
+        await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `awk '{print $22}' /proc/${pid}/stat`])
+      ).stdout.trim();
+      expect(startTime, "the tmux pane must report a /proc start time").toMatch(/^\d+$/);
+
+      const processCmdline = (
+        await execOrThrow(cfg, ctx.identity, id, ["sh", "-c", `tr '\\0' ' ' < /proc/${pid}/cmdline`])
+      ).stdout;
+      expect(processCmdline, "the tmux pane must run only the durable probe").toBe("sleep 900 ");
 
       // 3. Baseline: in-agent git-over-HTTPS works (through the node's git proxy, trusting the per-spawn
       //    MITM CA). If THIS fails, the lane's git proxy is broken — not the restart.
@@ -94,14 +123,39 @@ test.describe("node restart", () => {
       // 6. The pod, its files and its in-flight work all survived.
       const restored = await execOrThrow(cfg, ctx.identity, id, ["cat", `${mountPath}/acc-restart-marker.txt`]);
       expect(restored.stdout.trim()).toBe(marker);
-      const alive = await execInSpawn(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${pid}`]);
-      expect(alive.code, `the long-running process (pid ${pid}) did not survive the restart`).toBe(0);
-      const cmdline = await execOrThrow(cfg, ctx.identity, id, [
-        "sh",
-        "-c",
-        `tr '\\0' ' ' < /proc/${pid}/cmdline`,
-      ]);
-      expect(cmdline.stdout, "pid was recycled by a different process").toContain("sleep");
+      await execOrThrow(cfg, ctx.identity, id, ["tmux", "has-session", "-t", "spawn"]);
+      const restoredPid = (
+        await execOrThrow(cfg, ctx.identity, id, [
+          "tmux",
+          "display-message",
+          "-p",
+          "-t",
+          "spawn:0.0",
+          "#{pane_pid}",
+        ])
+      ).stdout.trim();
+      expect(restoredPid, "the tmux pane PID changed across restart").toBe(pid);
+
+      const alive = await execInSpawn(cfg, ctx.identity, id, ["sh", "-c", `kill -0 ${restoredPid}`]);
+      expect(alive.code, `the tmux pane process (pid ${restoredPid}) did not survive the restart`).toBe(0);
+
+      const restoredStartTime = (
+        await execOrThrow(cfg, ctx.identity, id, [
+          "sh",
+          "-c",
+          `awk '{print $22}' /proc/${restoredPid}/stat`,
+        ])
+      ).stdout.trim();
+      expect(restoredStartTime, "the tmux pane PID was recycled across restart").toBe(startTime);
+
+      const restoredCmdline = (
+        await execOrThrow(cfg, ctx.identity, id, [
+          "sh",
+          "-c",
+          `tr '\\0' ' ' < /proc/${restoredPid}/cmdline`,
+        ])
+      ).stdout;
+      expect(restoredCmdline, "the tmux pane command changed across restart").toBe(processCmdline);
 
       // 7. git-over-HTTPS still works: the agent's cached CA bundle is still the CA the node's proxy
       //    presents (sp-2tx8.3.5 — the CA is persisted, not regenerated on a cache miss).
