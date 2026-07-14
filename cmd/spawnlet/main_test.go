@@ -142,6 +142,24 @@ func TestSpawnletConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestSpawnletConfig_ProdAttachedEnforcedNodeDisablesDirectTerminal(t *testing.T) {
+	cfg, err := loadSpawnletTest(t, "prod", nil,
+		"cp.addr=https://cp.internal", "cp.server_name=cp.internal",
+		"node.auth_mode=enforced", "node.signer_revocation_state=/tmp/signer-state",
+		"as_url=https://as.internal", "as_server_name=authsvc.internal",
+		"node.certificate_revocation_state=/tmp/cert-state", "node.certificate_revocation_issuers=/tmp/issuer.pem",
+		"node.certificate_revocation_crls=/tmp/issuer.crl")
+	if err != nil {
+		t.Fatalf("load production attached enforced config: %v", err)
+	}
+	if cfg.CP.Addr == "" || cfg.Node.AuthMode != "enforced" {
+		t.Fatalf("loaded topology is not an attached enforced node: cp.addr=%q node.auth_mode=%q", cfg.CP.Addr, cfg.Node.AuthMode)
+	}
+	if cfg.Node.TerminalAddr != "" {
+		t.Fatalf("Node.TerminalAddr = %q, want empty in production attached enforced mode", cfg.Node.TerminalAddr)
+	}
+}
+
 func TestSpawnletConfig_EnvAliasOverride(t *testing.T) {
 	cfg, err := loadSpawnletTest(t, "dev", map[string]string{
 		"NODE_ID":                      "node-prod-1",

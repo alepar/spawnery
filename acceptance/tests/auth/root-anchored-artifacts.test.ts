@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -217,12 +217,14 @@ describe("destructive VM identity", () => {
   it("plans an absolute rsync-over-SSH publication with an operand boundary", async () => {
     const cfg = loadDestructiveVMAuthConfig({ ...env, ACC_E2E_VM_RUNID: "run-123" });
     const bundleDir = await spaBundle();
+    expect((await stat(bundleDir)).mode & 0o777).toBe(0o700);
     const plan = await spaBundlePublicationPlan(cfg, relative(process.cwd(), bundleDir));
 
     expect(plan).toEqual({
       file: "rsync",
       args: [
         "-a",
+        "--chmod=Dugo+rx",
         "--delete",
         "-e",
         "ssh -i '/tmp/key' -o BatchMode=yes -o StrictHostKeyChecking=no",
