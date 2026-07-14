@@ -173,7 +173,24 @@ distrobox enter --root dev-spawnery -- bash -lc 'cd <repo-or-worktree> && <cmd>'
 - **Lint:** golangci-lint must be built with Go ≥1.26 — `GOTOOLCHAIN=go1.26.0 "$(go env GOPATH)/bin/golangci-lint" run ./...`
   (or `just lint`, which also runs eslint/tsc for `web/`). Aim for **0 issues**.
 - **Codegen:** `make gen` (buf) — run it here too; never hand-edit `gen/`.
-- **e2e (`-tags e2e`):** build the container images first (`make images`) and have Docker reachable.
+- **e2e (`-tags e2e`) — RUN FROM THE HOST, *not* the distrobox.** Inside `dev-spawnery` the user (uid
+  1001) is **not** in the docker socket's group (gid 985), so any Docker-touching test dies with
+  `permission denied on /var/run/docker.sock`. The host has Go 1.26 + docker-group access, and the
+  sqlite driver is `modernc` (pure Go), so `CGO_ENABLED=0` works there — `-race` is the only thing that
+  needs the distrobox. From the repo/worktree root:
+  ```bash
+  set -a; . deploy/garage/dev-creds.env; . .env; set +a      # needs `just garage` up
+  CGO_ENABLED=0 go test -tags e2e -run <Name> -count=1 -timeout 15m ./internal/cp/
+  ```
+- **⚠️ REBUILD THE AGENT IMAGE FROM *YOUR* WORKTREE BEFORE ANY e2e RUN.** `spawnery/agent:dev` is a
+  **single docker tag shared by every worktree**. A stale image built from a different branch produces
+  *misleading* failures — this cost a false P0 once (the image silently wrote `apply-report.json` to the
+  old path, exited 0, and the node then "timed out" for 2 minutes). If an e2e fails, **verify the image
+  is fresh before believing the failure.**
+  `make images` is the recipe — but note **`make` is not installed on the host** (it is layered via
+  rpm-ostree pending a reboot; it lives in the distrobox). Until then, run the Makefile's image recipe
+  directly from the host with `docker build`, or rebuild inside the distrobox and run the test from the
+  host.
 - **Garage-backed e2e** (journaled suspend/resume — `garage_e2e` and the CP lifecycle test): bring Garage
   up with `just garage`, then source its creds before `go test`:
   `set -a; . deploy/garage/dev-creds.env; set +a; CGO_ENABLED=1 go test -tags e2e -run <Name> ./internal/cp/`.
