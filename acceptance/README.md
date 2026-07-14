@@ -109,17 +109,36 @@ own, its files and its in-flight processes survive, and in-agent git-over-HTTPS 
 
 It needs `ACC_NODE_RESTART_CMD` (a host shell command that restarts the target's spawnlet — see
 `.env.example`); unset, it fails loudly rather than skipping. Because a node restart disturbs **every** spawn
-on the box, the scenario is tagged `@noderestart` and must run in its **own serial pass**. The default VM
-lane in `scripts/e2e-vm/run.sh` runs three serial commands:
+on the box, the scenario is tagged `@noderestart` and must run in its **own serial pass**.
+`scripts/e2e-vm/run.sh` does that automatically: restart-only Chromium first, ordinary Chromium
+excluding `@noderestart|@skill-staging` second, and the destructive root-artifact project without
+dependencies last:
 
 1. pass 1 `--project=chromium -g @noderestart`
-2. pass 2 `--project=chromium --grep-invert @noderestart`
+2. pass 2 `--project=chromium --grep-invert @noderestart|@skill-staging`
 3. pass 3 `--project=destructive-root-artifacts --no-deps`
 
 The destructive project remains dependent on Chromium for ordinary direct Playwright use; only the final
 VM pass suppresses that dependency to avoid replaying restart and ordinary coverage after destructive
 state changes. Against a target whose node you cannot restart, exclude the scenario with
 `--grep-invert @noderestart`.
+
+## Skill-staging measurement (`@skill-staging`)
+
+`tests/customization/skill-staging-s5.spec.ts` is a performance measurement, not ordinary
+acceptance coverage. It retains `@mutating` and adds `@skill-staging`; the default VM ordinary
+pass explicitly excludes it. Selection is opt-in:
+
+```bash
+export ACC_SKILL_SOURCE_REPOS
+: "${ACC_SKILL_SOURCE_REPOS:?set the reviewed repository fixture first}"
+npm run test:accept -- --project=chromium --workers=1 -g '@skill-staging'
+```
+
+The fixture must contain at least `ACC_SKILL_BUNDLE_SIZE` distinct public GitHub
+`owner/repo[:subdir]` entries with `SKILL.md`; `ACC_SKILL_STAGING_ITERATIONS` controls the sample
+count. Missing or undersized input fails the selected scenario loudly. See `.env.example` for all
+variables and `docs/e2e-vm-testing.md` for the disposable-VM invocation.
 
 ## Ownership & SLO
 

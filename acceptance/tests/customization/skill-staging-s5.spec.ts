@@ -28,7 +28,7 @@
  * Run in the VM lane (cold image cache — a fresh golden-image VM has never pulled the agent image,
  * so CreateSpawn's image pull is NOT cached out of this measurement, matching a real self-hosted
  * node's first-ever spawn):
- *   GOLDEN_IMAGE=... scripts/e2e-vm/run.sh --profile fake
+ *   GOLDEN_IMAGE=... scripts/e2e-vm/run.sh --profile fake --grep '@skill-staging'
  * (the golden image build is what makes the cache cold; nothing in this spec file manages that —
  * see docs/e2e-vm-testing.md). If the VM lane cannot reach GitHub for ingest, fall back to the
  * local dev stack (`just dev` + `just garage`) per the sp-mwco.4.6 plan; either way this spec
@@ -69,7 +69,7 @@ function parseSourceRepos(raw: string | undefined): SourceRepo[] {
 
 test(
   `staging S5: StartSpawn -> ACTIVE on a ${BUNDLE_SIZE}-member skill bundle stays well under the presign TTL (p_max over ${ITERATIONS} iterations)`,
-  { tag: "@mutating" },
+  { tag: ["@mutating", "@skill-staging"] },
   async ({ target, identity, api, cli, ctx, ns }) => {
     if (!target.seedSkillAppId) {
       throw new Error("ACC_SEED_SKILL_APP_ID is unset — see acceptance/.env.example (same precondition as injection.spec.ts).");

@@ -210,10 +210,10 @@ fi
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report-noderestart" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results-noderestart"
 npm run test:accept -- --retries=0 --workers=1 --project=chromium -g "@noderestart" && rc=0 || rc=$?
 
-# Pass 2: ordinary chromium coverage, explicitly excluding restart. Run even if restart failed so
-# independent acceptance evidence is not hidden.
+# Pass 2: ordinary chromium coverage, explicitly excluding restart and opt-in measurements. Run even
+# if restart failed so independent acceptance evidence is not hidden.
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
-npm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart" && arc=0 || arc=$?
+npm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart|@skill-staging" && arc=0 || arc=$?
 [ "$rc" = 0 ] && rc=$arc
 
 # Pass 3: destructive root-artifact coverage last. --no-deps prevents Playwright from replaying the

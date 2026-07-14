@@ -129,7 +129,22 @@ rg -Fq 'export ACC_PRODUCTION_SPA_BUNDLE="$STAGE/web-dist"' "$ROOT/scripts/e2e-v
   exit 1
 }
 
-expected_acceptance_commands=$'npm run test:accept -- --retries=0 --workers=1 --project=chromium -g "@noderestart" && rc=0 || rc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart" && arc=0 || arc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps && drc=0 || drc=$?'
+S5_SPEC="$ROOT/acceptance/tests/customization/skill-staging-s5.spec.ts"
+rg -Fq '{ tag: ["@mutating", "@skill-staging"] }' "$S5_SPEC" || {
+  echo "skill-staging S5 lacks the dedicated @skill-staging selection tag" >&2
+  exit 1
+}
+for fixture_guard in \
+  'if (repos.length < BUNDLE_SIZE)' \
+  'ACC_SKILL_SOURCE_REPOS provides ${repos.length} repo(s), need >= ${BUNDLE_SIZE}'
+do
+  rg -Fq "$fixture_guard" "$S5_SPEC" || {
+    echo "skill-staging S5 no longer fails loudly on an undersized repository fixture" >&2
+    exit 1
+  }
+done
+
+expected_acceptance_commands=$'npm run test:accept -- --retries=0 --workers=1 --project=chromium -g "@noderestart" && rc=0 || rc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart|@skill-staging" && arc=0 || arc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps && drc=0 || drc=$?'
 actual_acceptance_commands="$(
   sed -n '/^# Pass 1:/,$p' "$ROOT/scripts/e2e-vm/run.sh" |
     rg '^npm run test:accept -- '
@@ -143,7 +158,7 @@ fi
 
 for documented_pass in \
   'pass 1 `--project=chromium -g @noderestart`' \
-  'pass 2 `--project=chromium --grep-invert @noderestart`' \
+  'pass 2 `--project=chromium --grep-invert @noderestart|@skill-staging`' \
   'pass 3 `--project=destructive-root-artifacts --no-deps`'
 do
   rg -Fq -- "$documented_pass" "$ROOT/acceptance/README.md" || {
@@ -153,7 +168,7 @@ do
 done
 
 sed -n '/^# Pass 1:/,$p' "$ROOT/scripts/e2e-vm/run.sh" >"$TMP/default-acceptance-passes.sh"
-expected_acceptance_trace=$'run test:accept -- --retries=0 --workers=1 --project=chromium -g @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps'
+expected_acceptance_trace=$'run test:accept -- --retries=0 --workers=1 --project=chromium -g @noderestart\nrun test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert @noderestart|@skill-staging\nrun test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps'
 run_acceptance_case() {
   local case_name="$1" restart_rc="$2" ordinary_rc="$3" destructive_rc="$4" expected_rc="$5"
   local acceptance_trace="$TMP/default-acceptance-$case_name.trace"
@@ -168,7 +183,7 @@ run_acceptance_case() {
       printf '%s\n' "$*" >>"$acceptance_trace"
       case "$*" in
         *'--project=chromium -g @noderestart'*) return "$restart_rc" ;;
-        *'--project=chromium --grep-invert @noderestart'*) return "$ordinary_rc" ;;
+        *'--project=chromium --grep-invert @noderestart|@skill-staging'*) return "$ordinary_rc" ;;
         *'--project=destructive-root-artifacts --no-deps'*) return "$destructive_rc" ;;
         *) return 99 ;;
       esac
@@ -211,7 +226,8 @@ list_acceptance() {
 }
 
 list_acceptance --project=chromium -g '@noderestart' >"$TMP/noderestart.list"
-list_acceptance --project=chromium --grep-invert '@noderestart' >"$TMP/ordinary.list"
+list_acceptance --project=chromium --grep-invert '@noderestart|@skill-staging' >"$TMP/ordinary.list"
+list_acceptance --project=chromium -g '@skill-staging' >"$TMP/skill-staging.list"
 list_acceptance --project=destructive-root-artifacts --no-deps >"$TMP/destructive.list"
 
 restart_count="$(rg -c '^  \[chromium\].*@noderestart$' "$TMP/noderestart.list" || true)"
@@ -227,9 +243,23 @@ fi
 ordinary_total="$(rg -c '^  \[[^]]+\] › ' "$TMP/ordinary.list" || true)"
 ordinary_projects="$(sed -n 's/^  \[\([^]]*\)\] ›.*/\1/p' "$TMP/ordinary.list" | sort -u)"
 if [ "$ordinary_total" -lt 1 ] || [ "$ordinary_projects" != chromium ] ||
-    rg -q '@noderestart|auth/root-anchored-artifacts\.spec\.ts' "$TMP/ordinary.list"; then
+    rg -q '@noderestart|@skill-staging|skill-staging-s5\.spec\.ts|\[destructive-root-artifacts\]' \
+      "$TMP/ordinary.list"; then
   echo "ordinary discovery is not nonempty chromium-only coverage without excluded tests" >&2
   cat "$TMP/ordinary.list" >&2
+  exit 1
+fi
+
+skill_staging_count="$(
+  rg -c '^  \[chromium\] › customization/skill-staging-s5\.spec\.ts:' \
+    "$TMP/skill-staging.list" || true
+)"
+all_skill_staging_count="$(rg -c '^  \[' "$TMP/skill-staging.list" || true)"
+if [ "$skill_staging_count" -ne 1 ] ||
+    [ "$all_skill_staging_count" -ne 1 ] ||
+    rg -q '\[destructive-root-artifacts\]|@noderestart' "$TMP/skill-staging.list"; then
+  echo "dedicated skill-staging discovery is not exactly the S5 Chromium measurement" >&2
+  cat "$TMP/skill-staging.list" >&2
   exit 1
 fi
 

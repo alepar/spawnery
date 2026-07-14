@@ -40,6 +40,24 @@ The VM is **always torn down on exit** (`--keep` leaves it up for debugging). Fa
 (journald, containerd/runsc, Postgres, the Playwright report) are captured **before** teardown under
 `~/.local/state/spawnery-e2e/<runid>/artifacts/`.
 
+### Opt-in S5 skill-staging measurement
+
+The default VM run excludes `@skill-staging` because S5 requires a reviewed external repository
+fixture and real GitHub egress. Run it as a dedicated pass only:
+
+```bash
+export ACC_SKILL_SOURCE_REPOS
+: "${ACC_SKILL_SOURCE_REPOS:?set at least 8 reviewed owner/repo[:subdir] entries}"
+ACC_SKILL_BUNDLE_SIZE=8 ACC_SKILL_STAGING_ITERATIONS=5 \
+  GOLDEN_IMAGE=/var/lib/libvirt/images/spawnery-e2e/golden.qcow2 \
+  scripts/e2e-vm/run.sh --profile fake --grep '@skill-staging'
+```
+
+`run.sh` supplies the VM lane's seeded skill-installing app. The S5 spec fails loudly if the
+repository list is missing or smaller than `ACC_SKILL_BUNDLE_SIZE`; it never skips. This command is
+the measurement owned by `sp-mwco.4.6.1`, so documenting it does not count as executing or recording
+that measurement.
+
 ## Prerequisites (one-time host setup)
 
 1. **libvirt + KVM** running, `/dev/kvm` present (the node uses runsc **systrap**, so no nested virt
