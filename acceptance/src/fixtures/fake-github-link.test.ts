@@ -72,7 +72,7 @@ describe("bootstrapFakeGitHubLinks", () => {
         }));
       }
       throw new Error(`unexpected URL ${url}`);
-    });
+    }) as unknown as typeof fetch;
 
     await bootstrapFakeGitHubLinks({ asOrigin: "https://as.example/", identities, auth, fetchImpl });
 
@@ -95,7 +95,7 @@ describe("bootstrapFakeGitHubLinks", () => {
       if (call === 2) return redirect("https://as.example/github/link/callback");
       if (call === 3) return new Response(null, { status: 200 });
       return new Response(JSON.stringify(metadata));
-    });
+    }) as unknown as typeof fetch;
     await expect(bootstrapFakeGitHubLinks({
       asOrigin: "https://as.example",
       identities: [identities[0]],
@@ -121,7 +121,7 @@ describe("bootstrapFakeGitHubLinks", () => {
       if (stage === "callback") return new Response(`${body}${"x".repeat(70 * 1024)}${secret}`, { status });
       if (call === 3) return new Response(null, { status: 200 });
       return new Response(`${body}${"x".repeat(70 * 1024)}${secret}`, { status });
-    });
+    }) as unknown as typeof fetch;
 
     const promise = bootstrapFakeGitHubLinks({
       asOrigin: "https://as.example",
@@ -131,6 +131,7 @@ describe("bootstrapFakeGitHubLinks", () => {
     });
     const error = await promise.catch((caught: unknown) => caught as Error);
     expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error("expected bootstrap to fail");
     expect(error.message).toContain(stage.split(" ")[0]);
     expect(error.message).toContain(String(status));
     expect(error.message.length).toBeLessThan(66 * 1024);

@@ -148,6 +148,11 @@ source "$RD/acc.env"
 # suite needs real OAuth wired to the fake-GitHub identity, the demo app id, model ids, and a
 # longer spawn-active timeout (VM boot is slower than local dev) to actually run against the VM.
 export ACC_AUTH_MODE=oauth-pop
+if [[ "$PROFILE" == fake ]]; then
+  export ACC_BOOTSTRAP_FAKE_GITHUB_LINKS=1
+else
+  unset ACC_BOOTSTRAP_FAKE_GITHUB_LINKS
+fi
 export ACC_IDENTITY_POOL="acc-owner-1=acc-owner-1,acc-owner-2=acc-owner-2"
 export ACC_DESTRUCTIVE_DEV_TOKEN=devtoken1
 export ACC_ROOT_CA_PEM="$PUBLIC/root.pem"

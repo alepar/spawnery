@@ -21,6 +21,8 @@ export interface TargetConfig {
   env: string;
   targetHost: string;
   authMode: AuthMode;
+  /** Explicit fake-provider automation. Off by default and valid only with OAuth-PoP. */
+  bootstrapFakeGitHubLinks: boolean;
   identityPool: Identity[];
   nonprodHosts: string[];
   targetRef: string;
@@ -92,6 +94,15 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
       if (!env[name]?.trim()) throw new Error(`oauth-pop requires ${name}`);
     }
   }
+  const bootstrapFakeGitHubLinks = env.ACC_BOOTSTRAP_FAKE_GITHUB_LINKS ?? "0";
+  if (bootstrapFakeGitHubLinks !== "0" && bootstrapFakeGitHubLinks !== "1") {
+    throw new Error(
+      `ACC_BOOTSTRAP_FAKE_GITHUB_LINKS must be "0" or "1", got ${JSON.stringify(bootstrapFakeGitHubLinks)}`,
+    );
+  }
+  if (bootstrapFakeGitHubLinks === "1" && authMode !== "oauth-pop") {
+    throw new Error("ACC_BOOTSTRAP_FAKE_GITHUB_LINKS=1 requires ACC_AUTH_MODE=oauth-pop");
+  }
   const inferenceCapability = env.ACC_AGENT_INFERENCE_AVAILABLE;
   if (inferenceCapability !== undefined && inferenceCapability !== "0" && inferenceCapability !== "1") {
     throw new Error(`ACC_AGENT_INFERENCE_AVAILABLE must be "0" or "1", got ${JSON.stringify(inferenceCapability)}`);
@@ -103,6 +114,7 @@ export function loadTargetConfig(env: NodeJS.ProcessEnv = process.env): TargetCo
     env: env.ACC_ENV ?? "dev",
     targetHost,
     authMode,
+    bootstrapFakeGitHubLinks: bootstrapFakeGitHubLinks === "1",
     identityPool: parseIdentityPool(env.ACC_IDENTITY_POOL!),
     nonprodHosts: (env.ACC_NONPROD_HOSTS ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0),
     targetRef: env.ACC_TARGET_REF!,
