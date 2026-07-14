@@ -647,9 +647,13 @@ func (s *Server) runNode(ctx context.Context, sender registry.NodeSender, recv f
 			s.sched.Progress(m.ResumeProgress.GetSpawnId(), m.ResumeProgress.GetGeneration())
 		case *nodev1.NodeMessage_SkillInstallReport:
 			// Per-skill install status (sp-mwco.2.7): generation-fenced (skillInstalls.set drops
-			// a report older than the currently-recorded generation for this spawn).
-			s.skillInstalls.set(m.SkillInstallReport.GetSpawnId(), m.SkillInstallReport.GetGeneration(),
-				skillInstallEntriesFromProto(m.SkillInstallReport.GetEntries()))
+			// a report older than the currently-recorded generation for this spawn). The envelope
+			// verdict is normalized (and an UNSPECIFIED arrival flagged) by
+			// skillInstallOutcomeFromProto — sp-mwco.2.14.
+			rep := m.SkillInstallReport
+			s.skillInstalls.set(rep.GetSpawnId(), rep.GetGeneration(),
+				skillInstallOutcomeFromProto(rep.GetSpawnId(), rep.GetOutcome()),
+				skillInstallEntriesFromProto(rep.GetEntries()))
 		case *nodev1.NodeMessage_RepresignArtifactsRequest:
 			// The FIRST node-initiated request/response pair on Attach (sp-mwco.4.3): dispatched on
 			// its own goroutine so the DB + presign round trip never blocks this receive loop. ctx is
@@ -690,6 +694,33 @@ func skillInstallStatusFromProto(st nodev1.SkillInstallStatus) string {
 		return "failed"
 	default:
 		return "unknown"
+	}
+}
+
+// skillInstallOutcomeFromProto maps the wire SkillInstallOutcome envelope verdict to its
+// lowercase string form for storage in skillInstalls.
+//
+// UNSPECIFIED must never arrive here: sp-mwco.2.12/.2.13 made the node float a nil/unrecognized
+// apply-report to WARN (never UNSPECIFIED) before sending, so an UNSPECIFIED outcome on this path
+// means that guarantee broke somewhere upstream. The CP is the component that depends on the
+// invariant, so it asserts it rather than trusting it silently (sp-mwco.2.14): log the violation
+// at error level (with the spawn id, so it's traceable to a concrete report) and record the
+// envelope as a failure — "error" — instead of passing UNSPECIFIED through to the stored state
+// and the spawn summary.
+func skillInstallOutcomeFromProto(spawnID string, outcome nodev1.SkillInstallOutcome) string {
+	switch outcome {
+	case nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK:
+		return "ok"
+	case nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN:
+		return "warn"
+	case nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED:
+		return "bundle_failed"
+	case nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR:
+		return "error"
+	default:
+		slog.Error("skill install report: UNSPECIFIED outcome — invariant violation, node must never send this",
+			"spawn", spawnID)
+		return "error"
 	}
 }
 

@@ -1404,7 +1404,8 @@ func (s *Server) ListSpawns(ctx context.Context, _ *connect.Request[cpv1.ListSpa
 			TransitionPhase: transPhase, TransitionDetail: transDetail,
 			ProvisionStep: provStep, ProvisionTotal: provTotal, ProvisionStepLabel: provLabel,
 			ErrorStep: sp.ErrorStep, ErrorDetail: sp.ErrorDetail,
-			SkillInstalls: skillInstallsToProto(s.skillInstalls, sp.ID),
+			SkillInstalls:       skillInstallsToProto(s.skillInstalls, sp.ID),
+			SkillInstallOutcome: skillInstallOutcomeForSpawn(s.skillInstalls, sp.ID),
 		}
 		if sp.ParentSpawnID != nil {
 			out[i].ParentSpawnId = *sp.ParentSpawnID

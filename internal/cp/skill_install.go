@@ -15,6 +15,7 @@ type skillInstallEntry struct {
 // skillInstallState is the latest known skill-install report for one spawn.
 type skillInstallState struct {
 	generation uint64
+	outcome    string // envelope verdict: "ok" | "warn" | "bundle_failed" | "error" (sp-mwco.2.14)
 	entries    []skillInstallEntry
 }
 
@@ -36,10 +37,13 @@ type skillInstalls struct {
 
 func newSkillInstalls() *skillInstalls { return &skillInstalls{m: map[string]skillInstallState{}} }
 
-// set records entries for spawnID at generation gen, dropping the update if a newer generation is
-// already recorded for that spawn. Nil-safe (no-op) so a Server built without NewServer's full
-// wiring (some narrowly-scoped tests construct &Server{...} directly) doesn't panic.
-func (s *skillInstalls) set(spawnID string, gen uint64, entries []skillInstallEntry) {
+// set records outcome+entries for spawnID at generation gen, dropping the update if a newer
+// generation is already recorded for that spawn. outcome is the already-normalized envelope
+// verdict ("ok" | "warn" | "bundle_failed" | "error" — see skillInstallOutcomeFromProto, which
+// guarantees the caller never passes through an UNSPECIFIED wire value uncaught). Nil-safe (no-op)
+// so a Server built without NewServer's full wiring (some narrowly-scoped tests construct
+// &Server{...} directly) doesn't panic.
+func (s *skillInstalls) set(spawnID string, gen uint64, outcome string, entries []skillInstallEntry) {
 	if s == nil {
 		return
 	}
@@ -48,7 +52,7 @@ func (s *skillInstalls) set(spawnID string, gen uint64, entries []skillInstallEn
 	if existing, ok := s.m[spawnID]; ok && existing.generation > gen {
 		return // stale-generation report; drop
 	}
-	s.m[spawnID] = skillInstallState{generation: gen, entries: entries}
+	s.m[spawnID] = skillInstallState{generation: gen, outcome: outcome, entries: entries}
 }
 
 // get is nil-safe (see set).
@@ -63,6 +67,20 @@ func (s *skillInstalls) get(spawnID string) ([]skillInstallEntry, bool) {
 		return nil, false
 	}
 	return st.entries, true
+}
+
+// getOutcome is nil-safe (see set). Returns "" when no report is recorded for spawnID.
+func (s *skillInstalls) getOutcome(spawnID string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.m[spawnID]
+	if !ok {
+		return "", false
+	}
+	return st.outcome, true
 }
 
 // clear is nil-safe (see set).
@@ -103,5 +121,32 @@ func skillInstallStatusToProto(status string) cpv1.SkillInstallStatus {
 		return cpv1.SkillInstallStatus_SKILL_INSTALL_STATUS_FAILED
 	default:
 		return cpv1.SkillInstallStatus_SKILL_INSTALL_STATUS_UNKNOWN
+	}
+}
+
+// skillInstallOutcomeForSpawn returns spawnID's latest envelope verdict as a wire
+// SkillInstallOutcome for SpawnSummary (sp-mwco.2.14), or UNSPECIFIED when no report is recorded
+// yet — the only case in which SpawnSummary legitimately carries UNSPECIFIED (see field doc).
+func skillInstallOutcomeForSpawn(installs *skillInstalls, spawnID string) cpv1.SkillInstallOutcome {
+	outcome, ok := installs.getOutcome(spawnID)
+	if !ok {
+		return cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+	}
+	return skillInstallOutcomeToProto(outcome)
+}
+
+// skillInstallOutcomeToProto maps the CP's internal lowercase outcome string to the wire enum.
+func skillInstallOutcomeToProto(outcome string) cpv1.SkillInstallOutcome {
+	switch outcome {
+	case "ok":
+		return cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_OK
+	case "warn":
+		return cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN
+	case "bundle_failed":
+		return cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_BUNDLE_FAILED
+	case "error":
+		return cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR
+	default:
+		return cpv1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
 	}
 }

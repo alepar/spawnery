@@ -423,7 +423,7 @@ func TestResumeSpawn_ClearsStaleSkillInstalls(t *testing.T) {
 	waitActive(t, s, id)
 
 	// Seed a stale entry as if a prior episode had reported it.
-	s.skillInstalls.set(id, 1, []skillInstallEntry{{Name: "stale-from-prior-episode", Status: "applied"}})
+	s.skillInstalls.set(id, 1, "ok", []skillInstallEntry{{Name: "stale-from-prior-episode", Status: "applied"}})
 
 	if _, err := s.SuspendSpawn(ctx, connect.NewRequest(&cpv1.SuspendSpawnRequest{SpawnId: id})); err != nil {
 		t.Fatalf("SuspendSpawn: %v", err)
