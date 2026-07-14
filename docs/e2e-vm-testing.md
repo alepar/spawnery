@@ -54,9 +54,10 @@ ACC_SKILL_BUNDLE_SIZE=8 ACC_SKILL_STAGING_ITERATIONS=5 \
 ```
 
 `run.sh` supplies the VM lane's seeded skill-installing app. The S5 spec fails loudly if the
-repository list is missing or smaller than `ACC_SKILL_BUNDLE_SIZE`; it never skips. This command is
-the measurement owned by `sp-mwco.4.6.1`, so documenting it does not count as executing or recording
-that measurement.
+repository list is missing or smaller than `ACC_SKILL_BUNDLE_SIZE`, either tuning value is not a
+finite integer in range (bundle size >= 8, iterations >= 1), or ingest produces fewer than the
+requested number of distinct catalog IDs; it never skips. This command is the measurement owned by
+`sp-mwco.4.6.1`, so documenting it does not count as executing or recording that measurement.
 
 ## Prerequisites (one-time host setup)
 

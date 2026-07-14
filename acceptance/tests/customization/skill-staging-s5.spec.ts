@@ -38,6 +38,7 @@
 import { test, expect } from "../../src/harness/test";
 import { ProfileCli } from "../../src/drivers/customization";
 import { SkillIngestOracle } from "../../src/drivers/skills";
+import { assertDistinctCatalogIds, loadSkillStagingConfig } from "./skill-staging-s5-support";
 
 // skillstore.PresignTTL (internal/cp/skillstore/skillstore.go:27). Not exposed to TS via any API;
 // mirrored here as a literal — if the Go constant changes, this assertion's headroom must be
@@ -47,8 +48,7 @@ const PRESIGN_TTL_MS = 30 * 60 * 1000;
 // spare (i.e. the measurement itself must be under 1/3 of the TTL).
 const TTL_HEADROOM_DIVISOR = 3;
 
-const BUNDLE_SIZE = Number(process.env.ACC_SKILL_BUNDLE_SIZE ?? "8");
-const ITERATIONS = Number(process.env.ACC_SKILL_STAGING_ITERATIONS ?? "5");
+const { bundleSize: BUNDLE_SIZE, iterations: ITERATIONS } = loadSkillStagingConfig();
 
 interface SourceRepo {
   url: string;
@@ -89,8 +89,9 @@ test(
     const spawnIds: string[] = [];
 
     try {
-      // --- ingest K distinct skills, attach every one to a single profile ---
+      // --- ingest K distinct skills, then attach every one to a single profile ---
       profileId = await profileCli.create(ns("prof-s5"));
+      const catalogIds: string[] = [];
       for (let i = 0; i < BUNDLE_SIZE; i++) {
         const repo = repos[i];
         const { catalogId } = await oracle.ingestSkillFromURL({
@@ -98,6 +99,10 @@ test(
           subdir: repo.subdir,
           name: ns(`s5-skill-${i}`),
         });
+        catalogIds.push(catalogId);
+      }
+      assertDistinctCatalogIds(catalogIds, BUNDLE_SIZE);
+      for (const [i, catalogId] of catalogIds.entries()) {
         await profileCli.entryAddCatalog(profileId, { kind: "skill", name: ns(`s5-entry-${i}`), catalogId });
       }
 

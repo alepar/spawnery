@@ -137,8 +137,11 @@ npm run test:accept -- --project=chromium --workers=1 -g '@skill-staging'
 
 The fixture must contain at least `ACC_SKILL_BUNDLE_SIZE` distinct public GitHub
 `owner/repo[:subdir]` entries with `SKILL.md`; `ACC_SKILL_STAGING_ITERATIONS` controls the sample
-count. Missing or undersized input fails the selected scenario loudly. See `.env.example` for all
-variables and `docs/e2e-vm-testing.md` for the disposable-VM invocation.
+count. The bundle size must be a finite integer of at least 8, and the iteration count a finite
+integer of at least 1. Ingest must yield `ACC_SKILL_BUNDLE_SIZE` distinct catalog IDs, so sources
+deduplicated by content fail before measurement. Missing or invalid input fails the selected
+scenario loudly. See `.env.example` for all variables and `docs/e2e-vm-testing.md` for the
+disposable-VM invocation.
 
 ## Ownership & SLO
 
