@@ -320,12 +320,21 @@ mkdir -p /etc/spawnery/env.d
 # against the golden CA in the VM's trust store (both installed above).
 # The API goes through the same TLS front (Gitea serves its API at /api/v1 on that host).
 # Gitea's own ROOT_URL is https://github.com/, so the clone_url it returns matches GITHUB_HOST.
-cat > /etc/spawnery/env.d/gitea.env <<ENV
-GITHUB_API_BASE_URL=https://github.com/api/v1
-GITHUB_HOST=github.com
-GITHUB_STATIC_TOKEN=\$TOKEN
-AS_FAKE_GITHUB_TOKEN=\$TOKEN
-ENV
+# BEGIN GITEA_ENV_PUBLICATION
+ENV_FILE="\${GITEA_ENV_FILE:-/etc/spawnery/env.d/gitea.env}"
+umask 077
+ENV_TMP="\$(mktemp "\${ENV_FILE}.tmp.XXXXXX")"
+trap 'rm -f "\$ENV_TMP"' EXIT
+printf '%s\n' \
+  'GITHUB_API_BASE_URL=https://github.com/api/v1' \
+  'GITHUB_HOST=github.com' \
+  "GITHUB_STATIC_TOKEN=\$TOKEN" \
+  "AS_FAKE_GITHUB_TOKEN=\$TOKEN" >"\$ENV_TMP"
+chmod 0600 "\$ENV_TMP"
+chown root:root "\$ENV_TMP"
+mv -f "\$ENV_TMP" "\$ENV_FILE"
+trap - EXIT
+# END GITEA_ENV_PUBLICATION
 BOOT
 sudo chmod 0755 /usr/local/bin/spawnery-gitea-bootstrap.sh
 sudo tee /etc/systemd/system/spawnery-gitea-bootstrap.service >/dev/null <<'EOF'

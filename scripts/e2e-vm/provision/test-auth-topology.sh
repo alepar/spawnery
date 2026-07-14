@@ -288,6 +288,63 @@ cmp -s "$expected_gitea_env" "$tmp/gitea.env" || {
   exit 1
 }
 provision="$HERE/provision.sh"
+mkdir -p "$tmp/bootstrap-bin"
+cat >"$tmp/bootstrap-bin/chown" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BOOTSTRAP_CHOWN_LOG"
+EOF
+cat >"$tmp/bootstrap-bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$(umask)" == 0077 ]]
+exec /usr/bin/mktemp "$@"
+EOF
+cat >"$tmp/bootstrap-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+src="${@: -2:1}"
+dst="${@: -1}"
+[[ "$(dirname "$src")" == "$(dirname "$dst")" ]]
+[[ "$src" == "${dst}.tmp."* ]]
+[[ "$(stat -c %a "$src")" == 600 ]]
+[[ "$(cat "$dst")" == sentinel-before-publication ]]
+printf '%s -> %s\n' "$src" "$dst" >>"$BOOTSTRAP_MV_LOG"
+/bin/mv "$@"
+EOF
+chmod +x "$tmp/bootstrap-bin/chown" "$tmp/bootstrap-bin/mktemp" "$tmp/bootstrap-bin/mv"
+bootstrap_env="$tmp/fresh-gitea.env"
+printf '%s\n' sentinel-before-publication >"$bootstrap_env"
+chmod 0644 "$bootstrap_env"
+bootstrap_publication="$tmp/generated-bootstrap-publication.sh"
+cat >"$bootstrap_publication" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+TOKEN=fresh-minted-token
+EOF
+sed -n '/^# BEGIN GITEA_ENV_PUBLICATION$/,/^# END GITEA_ENV_PUBLICATION$/p' "$provision" \
+  | sed 's/\\\$/\$/g' >>"$bootstrap_publication"
+chmod +x "$bootstrap_publication"
+GITEA_ENV_FILE="$bootstrap_env" \
+BOOTSTRAP_CHOWN_LOG="$tmp/bootstrap-chown.log" \
+BOOTSTRAP_MV_LOG="$tmp/bootstrap-mv.log" \
+PATH="$tmp/bootstrap-bin:$PATH" \
+  "$bootstrap_publication"
+cmp -s "$expected_gitea_env" "$bootstrap_env" || {
+  echo "fresh Gitea bootstrap did not publish the exact secure environment" >&2
+  exit 1
+}
+[[ "$(stat -c %a "$bootstrap_env")" == 600 ]] || {
+  echo "fresh Gitea bootstrap did not keep the static token private" >&2
+  exit 1
+}
+[[ "$(cat "$tmp/bootstrap-chown.log")" == 'root:root '* ]] || {
+  echo "fresh Gitea bootstrap did not assign root ownership" >&2
+  exit 1
+}
+[[ "$(wc -l <"$tmp/bootstrap-mv.log")" == 1 ]] || {
+  echo "fresh Gitea bootstrap did not use one atomic replacement" >&2
+  exit 1
+}
 for secure_gitea_binding in \
   'DOMAIN = github.com' \
   'ROOT_URL = https://github.com/' \
