@@ -170,3 +170,21 @@ collapsing two lanes into one channel.
 
 *As this design is implemented and iterated on — bug fixes, adjustments, anything that diverged from the
 assumptions above — append a dated note here, whether or not a formal debugging skill was used.*
+
+### 2026-07-14 — implemented (sp-2tx8.9.1 … .9.5)
+
+Landed as specced. The deletion (§5) went further than the spec listed, because the things it named
+turned out to be load-bearing for nothing else:
+
+- `ManagerConfig.ControlRoot` + `controlDirFor` + the per-spawn control dir: deleted. Its only purpose was
+  hosting the UDS socket.
+- `ControlTransport` and `GitHubControlServer.Serve`: deleted. `Adopt` no longer reconstructs a transport
+  from the sidecar's env — the only per-pod secret it still reads back is `SIDECAR_CONTROL_TOKEN`.
+- The node's inbound surface is now provably absent: `internal/node/no_inbound_listener_test.go` fails the
+  build's tests if any of `net.Listen*` / `http.ListenAndServe*` / `http.Serve` reappears in the github
+  control plane, and `internal/spawnlet/no_inbound_listener_test.go` asserts a created spawn gets no
+  `SIDECAR_GETTOKEN_*` env, no `/run/spawnery/control` mount and no control dir — on all three userns lanes.
+
+Left standing on purpose: the `sidecarv1.GetTokenRequest` / `GetSpawnCARequest` / `SpawnCADelivery` proto
+messages. Nothing sends or serves them any more, but deleting them means `make gen` and serializing against
+every other proto-touching task for no functional gain. Tracked as a follow-up.
