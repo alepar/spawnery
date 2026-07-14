@@ -36,8 +36,13 @@ func TestStartPodSandboxSidecarAndHandle(t *testing.T) {
 		ID:           "spawn-7",
 		SidecarImage: "spawnery/sidecar:dev",
 		SidecarEnv:   []string{"OPENROUTER_API_KEY=k", "SIDECAR_ADDR=127.0.0.1:8080"},
-		Resources:    runtime.Resources{MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PidsLimit: 128},
-		Runtime:      "runsc",
+		SidecarMounts: []runtime.Mount{{
+			HostPath:      "/etc/spawnery/sidecar-ca-bundle/ca-bundle.crt",
+			ContainerPath: "/run/spawnery/sidecar-ca/ca-bundle.crt",
+			ReadOnly:      true,
+		}},
+		Resources: runtime.Resources{MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PidsLimit: 128},
+		Runtime:   "runsc",
 	})
 	if err != nil {
 		t.Fatalf("StartPod: %v", err)
@@ -75,6 +80,14 @@ func TestStartPodSandboxSidecarAndHandle(t *testing.T) {
 	}
 	if sc.Linux.Resources.Unified["pids.max"] != "128" {
 		t.Fatalf("pids.max = %q", sc.Linux.Resources.Unified["pids.max"])
+	}
+	if len(sc.Mounts) != 1 {
+		t.Fatalf("sidecar mounts = %v, want exactly one", sc.Mounts)
+	}
+	mount := sc.Mounts[0]
+	if mount.HostPath != "/etc/spawnery/sidecar-ca-bundle/ca-bundle.crt" ||
+		mount.ContainerPath != "/run/spawnery/sidecar-ca/ca-bundle.crt" || !mount.Readonly {
+		t.Fatalf("sidecar mount = %+v", mount)
 	}
 }
 
