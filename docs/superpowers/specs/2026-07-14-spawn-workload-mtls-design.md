@@ -267,10 +267,37 @@ N reconnect after N+1 disconnect and N disconnect after N+1 reconnect.
 
 Before every signature, the AS calls `AuthorizeSpawnWorkloadSVID` on a new, separate protobuf service,
 `cpinternal.v1.WorkloadIssuanceAuthorizationService`, over the existing AS-service-to-CP mTLS client. The
-request contains the AS-derived node class, node account, node ID, spawn ID, generation, CSR SPKI digest,
-and the root-revocation epoch/digest captured by the AS. The CP route permits only an `authsvc` service
-principal. Authorization returns the bounded issuance lease described in section 5.5, not a timeless
-boolean.
+request contains only AS-attested node/issuance facts:
+
+```text
+request_id
+spawn_id
+generation
+csr_spki_digest
+node_class
+node_account_id
+node_id
+node_leaf_serial
+node_issuer_serial
+selected_workload_issuer_serial
+root_revocation_epoch
+root_crl_digest
+```
+
+The three serials use canonical non-zero unsigned integer bytes. Node identity fields and node
+leaf/issuer serials come from the AS's verified inbound mTLS chain, never the node request body. The
+selected workload issuer serial comes from the AS's locally selected configured signer. AS service
+leaf/issuer/instance and CP service leaf/issuer/instance are deliberately absent: CP derives the former
+from its authenticated AS peer and each side derives the latter from the authorizing CP connection/local
+server identity. A request may not assert either service identity.
+
+The CP route permits only an `authsvc` service principal. It rejects malformed/noncanonical serials and
+request IDs; requires the node issuer certificate to be configured for the attested class and authorized
+principal grammar; requires both node serials to pass the active issuer/leaf CRLs; requires the selected
+workload issuer serial to name an
+active configured workload signer absent from the active root CRL; and checks that all attested node fields
+match the exact durable reservation. Authorization returns the bounded issuance lease described in
+section 5.5, not a timeless boolean.
 
 The CP confirms from the durable placement query that:
 
@@ -333,10 +360,12 @@ root private key. To publish candidate E+1 it:
 4. atomically changes the row to `active(E+1)` and permits new leases.
 
 The transition to `draining` is the publication fence. No E+1 bytes become externally visible before all
-E signing operations have drained, and no new signing operation starts until every issuing/authorizing
-process has E+1. Failure after the fence leaves issuance blocked. Once a higher-numbered candidate is
-distributed or published, recovery must finish that exact candidate; it may not roll back to E. Multiple
-coordinators serialize on the database row.
+E leases have drained, and no new lease starts until every issuing/authorizing process has E+1. A worker
+that acquired E before the fence may still invoke its local signer after the fence; a remote database
+cannot prevent that instant. Its commit is rejected, its buffer is discarded, and the publisher waits for
+the lease to abort/expire before exposing E+1. Failure after the fence leaves issuance blocked. Once a
+higher-numbered candidate is distributed or published, recovery must finish that exact candidate; it may
+not roll back to E. Multiple coordinators serialize on the database row.
 
 The AS and CP each open their own durable root-issuer CRL checkpoint/refresher before making their internal
 listener ready. Their internal server verifier and client transport compose ordinary chain/profile/leaf-
@@ -349,29 +378,36 @@ issuance even if public service remains available.
 
 1. capture local active epoch E and the authenticated node leaf/issuer; verify the node issuer, local AS
    service issuer, and selected workload issuer are absent from E;
-2. call `AuthorizeSpawnWorkloadSVID(E, digest, spawn, generation, SPKI)`; CP checks its local CRL equals
-   database-active E, revalidates the authenticated AS leaf/issuer, resolves and checks the exact live
-   reservation tuple, and atomically inserts the bound lease;
+2. call `AuthorizeSpawnWorkloadSVID` with section 5.3's complete attestation; CP checks its local CRL equals
+   database-active E, derives and revalidates the authenticated AS leaf/issuer locally, validates every
+   attested serial/identity, resolves and checks the exact live reservation tuple, and atomically inserts
+   the bound lease;
 3. capture the verified CP peer leaf/issuer from that call, then re-read local E and revalidate the node,
    CP peer, local AS service, and selected workload issuers inside the lease boundary;
-4. sign into an in-memory response buffer only; and
-5. call `CommitSpawnWorkloadSVID(lease, E, certificate fingerprint)`. CP atomically requires the same
-   active epoch, unexpired unused lease, same authenticated AS peer, and still-live exact reservation,
-   then consumes the lease. The AS re-reads local E and all four issuer checks once more before returning
-   the buffered certificate.
+4. sign into a private in-memory candidate buffer only;
+5. re-read local E and revalidate the node, CP peer, local AS service, and selected workload issuers; and
+6. call `CommitSpawnWorkloadSVID(lease, E, certificate fingerprint)`. CP atomically requires the same
+   active epoch, unexpired unused lease, same locally derived authenticated AS peer, still-live exact
+   reservation, and matching bound attestation, then consumes the lease. Successful commit is the issuance
+   linearization point; the AS may then return the candidate to the node.
 
 Any epoch/digest change, draining state, lease expiry, peer change, reservation change, or revocation
-before successful commit causes the AS to zero/discard the buffered certificate and return retryable
-unavailable; no certificate bytes reach the caller. An operation committed before the publication fence
-linearizes in E. An operation overlapping the fence either committed before it or observes the changed
-epoch and returns no certificate. `defer` aborts an uncommitted lease; expiry handles AS crashes.
+before successful commit causes the AS to zero/discard the candidate and return retryable unavailable; no
+certificate bytes reach the caller. A signed candidate that never commits is explicitly **not a Spawnery
+credential**: it is never returned, persisted, cached, published, or counted/audited as issued, and its
+serial grants no authority. Signer invocation is therefore not the security boundary. An operation whose
+commit precedes the publication fence linearizes in E and may return while overlapping the fence; an
+operation whose commit follows the fence is rejected and returns no credential. `defer` aborts an
+uncommitted lease; expiry handles AS crashes.
 
 A deterministic adversarial test pauses before and after every boundary above: AS epoch capture, each
 issuer check, CP TLS verification, CP epoch read, placement query, lease insert/return, CP-peer capture,
-signer invocation, buffered signature, commit request/transaction, final AS epoch read, and handler return.
-It attempts publication at each pause. The only allowed outcomes are a certificate committed entirely in
-E before the fence or no returned certificate followed by retry in E+1. Tests also cover publisher crash
-at every four-step publication boundary, lease expiry, AS crash, and two competing publishers.
+signer invocation, buffered candidate, final AS revalidation, commit request/transaction, and handler
+return. It attempts publication at each pause. A signer invocation after the fence is an expected adversary
+case; its commit must fail and its candidate must remain unobservable. The only credential outcomes are a
+credential committed in E before the fence or no returned credential followed by retry in E+1. Tests
+also cover publisher crash at every four-step publication boundary, lease expiry, AS crash, and two
+competing publishers.
 
 The epoch store, publication coordinator, AS/CP readiness, socket eviction, and lease gate land before the
 workload signer or either issuance RPC is enabled.
@@ -907,8 +943,9 @@ expiry.
 - AS issuance requests and outcomes by `initial|renewal` and bounded reason, plus CP-authorization latency.
 - CP confirmation allow/deny counts by bounded reason (`unknown`, `stale-generation`, `wrong-node`,
   `wrong-state`, `unavailable`).
-- Root-revocation epoch/state, active issuance leases, lease expiry/abort, publisher drain duration, and
-  buffered-certificate discard count.
+- Root-revocation epoch/state, active issuance leases, lease expiry/abort, publisher drain duration,
+  signer invocation/candidate count, successful credential commit/return count, and discarded-uncommitted
+  candidate count. Discarded candidates are never included in issued-credential metrics.
 - Control-mTLS activation state, capable/acknowledged/expired attachment leases, and per-node scheduling
   ineligibility reason.
 - Node workload SVID seconds-to-expiry, rotation attempts/outcomes, `STALE`/`EXPIRED` counts, and mTLS
@@ -938,17 +975,22 @@ bodies, authorization headers, model keys, GitHub tokens, or request bodies carr
 - Reject wrong trust domain, escaped or non-canonical path segments, zero/leading-zero generation,
   duplicate URI SAN, DNS/IP SAN, CA leaf, wrong EKU, wrong key usage, expired/not-yet-valid leaf, revoked
   leaf, revoked issuer, CRL rollback, and a CSR carrying identity extensions.
-- Prove AS ignores/has no request fields for node identity and derives them from mTLS context.
+- Prove the node-to-AS issuance request has no node identity/serial fields and AS derives them from mTLS;
+  prove the resulting AS-to-CP attestation contains the exact required fields from section 5.3 and no
+  caller-asserted AS-service or CP identity fields.
 - Prove CP denies an AS request for the wrong node/class/account, stale generation, missing reservation,
-  suspended/deleted spawn, and non-AS caller. Prove AS signs nothing after denial or timeout.
+  suspended/deleted spawn, and non-AS caller. Prove denial/timeout returns no committed or returned
+  credential; a denial received before local candidate generation does not invoke the signer.
 - Start AS and CP with fresh durable root-issuer CRL checkpoints; revoke the node issuer before AS entry,
   revoke the AS service issuer before CP entry, revoke either on an established pooled connection, and
   expire the CRL at each pre-query/pre-sign pause. Separately revoke the selected workload intermediate
-  after CP approval but before signing. Every case leaves the workload signer untouched; peer cases also
-  evict the matching socket, and pre-CP cases leave the placement query untouched.
+  after CP approval. Every case returns no committed credential; a race after local signer invocation
+  discards the uncommitted candidate. Peer cases also evict the matching socket, and pre-CP cases leave the
+  placement query untouched.
 - Run the section 5.5 publication adversary at every authorization/sign/commit boundary. Assert one
-  linearization: committed-before-fence E certificate or zero returned certificate and retry under E+1;
-  never a certificate signed after the fence. Crash/restart the publisher, AS, and CP with live leases.
+  linearization: committed-before-fence E credential or zero returned credential and retry under E+1.
+  Permit and count post-fence signer invocation only when commit rejects and the candidate stays
+  unobservable. Crash/restart the publisher, AS, and CP with live leases.
 - Prove the node independently rejects an AS response for a different exact principal.
 - Prove the AS public listener has no issuance route and its internal route rejects anonymous, CP/AS
   services, workload, malformed-node, and wrong-role principals before the signer is called.
@@ -1018,7 +1060,7 @@ The prod-stack VM is load-bearing. Against the real runsc/CRI stack it must:
 6. apply fresh node/workload leaf CRLs and a root issuer CRL while HTTP/2 control and event connections are
    live, proving socket eviction and reauthentication;
 7. race root-CRL publication at every CP-authorization/AS-sign lease boundary, proving each attempt either
-   committed before the fence or returns no certificate and retries under the new epoch;
+   committed before the fence or returns no credential and retries under the new epoch;
 8. exercise dormant activation with old+new nodes, prove all starts remain closed until exact capability
    and inventory acknowledgment, then prove old-node reconnect cannot downgrade or reopen a gate;
 9. stage a next-issuer node leaf, distribute trust to live sidecars, restart the spawnlet, and prove CP, AS,
@@ -1090,8 +1132,9 @@ isolated worktrees only after their declared gates land.
   not depend on `scheduler.inflight`; every lifecycle writer is fenced by exact generation and reservation
   tuple, so a delayed N result cannot mutate N+1.
 - Root-CRL publication is linearized by the durable draining epoch and single-use issuance lease across CP
-  authorization, buffered AS signing, and commit. An epoch change returns no certificate; only the fenced
-  coordinator can publish higher CRL bytes.
+  authorization, buffered AS signing, and commit/return. A fence or epoch change before commit returns no
+  credential; a successful pre-fence commit is the issuance linearization point even if its response
+  overlaps the fence. Only the fenced coordinator can publish higher CRL bytes.
 - Requested one-year validity is capped at the earliest chain expiry and rotates 30 days early;
   current/next workload intermediates overlap without a root change; repeated failure surfaces `STALE`;
   expiry prevents control and refuses re-adoption.
