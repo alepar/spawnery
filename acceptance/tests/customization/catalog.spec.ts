@@ -12,7 +12,7 @@ import { test, expect } from "../../src/harness/test";
 import { CatalogCli, ProfileCli, buildSkillTar } from "../../src/drivers/customization";
 
 test(
-  "catalog: create -> list -> show -> update -> set-listing -> delete",
+  "catalog: creator manages unlisted entry; publishing requires admin",
   { tag: "@mutating" },
   async ({ identity, api, cli, ns }) => {
     const catalogCli = new CatalogCli(cli.configuration(), identity);
@@ -33,7 +33,7 @@ test(
       expect(oracle.name).toBe(name);
       expect(oracle.kind).toBe("PROFILE_ENTRY_KIND_SKILL");
       expect(oracle.description).toBe("acceptance catalog entry");
-      expect(oracle.listed).toBe(true); // catalog entries are public until explicitly delisted
+      expect(oracle.listed).toBe(false); // new entries are owner-visible but unlisted by default
 
       // --- list ---
       const listOut = await catalogCli.list();
@@ -53,11 +53,15 @@ test(
       expect(oracle.description).toBe(newDescription);
 
       // --- set-listing ---
-      await catalogCli.setListing(catalogId, true);
+      // A fresh entry is already unlisted; repeating the operation is intentionally idempotent.
+      await expect(catalogCli.setListing(catalogId, false)).resolves.toBeUndefined();
       oracle = await api.getCatalogEntry(catalogId);
-      expect(oracle.listed).toBe(true);
+      expect(oracle.listed).toBe(false);
 
-      await catalogCli.setListing(catalogId, false);
+      // Publishing is admin-only. The creator identity used by acceptance is deliberately non-admin.
+      await expect(catalogCli.setListing(catalogId, true)).rejects.toThrow(
+        /spawnctl catalog set-listing \S+ --listed=true exited 1[\s\S]*permission_denied: listing an entry requires admin/,
+      );
       oracle = await api.getCatalogEntry(catalogId);
       expect(oracle.listed).toBe(false);
 
