@@ -762,6 +762,8 @@ func skillInstallReportProto(spawnID string, gen uint64, env *spec.ApplyReport, 
 
 func skillInstallOutcomeProto(env *spec.ApplyReport) nodev1.SkillInstallOutcome {
 	if env == nil {
+		// Unreachable from startSpawn: forcedApplyReport normalizes env to non-nil before the
+		// send site (see below). Kept defensive for any other caller this function gains.
 		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
 	}
 	switch env.Outcome {
@@ -774,8 +776,27 @@ func skillInstallOutcomeProto(env *spec.ApplyReport) nodev1.SkillInstallOutcome 
 	case spec.OutcomeError:
 		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_ERROR
 	default:
-		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_UNSPECIFIED
+		// A report we cannot interpret the envelope verdict of is a warning, not "unspecified" —
+		// the per-skill entries it carries are still propagated verbatim (see
+		// skillInstallReportProto), and the CP must never be handed a verdict-less report.
+		return nodev1.SkillInstallOutcome_SKILL_INSTALL_OUTCOME_WARN
 	}
+}
+
+// forcedApplyReport synthesizes an explicit envelope for every path that reaches the CP with no
+// real apply-report: a terminal failure reports outcome=error with the real reason; a tolerated
+// (no-bundle) missing report reports outcome=warn. Absence of a signal is a bug, not a state
+// (sp-mwco.2.12/.2.13) — skillInstallOutcomeProto(nil) would read UNSPECIFIED, which the CP must
+// never receive.
+func forcedApplyReport(manifest spec.Manifest, fatalErr error, entries []spawnlet.InstallEntry) (*spec.ApplyReport, []spawnlet.InstallEntry) {
+	outcome, reason := spec.OutcomeWarn, "apply-report.json missing at deadline"
+	if fatalErr != nil {
+		outcome, reason = spec.OutcomeError, fatalErr.Error()
+	}
+	if len(entries) == 0 {
+		entries = spawnlet.SyntheticUnknownEntries(manifest, reason)
+	}
+	return &spec.ApplyReport{Schema: 1, Outcome: outcome, Error: reason}, entries
 }
 
 // skillInstallStatusProto maps an InstallEntry.Status string (either a spec.Status value or
@@ -1076,16 +1097,15 @@ func (a *attacher) startSpawn(ctx context.Context, st *nodev1.StartSpawn) {
 			// report is sitting right there but cannot be read/parsed. Either way the wait ended
 			// EARLY with a real reason — surface that reason instead of falling through to a
 			// generic "skill install report" wrapper (which would read like a plain missing-report
-			// timeout). Force outcome=ERROR on the wire: skillInstallOutcomeProto(nil) would
-			// otherwise yield UNSPECIFIED, and a terminal failure must never leave the CP with
-			// "unspecified" — that is exactly the ambiguity this task exists to close.
+			// timeout).
 			fatalErr = awaitErr
-			entries = spawnlet.SyntheticUnknownEntries(manifest, awaitErr.Error())
-			env = &spec.ApplyReport{Schema: 1, Outcome: spec.OutcomeError, Error: awaitErr.Error()}
 		case awaitErr != nil:
 			fatalErr = fmt.Errorf("skill install report: %w", awaitErr) // ctx cancelled/expired
 		default:
 			fatalErr, entries = spawnlet.EvaluateApplyReport(manifest, env)
+		}
+		if env == nil {
+			env, entries = forcedApplyReport(manifest, fatalErr, entries)
 		}
 		_ = a.send(&nodev1.NodeMessage{Msg: &nodev1.NodeMessage_SkillInstallReport{
 			SkillInstallReport: skillInstallReportProto(st.SpawnId, st.Generation, env, entries),

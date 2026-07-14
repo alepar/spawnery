@@ -286,9 +286,10 @@ func (ArtifactTarget) EnumDescriptor() ([]byte, []int) {
 }
 
 // SkillInstallOutcome mirrors internal/agentinstall/spec.Outcome (the apply-report envelope's
-// top-level verdict): ok/warn/bundle_failed/error. UNSPECIFIED covers the "no apply-report ever
-// arrived" case (spawnlet's EvaluateApplyReport still sends entries, just with no envelope-level
-// verdict to report).
+// top-level verdict): ok/warn/bundle_failed/error. UNSPECIFIED is the reserved zero value and is
+// NEVER sent by the node (sp-mwco.2.12/.2.13): a missing apply-report is reported as WARN when
+// tolerated or ERROR when fatal, and an envelope with an unrecognized/empty outcome string is
+// reported as WARN — the node always normalizes to an explicit verdict before sending.
 type SkillInstallOutcome int32
 
 const (
