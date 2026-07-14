@@ -205,15 +205,22 @@ if [ -n "$GREP" ]; then
   exit $rc
 fi
 
-# Pass 1: @noderestart alone. It must run before the ordinary suite because the destructive signer
-# revocation project is intentionally the final operation against this disposable VM.
+# Pass 1: @noderestart alone in chromium. It must run before ordinary coverage and before the
+# destructive signer-revocation project mutates this disposable VM.
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report-noderestart" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results-noderestart"
-npm run test:accept -- --retries=0 --workers=1 -g "@noderestart" && rc=0 || rc=$?
+npm run test:accept -- --retries=0 --workers=1 --project=chromium -g "@noderestart" && rc=0 || rc=$?
 
-# Pass 2: everything else, still serially. Run even if restart failed so the auth evidence is not hidden.
+# Pass 2: ordinary chromium coverage, explicitly excluding restart. Run even if restart failed so
+# independent acceptance evidence is not hidden.
 export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results"
-npm run test:accept -- --retries=0 --workers=1 --grep-invert "@noderestart" && arc=0 || arc=$?
+npm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart" && arc=0 || arc=$?
 [ "$rc" = 0 ] && rc=$arc
 
-log "acceptance suite exit=$rc  (reports: $RD/artifacts/pw-report-noderestart, $RD/artifacts/pw-report)"
+# Pass 3: destructive root-artifact coverage last. --no-deps prevents Playwright from replaying the
+# chromium dependency after destructive state changes while retaining the dependency for other callers.
+export PLAYWRIGHT_HTML_REPORT="$RD/artifacts/pw-report-destructive-root-artifacts" PLAYWRIGHT_OUTPUT_DIR="$RD/artifacts/pw-results-destructive-root-artifacts"
+npm run test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps && drc=0 || drc=$?
+[ "$rc" = 0 ] && rc=$drc
+
+log "acceptance suite exit=$rc  (reports: $RD/artifacts/pw-report-noderestart, $RD/artifacts/pw-report, $RD/artifacts/pw-report-destructive-root-artifacts)"
 exit $rc

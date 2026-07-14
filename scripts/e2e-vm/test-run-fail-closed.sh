@@ -129,4 +129,63 @@ rg -Fq 'export ACC_PRODUCTION_SPA_BUNDLE="$STAGE/web-dist"' "$ROOT/scripts/e2e-v
   exit 1
 }
 
-echo "e2e-vm fresh build failures are fail-closed"
+expected_acceptance_commands=$'npm run test:accept -- --retries=0 --workers=1 --project=chromium -g "@noderestart" && rc=0 || rc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=chromium --grep-invert "@noderestart" && arc=0 || arc=$?\nnpm run test:accept -- --retries=0 --workers=1 --project=destructive-root-artifacts --no-deps && drc=0 || drc=$?'
+actual_acceptance_commands="$(
+  sed -n '/^# Pass 1:/,$p' "$ROOT/scripts/e2e-vm/run.sh" |
+    rg '^npm run test:accept -- '
+)"
+if [ "$actual_acceptance_commands" != "$expected_acceptance_commands" ]; then
+  echo "run.sh acceptance command topology mismatch" >&2
+  printf 'expected:\n%s\nactual:\n%s\n' \
+    "$expected_acceptance_commands" "$actual_acceptance_commands" >&2
+  exit 1
+fi
+
+PLAYWRIGHT="$ROOT/node_modules/.bin/playwright"
+[ -x "$PLAYWRIGHT" ] || {
+  echo "repository-local Playwright CLI is unavailable; run npm ci" >&2
+  exit 1
+}
+
+list_acceptance() {
+  env ACC_LIFECYCLE_APP=test-app ACC_TEST_MODEL=test-model \
+    "$PLAYWRIGHT" test \
+      --config="$ROOT/acceptance/playwright.config.ts" \
+      --list --workers=1 "$@"
+}
+
+list_acceptance --project=chromium -g '@noderestart' >"$TMP/noderestart.list"
+list_acceptance --project=chromium --grep-invert '@noderestart' >"$TMP/ordinary.list"
+list_acceptance --project=destructive-root-artifacts --no-deps >"$TMP/destructive.list"
+
+restart_count="$(rg -c '^  \[chromium\].*@noderestart$' "$TMP/noderestart.list" || true)"
+if [ "$restart_count" -ne 1 ] ||
+    rg -q '\[destructive-root-artifacts\]' "$TMP/noderestart.list"; then
+  echo "restart discovery is not exactly one chromium @noderestart test" >&2
+  cat "$TMP/noderestart.list" >&2
+  exit 1
+fi
+
+rg -q '^  \[chromium\] ›' "$TMP/ordinary.list" || {
+  echo "ordinary discovery contains no chromium tests" >&2
+  cat "$TMP/ordinary.list" >&2
+  exit 1
+}
+if rg -q '@noderestart|\[destructive-root-artifacts\]' "$TMP/ordinary.list"; then
+  echo "ordinary discovery replayed restart or destructive coverage" >&2
+  cat "$TMP/ordinary.list" >&2
+  exit 1
+fi
+
+destructive_count="$(
+  rg -c '^  \[destructive-root-artifacts\] › auth/root-anchored-artifacts\.spec\.ts:' \
+    "$TMP/destructive.list" || true
+)"
+if [ "$destructive_count" -ne 1 ] ||
+    rg -q '\[chromium\]|@noderestart' "$TMP/destructive.list"; then
+  echo "destructive discovery replayed chromium dependencies or lost root-artifact coverage" >&2
+  cat "$TMP/destructive.list" >&2
+  exit 1
+fi
+
+echo "e2e-vm fresh build and acceptance topology are fail-closed"
