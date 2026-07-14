@@ -323,7 +323,7 @@ func TestCPInternalRuntimeRefreshesSignedCRLsAndFailsClosedAtStartup(t *testing.
 	}
 }
 
-func TestCPInternalClientPresentsCPAndRequiresAuthServiceRole(t *testing.T) {
+func TestCPInternalClientPresentsCPRequiresAuthServiceRoleAndNegotiatesHTTP2(t *testing.T) {
 	cfg, root, serviceIssuer, _ := writeCPInternalFixture(t)
 	runtime, err := loadInternalRuntime(cfg, time.Now)
 	if err != nil {
@@ -333,6 +333,9 @@ func TestCPInternalClientPresentsCPAndRequiresAuthServiceRole(t *testing.T) {
 	serve := func(role string, reached *bool) *httptest.Server {
 		return newCPPeerTLSServer(t, cfg, root, serviceIssuer, runtime, role, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			*reached = true
+			if r.ProtoMajor != 2 {
+				t.Errorf("protocol = %s, want HTTP/2", r.Proto)
+			}
 			if len(r.TLS.PeerCertificates) == 0 || len(r.TLS.PeerCertificates[0].URIs) != 1 || r.TLS.PeerCertificates[0].URIs[0].Path != "/service/cp/cp-1" {
 				t.Errorf("CP client identity was not presented: %+v", r.TLS.PeerCertificates)
 			}
@@ -483,6 +486,7 @@ func newCPPeerTLSServer(t *testing.T, cfg CP, root, serviceIssuer *pki.CA, runti
 	}
 	server := httptest.NewUnstartedServer(handler)
 	server.TLS = serverTLS
+	server.EnableHTTP2 = true
 	server.StartTLS()
 	t.Cleanup(server.Close)
 	return server
