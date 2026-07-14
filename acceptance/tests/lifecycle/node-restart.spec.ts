@@ -5,7 +5,7 @@
  *   create a spawn on the seeded github-slot app → write a marker file into its mount AND start a
  *   tmux-supervised long-running process inside the agent → prove in-agent git-over-HTTPS works (baseline) →
  *   RESTART THE NODE (ACC_NODE_RESTART_CMD) → the spawn returns to ACTIVE with NO operator action →
- *   the marker file is still there, the same pane PID/start time/cmdline is STILL ALIVE, and
+ *   the marker file is still there, the same pane ID/PID/start time/cmdline is STILL ALIVE, and
  *   git-over-HTTPS still works (the per-spawn MITM CA survived the restart — sp-2tx8.3.5).
  *
  * TAG @noderestart: restarting the node disturbs every OTHER spawn on the box, so this scenario runs in its
@@ -61,17 +61,27 @@ test.describe("node restart", () => {
         "-c",
         `printf %s '${marker}' > ${mountPath}/acc-restart-marker.txt`,
       ]);
-      await execOrThrow(cfg, ctx.identity, id, [
-        "tmux",
-        "new-session",
-        "-d",
-        "-s",
-        "spawn",
-        "--",
-        "sleep",
-        "900",
-      ]);
       await execOrThrow(cfg, ctx.identity, id, ["tmux", "has-session", "-t", "spawn"]);
+
+      const probeWindow = marker.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+      const paneId = (
+        await execOrThrow(cfg, ctx.identity, id, [
+          "tmux",
+          "new-window",
+          "-d",
+          "-P",
+          "-F",
+          "#{pane_id}",
+          "-t",
+          "spawn",
+          "-n",
+          probeWindow,
+          "--",
+          "sleep",
+          "900",
+        ])
+      ).stdout.trim();
+      expect(paneId, "the tmux probe window must report a pane ID").toMatch(/^%\d+$/);
 
       const pid = (
         await execOrThrow(cfg, ctx.identity, id, [
@@ -79,7 +89,7 @@ test.describe("node restart", () => {
           "display-message",
           "-p",
           "-t",
-          "spawn:0.0",
+          paneId,
           "#{pane_pid}",
         ])
       ).stdout.trim();
@@ -124,13 +134,25 @@ test.describe("node restart", () => {
       const restored = await execOrThrow(cfg, ctx.identity, id, ["cat", `${mountPath}/acc-restart-marker.txt`]);
       expect(restored.stdout.trim()).toBe(marker);
       await execOrThrow(cfg, ctx.identity, id, ["tmux", "has-session", "-t", "spawn"]);
+      const restoredPaneId = (
+        await execOrThrow(cfg, ctx.identity, id, [
+          "tmux",
+          "display-message",
+          "-p",
+          "-t",
+          paneId,
+          "#{pane_id}",
+        ])
+      ).stdout.trim();
+      expect(restoredPaneId, "the tmux pane ID changed across restart").toBe(paneId);
+
       const restoredPid = (
         await execOrThrow(cfg, ctx.identity, id, [
           "tmux",
           "display-message",
           "-p",
           "-t",
-          "spawn:0.0",
+          paneId,
           "#{pane_pid}",
         ])
       ).stdout.trim();
