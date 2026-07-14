@@ -443,21 +443,9 @@ for p in "$PAYLOAD"/env/profile.*.env; do [ -f "$p" ] && sudo cp -f "$p" "/etc/s
 # already listens on (Caddy binds all interfaces) — so it doubles as "the VM's IP" for in-pod DNS.
 GITHUB_DNS_ADDR="$(printf '%s' "$POD_CIDR" | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3".1"}')"
 
-# ---- GETTOKEN_LISTEN_IP: the same bridge-gateway address, for the node's per-spawn control listener ----
-# The GitHub control server (per-spawn CA + GetToken) has two lanes (internal/spawnlet/manager.go:1348):
-#   - userns-remap  -> a UNIX socket bind-mounted into the sidecar (the Docker dev lane; `just node`)
-#   - everything else (THIS lane: CRI/runsc) -> TCP, and the node MUST be told which IP to bind.
-# Without GETTOKEN_LISTEN_IP the code falls back to binding a PodIP-derived address — which the node
-# cannot bind, because a pod IP lives in the POD's netns, not the host's. That is a hard failure:
-#   "github control server tcp 10.234.0.2:8082: listen: bind: cannot assign requested address"
-# and every spawn dies at setup-network. The manager's own comment says operators must set this for TCP
-# lanes; nothing did, because the control server had never actually RUN on a CRI lane until sp-wwtc
-# switched the mint lane on.
-# The bridge gateway is the right address: bindable by the node (it is on this host) and reachable from
-# every pod via its default route — the same two properties dnsmasq needs, which is why it is the same IP.
-log "wiring GETTOKEN_LISTEN_IP=${GITHUB_DNS_ADDR} (node's per-spawn control listener; TCP lane)…"
-sudo mkdir -p /etc/spawnery/env.d
-printf 'GETTOKEN_LISTEN_IP=%s\n' "$GITHUB_DNS_ADDR" | sudo tee /etc/spawnery/env.d/podnet.env >/dev/null
+# (The node's per-spawn GetToken/CA listener used to be bound on this same bridge address. It is gone:
+# sp-2tx8.9 inverted the channel — the node now PUSHES the CA + token into the sidecar's own control
+# listener and binds nothing. GITHUB_DNS_ADDR below is still needed for dnsmasq.)
 
 log "installing dnsmasq (github.com/codeload.github.com -> ${GITHUB_DNS_ADDR}, else forward to ${POD_DNS})…"
 sudo mkdir -p /etc/dnsmasq.d
